@@ -22,7 +22,8 @@ add_executable(aleph_tests
     containers/test_flat_set.cpp
     containers/test_dense_index.cpp
     threads/test_pool.cpp
-    threads/test_mpmc.cpp)
+    threads/test_mpmc.cpp
+    threads/test_work_stealing.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
