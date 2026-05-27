@@ -14,3 +14,13 @@ aleph_iso_test(math       aleph_math)
 aleph_iso_test(alloc      aleph_alloc)
 aleph_iso_test(containers aleph_containers)
 aleph_iso_test(io         aleph_io)
+
+aleph_iso_test(scene          aleph_scene)
+aleph_iso_test(render_common  aleph_render_common)
+aleph_iso_test(render_rt      aleph_render_rt)
+aleph_iso_test(render_sw      aleph_render_sw)
+
+if(ALEPH_HAVE_SDL2)
+    aleph_iso_test(window aleph_window)
+    aleph_iso_test(editor aleph_editor)
+endif()
