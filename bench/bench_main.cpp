@@ -5,6 +5,9 @@
 import aleph.math;
 import aleph.alloc;
 import aleph.threads;
+import aleph.scene;
+import aleph.render.rt;
+import aleph.render.common;
 
 using aleph::math::Vec3;
 using aleph::math::Vec4;
@@ -85,6 +88,67 @@ int main() {
                 (void)q.try_pop(out);
             }
             return out;
+        });
+    }
+
+    // hit_sphere — target <= 12 cycles
+    {
+        aleph::scene::SphereSoA s;
+        aleph::scene::sphere_append(s, aleph::math::Vec3{0, 0, 0}, 1.0f,
+            aleph::scene::MaterialHandle{aleph::scene::MaterialKind::Lambertian, 0});
+        aleph::math::Ray r{aleph::math::Vec3{0, 0, -5}, aleph::math::Vec3{0, 0, 1}};
+        aleph_bench::bench("hit_sphere (single)", [&](std::uint64_t iters) {
+            std::uint64_t sink = 0;
+            for (std::uint64_t i = 0; i < iters; ++i) {
+                auto h = aleph::scene::bench_hit_sphere(s, 0, r, 0.001f, 1e9f);
+                if (h) sink ^= static_cast<std::uint64_t>(h->t * 1000.0f);
+            }
+            return sink;
+        });
+    }
+
+    // hit_quad — target <= 25 cycles
+    {
+        aleph::scene::QuadSoA q;
+        aleph::scene::quad_append(q, aleph::math::Vec3{-1, 0, 0},
+            aleph::math::Vec3{2, 0, 0}, aleph::math::Vec3{0, 0, 2},
+            aleph::scene::MaterialHandle{aleph::scene::MaterialKind::Lambertian, 0});
+        aleph::math::Ray r{aleph::math::Vec3{0, 5, 1}, aleph::math::Vec3{0, -1, 0}};
+        aleph_bench::bench("hit_quad (single)", [&](std::uint64_t iters) {
+            std::uint64_t sink = 0;
+            for (std::uint64_t i = 0; i < iters; ++i) {
+                auto h = aleph::scene::bench_hit_quad(q, 0, r, 0.001f, 1e9f);
+                if (h) sink ^= static_cast<std::uint64_t>(h->t * 1000.0f);
+            }
+            return sink;
+        });
+    }
+
+    // BVH traversal (100 items, miss) — target <= 200 cycles
+    {
+        aleph::scene::Scene s;
+        const auto m = aleph::scene::scene_add_lambertian(s, aleph::math::Vec3{0.5f, 0.5f, 0.5f});
+        aleph::render::common::Pcg32 rng(1, 1);
+        for (int i = 0; i < 100; ++i) {
+            aleph::scene::scene_add_sphere(s,
+                aleph::math::Vec3{
+                    rng.float01() * 10.0f - 5.0f,
+                    rng.float01() * 10.0f - 5.0f,
+                    rng.float01() * 10.0f - 5.0f},
+                0.05f, m);
+        }
+        alignas(16) static unsigned char scratch[65536];
+        aleph::alloc::Arena arena{scratch, sizeof(scratch)};
+        aleph::scene::scene_build_bvh(s, arena);
+        aleph::math::Ray r_miss{aleph::math::Vec3{100, 100, 100},
+                                  aleph::math::Vec3{1, 0, 0}};
+        aleph_bench::bench("BVH traversal (100 items, miss)", [&](std::uint64_t iters) {
+            std::uint64_t sink = 0;
+            for (std::uint64_t i = 0; i < iters; ++i) {
+                auto h = aleph::scene::hit(s, r_miss, 0.001f, 1e9f);
+                sink ^= h.has_value();
+            }
+            return sink;
         });
     }
 

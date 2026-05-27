@@ -139,6 +139,19 @@ hit_tri(const TriSoA& t, std::uint32_t idx, aleph::math::Ray r,
 
 }  // namespace detail
 
+// Bench wrappers — internal `detail::hit_sphere/quad` exposed for benchmarking.
+[[nodiscard]] inline std::optional<HitRecord>
+bench_hit_sphere(const SphereSoA& s, std::uint32_t i, aleph::math::Ray r,
+                  aleph::math::f32 tmin, aleph::math::f32 tmax) noexcept {
+    return detail::hit_sphere(s, i, r, tmin, tmax);
+}
+
+[[nodiscard]] inline std::optional<HitRecord>
+bench_hit_quad(const QuadSoA& q, std::uint32_t i, aleph::math::Ray r,
+                aleph::math::f32 tmin, aleph::math::f32 tmax) noexcept {
+    return detail::hit_quad(q, i, r, tmin, tmax);
+}
+
 [[nodiscard]] inline std::optional<HitRecord>
 hit(const Scene& s, aleph::math::Ray r,
      aleph::math::f32 t_min, aleph::math::f32 t_max) noexcept {
