@@ -4,7 +4,8 @@ target_sources(aleph_math
         aleph.math.cppm
         aleph.math-types.cppm
         aleph.math-concepts.cppm
-        aleph.math-vec.cppm)
+        aleph.math-vec.cppm
+        aleph.math-mat.cppm)
 target_link_libraries(aleph_math
     PUBLIC  aleph_cpu
     PRIVATE aleph_flags_isa)
