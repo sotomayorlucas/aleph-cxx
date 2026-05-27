@@ -27,7 +27,8 @@ add_executable(aleph_tests
     io/test_mmap.cpp
     io/test_ppm.cpp
     io/test_obj.cpp
-    scene/test_handle32.cpp)
+    scene/test_handle32.cpp
+    scene/test_sphere_soa.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
