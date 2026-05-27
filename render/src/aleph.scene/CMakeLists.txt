@@ -1,1 +1,8 @@
-# placeholder — populated in Task 2
+add_library(aleph_scene)
+target_sources(aleph_scene
+    PUBLIC FILE_SET CXX_MODULES FILES
+        aleph.scene.cppm
+        aleph.scene-handle32.cppm)
+target_link_libraries(aleph_scene
+    PUBLIC  aleph_math aleph_containers aleph_alloc
+    PRIVATE aleph_flags_isa)
