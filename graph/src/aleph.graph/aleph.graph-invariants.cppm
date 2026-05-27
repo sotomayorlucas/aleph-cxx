@@ -149,4 +149,88 @@ check_transform_acyclic(const Graph& g) noexcept {
     return {};
 }
 
+// ── Invariant 6: CameraExclusive ────────────────────────────────────
+inline std::expected<void, InvariantError>
+check_camera_exclusive(const Graph& g) noexcept {
+    std::size_t n = 0;
+    for (auto [nid, node] : g.nodes()) {
+        if (aleph::types::kind_of(node) == aleph::types::NodeKind::Camera) ++n;
+    }
+    return (n == 1) ? std::expected<void, InvariantError>{}
+                    : std::unexpected(InvariantError::CameraExclusive);
+}
+
+// ── Invariant 7: MaterialReferenced ─────────────────────────────────
+inline std::expected<void, InvariantError>
+check_material_referenced(const Graph& g) noexcept {
+    for (auto [mid, mnode] : g.nodes()) {
+        if (aleph::types::kind_of(mnode) != aleph::types::NodeKind::Mesh) continue;
+        std::size_t mat_refs = 0;
+        for (auto [eid, e] : g.edges()) {
+            if (e.kind != aleph::types::EdgeKind::References) continue;
+            if (e.src != mid) continue;
+            const aleph::types::Node* dn = g.node(e.dst);
+            if (dn && aleph::types::kind_of(*dn) == aleph::types::NodeKind::Material) ++mat_refs;
+        }
+        if (mat_refs != 1) return std::unexpected(InvariantError::MaterialReferenced);
+    }
+    return {};
+}
+
+// ── Invariant 8: UniqueIds ──────────────────────────────────────────
+// OrderedMap key uniqueness already enforces this. Vacuous PASS.
+inline std::expected<void, InvariantError>
+check_unique_ids(const Graph&) noexcept { return {}; }
+
+// ── Invariant 9: ContainsAntireflexive ──────────────────────────────
+// No pair (a, b) has BOTH Contains(a, b) AND Contains(b, a). Use
+// SmallVector to collect pairs (avoids std::vector in module body).
+inline std::expected<void, InvariantError>
+check_contains_antireflexive(const Graph& g) noexcept {
+    struct Pair { aleph::types::NodeId a; aleph::types::NodeId b; };
+    aleph::containers::SmallVector<Pair, 128> pairs;
+    for (auto [eid, e] : g.edges()) {
+        if (e.kind == aleph::types::EdgeKind::Contains) {
+            pairs.push_back(Pair{e.src, e.dst});
+        }
+    }
+    for (std::size_t i = 0; i < pairs.size(); ++i) {
+        const auto p = pairs[i];
+        for (std::size_t j = 0; j < pairs.size(); ++j) {
+            const auto q = pairs[j];
+            if (p.a == q.b && p.b == q.a) {
+                return std::unexpected(InvariantError::ContainsAntireflexive);
+            }
+        }
+    }
+    return {};
+}
+
+// ── Invariant 10: BoundedDegree ─────────────────────────────────────
+inline std::expected<void, InvariantError>
+check_bounded_degree(const Graph& g, std::size_t limit) noexcept {
+    for (auto [nid, n] : g.nodes()) {
+        if (g.in_degree(nid) > limit) {
+            return std::unexpected(InvariantError::BoundedDegree);
+        }
+    }
+    return {};
+}
+
+// ── validate_all: runs every check in canonical order ───────────────
+inline std::expected<void, InvariantError>
+validate_all(const Graph& g, std::size_t max_in_degree) noexcept {
+    if (auto r = check_typed_nodes(g);            !r.has_value()) return r;
+    if (auto r = check_typed_edges(g);            !r.has_value()) return r;
+    if (auto r = check_edge_endpoints_exist(g);   !r.has_value()) return r;
+    if (auto r = check_edge_type_compat(g);       !r.has_value()) return r;
+    if (auto r = check_transform_acyclic(g);      !r.has_value()) return r;
+    if (auto r = check_camera_exclusive(g);       !r.has_value()) return r;
+    if (auto r = check_material_referenced(g);    !r.has_value()) return r;
+    if (auto r = check_unique_ids(g);             !r.has_value()) return r;
+    if (auto r = check_contains_antireflexive(g); !r.has_value()) return r;
+    if (auto r = check_bounded_degree(g, max_in_degree); !r.has_value()) return r;
+    return {};
+}
+
 }  // namespace aleph::graph

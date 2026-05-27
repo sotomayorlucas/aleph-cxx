@@ -29,6 +29,7 @@ add_executable(aleph_tests
     graph/test_graph_basic.cpp
     graph/test_graph_edges.cpp
     graph/test_invariants_1_5.cpp
+    graph/test_invariants_6_10.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
