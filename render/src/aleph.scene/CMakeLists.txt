@@ -7,7 +7,8 @@ target_sources(aleph_scene
         aleph.scene-quad_soa.cppm
         aleph.scene-tri_soa.cppm
         aleph.scene-material_soa.cppm
-        aleph.scene-scene.cppm)
+        aleph.scene-scene.cppm
+        aleph.scene-bvh.cppm)
 target_link_libraries(aleph_scene
     PUBLIC  aleph_math aleph_containers aleph_alloc aleph_io
     PRIVATE aleph_flags_isa)

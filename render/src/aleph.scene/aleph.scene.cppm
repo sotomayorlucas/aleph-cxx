@@ -5,3 +5,4 @@ export import :quad_soa;
 export import :tri_soa;
 export import :material_soa;
 export import :scene;
+export import :bvh;

@@ -14,6 +14,18 @@ import :material_soa;
 
 export namespace aleph::scene {
 
+// BvhNode lives here (not in :bvh) to avoid circular import:
+// :bvh imports :scene for primitive_bbox, so BvhNode must be visible in :scene.
+struct BvhNode {
+    aleph::math::Aabb bbox;
+    Handle32          left;
+    Handle32          right;
+};
+
+struct BvhNodeArr {
+    std::vector<BvhNode> nodes;
+};
+
 struct Scene {
     SphereSoA spheres;
     QuadSoA   quads;
@@ -25,6 +37,7 @@ struct Scene {
     TexturedLambertianSoA   tex_lamb;
     std::vector<aleph::io::Image> textures;
     std::vector<Handle32>   lights;
+    BvhNodeArr              bvh;
 };
 
 inline MaterialHandle scene_add_lambertian(Scene& s, aleph::math::Vec3 albedo) {
