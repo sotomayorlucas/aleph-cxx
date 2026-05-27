@@ -7,3 +7,4 @@ export import :quat;
 export import :rotor;
 export import :bivector;
 export import :multivector;
+export import :dual;
