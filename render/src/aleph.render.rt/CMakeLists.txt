@@ -4,7 +4,8 @@ target_sources(aleph_render_rt
         aleph.render.rt.cppm
         aleph.render.rt-sampling.cppm
         aleph.render.rt-material.cppm
-        aleph.render.rt-integrator.cppm)
+        aleph.render.rt-integrator.cppm
+        aleph.render.rt-path_trace.cppm)
 target_link_libraries(aleph_render_rt
     PUBLIC  aleph_scene aleph_render_common aleph_math aleph_threads
     PRIVATE aleph_flags_isa)

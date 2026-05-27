@@ -38,7 +38,8 @@ add_executable(aleph_tests
     render/test_film.cpp
     render/test_tonemap.cpp
     render/test_material_scatter.cpp
-    render/test_ray_color.cpp)
+    render/test_ray_color.cpp
+    render/test_path_trace.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
