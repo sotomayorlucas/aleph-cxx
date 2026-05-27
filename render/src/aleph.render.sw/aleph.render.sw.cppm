@@ -3,3 +3,4 @@ export import :clip;
 export import :scene_rt;
 export import :span_buffer;
 export import :rast_scan;
+export import :lightmap;

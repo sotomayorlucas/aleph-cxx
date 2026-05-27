@@ -42,7 +42,8 @@ add_executable(aleph_tests
     render/test_path_trace.cpp
     render/test_sw_clip.cpp
     render/test_sw_span_buffer.cpp
-    render/test_sw_rasterize.cpp)
+    render/test_sw_rasterize.cpp
+    render/test_sw_lightmap.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
