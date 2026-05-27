@@ -12,6 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(cmake/aleph_flags.cmake)
 
 add_subdirectory(foundation)
+add_subdirectory(graph)
 
 # ─── SDL2 detection ─────────────────────────────────────────────────
 find_package(SDL2 QUIET)
