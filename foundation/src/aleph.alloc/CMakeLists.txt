@@ -4,7 +4,8 @@ target_sources(aleph_alloc
         aleph.alloc.cppm
         aleph.alloc-arena.cppm
         aleph.alloc-frame.cppm
-        aleph.alloc-slab.cppm)
+        aleph.alloc-slab.cppm
+        aleph.alloc-freelist.cppm)
 target_link_libraries(aleph_alloc
     PUBLIC  aleph_cpu
     PRIVATE aleph_flags_isa)

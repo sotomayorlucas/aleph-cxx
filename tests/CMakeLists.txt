@@ -15,7 +15,8 @@ add_executable(aleph_tests
     math/test_geom.cpp
     alloc/test_arena.cpp
     alloc/test_frame.cpp
-    alloc/test_slab.cpp)
+    alloc/test_slab.cpp
+    alloc/test_freelist.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
