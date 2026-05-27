@@ -2,54 +2,48 @@ module;
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include <cstdlib>
 #include <new>
+#include <type_traits>
 
 export module aleph.threads:work_stealing;
 
 export namespace aleph::threads {
 
-// Chase-Lev work-stealing deque. Owner thread pushes/pops at the
-// "bottom"; thieves steal from the "top". Lock-free.
+// Chase-Lev work-stealing deque — bounded variant.
 //
-// Storage grows by doubling. T must be trivially-copyable (sufficient
-// for handle/index payloads used in BVH build).
+// The original grow path had a use-after-free: old buffers were freed while
+// thieves might still be reading them (Chase-Lev correctness requires
+// immortal-epoch retirement, not immediate delete). Rather than implement
+// epoch reclamation in foundation, the deque is bounded to capacity_v entries.
+// 4096 is large enough for BVH build subtree tasks.  push() aborts (not
+// returns an error) on overflow — foundation policy: no exceptions, OOM/overflow
+// is fatal.
 //
-// GCC 16 note: std::vector<T> hits the placement-new module bug for
-// some types. Use ::operator new/delete with raw copies instead —
-// safe because T is constrained to trivially-copyable.
+// T must be trivially-copyable (sufficient for handle/index payloads).
 template<typename T>
-    requires __is_trivially_copyable(T)
 class WorkStealingDeque {
+    static_assert(std::is_trivially_copyable_v<T>,
+                  "WorkStealingDeque requires trivially-copyable T");
 public:
-    WorkStealingDeque() {
-        cap_ = initial_cap;
-        buf_ = static_cast<T*>(::operator new(cap_ * sizeof(T)));
-    }
+    static constexpr std::size_t capacity_v = 4096;   // bounded; aborts on overflow
 
-    ~WorkStealingDeque() {
-        ::operator delete(buf_);
+    WorkStealingDeque() {
+        buf_ = static_cast<T*>(::operator new(sizeof(T) * capacity_v));
     }
+    ~WorkStealingDeque() { ::operator delete(buf_); }
 
     // Non-copyable, non-movable (atomics + raw pointer ownership).
     WorkStealingDeque(const WorkStealingDeque&)            = delete;
     WorkStealingDeque& operator=(const WorkStealingDeque&) = delete;
+    WorkStealingDeque(WorkStealingDeque&&)                 = delete;
+    WorkStealingDeque& operator=(WorkStealingDeque&&)      = delete;
 
     void push(const T& v) {
         const std::int64_t b = bottom_.load(std::memory_order_relaxed);
         const std::int64_t t = top_.load(std::memory_order_acquire);
-        if (b - t >= static_cast<std::int64_t>(cap_)) {
-            // Grow: double capacity, copy live entries.
-            const std::size_t new_cap = cap_ * 2;
-            T* grown = static_cast<T*>(::operator new(new_cap * sizeof(T)));
-            for (std::int64_t i = t; i < b; ++i) {
-                const auto ui = static_cast<std::size_t>(i);
-                grown[ui & (new_cap - 1)] = buf_[ui & (cap_ - 1)];
-            }
-            ::operator delete(buf_);
-            buf_ = grown;
-            cap_ = new_cap;
-        }
-        buf_[static_cast<std::size_t>(b) & (cap_ - 1)] = v;
+        if (b - t >= static_cast<std::int64_t>(capacity_v)) std::abort();
+        buf_[static_cast<std::size_t>(b) & (capacity_v - 1)] = v;
         std::atomic_thread_fence(std::memory_order_release);
         bottom_.store(b + 1, std::memory_order_relaxed);
     }
@@ -61,7 +55,7 @@ public:
         std::atomic_thread_fence(std::memory_order_seq_cst);
         std::int64_t t = top_.load(std::memory_order_relaxed);
         if (t <= b) {
-            out = buf_[static_cast<std::size_t>(b) & (cap_ - 1)];
+            out = buf_[static_cast<std::size_t>(b) & (capacity_v - 1)];
             if (t == b) {
                 // Last element — race with thieves.
                 if (!top_.compare_exchange_strong(t, t + 1,
@@ -83,7 +77,7 @@ public:
         std::atomic_thread_fence(std::memory_order_seq_cst);
         const std::int64_t b = bottom_.load(std::memory_order_acquire);
         if (t < b) {
-            out = buf_[static_cast<std::size_t>(t) & (cap_ - 1)];
+            out = buf_[static_cast<std::size_t>(t) & (capacity_v - 1)];
             if (!top_.compare_exchange_strong(t, t + 1,
                     std::memory_order_seq_cst, std::memory_order_relaxed)) {
                 return false;
@@ -99,10 +93,7 @@ public:
     }
 
 private:
-    static constexpr std::size_t initial_cap = 64;
-
-    T*          buf_;
-    std::size_t cap_;
+    T*                                    buf_{nullptr};
 
     // Separate cache lines: top_ is written by thieves, bottom_ by the owner.
     // False-sharing between them would degrade performance significantly.

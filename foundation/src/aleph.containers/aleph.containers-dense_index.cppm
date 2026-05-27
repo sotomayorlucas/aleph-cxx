@@ -25,6 +25,25 @@ struct Handle {
 template<typename Tag, typename T>
 class DenseIndex {
 public:
+    DenseIndex() noexcept = default;
+
+    ~DenseIndex() {
+        for (std::uint32_t i = 0; i < size_; ++i) {
+            data_[i].~T();
+        }
+        ::operator delete(data_);
+    }
+
+    // Deleted copy — shallow copy + double-free on second destructor.
+    DenseIndex(const DenseIndex&)            = delete;
+    DenseIndex& operator=(const DenseIndex&) = delete;
+
+    DenseIndex(DenseIndex&& o) noexcept { steal_from(o); }
+    DenseIndex& operator=(DenseIndex&& o) noexcept {
+        if (this != &o) { release(); steal_from(o); }
+        return *this;
+    }
+
     Handle<Tag> push(const T& v) {
         const std::uint32_t id = static_cast<std::uint32_t>(size_);
         if (id >= capacity_) grow();
@@ -52,17 +71,24 @@ public:
     auto begin() const noexcept { return data_; }
     auto end()   const noexcept { return data_ + size_; }
 
-    ~DenseIndex() {
-        for (std::uint32_t i = 0; i < size_; ++i) {
-            data_[i].~T();
-        }
-        ::operator delete(data_);
-    }
-
 private:
     T* data_ = nullptr;
     std::uint32_t size_ = 0;
     std::uint32_t capacity_ = 0;
+
+    void release() noexcept {
+        if (data_) {
+            for (std::uint32_t i = 0; i < size_; ++i) data_[i].~T();
+            ::operator delete(data_);
+            data_ = nullptr; size_ = 0; capacity_ = 0;
+        }
+    }
+
+    void steal_from(DenseIndex& o) noexcept {
+        data_     = o.data_;     o.data_     = nullptr;
+        size_     = o.size_;     o.size_     = 0;
+        capacity_ = o.capacity_; o.capacity_ = 0;
+    }
 
     void grow() {
         const std::uint32_t new_cap = (capacity_ == 0) ? 16 : capacity_ * 2;

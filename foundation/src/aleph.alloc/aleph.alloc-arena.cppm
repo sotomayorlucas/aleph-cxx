@@ -1,6 +1,7 @@
 module;
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <memory_resource>
 
 export module aleph.alloc:arena;
@@ -32,7 +33,9 @@ public:
 
 protected:
     void* do_allocate(std::size_t bytes, std::size_t align) override {
-        return allocate(bytes, align);
+        void* p = allocate(bytes, align);
+        if (!p) std::abort();   // pmr contract: never return null
+        return p;
     }
     void do_deallocate(void*, std::size_t, std::size_t) noexcept override { /* no-op */ }
     bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override {

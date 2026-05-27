@@ -4,6 +4,7 @@ module;
 #include <concepts>
 #include <algorithm>
 #include <new>
+#include <cstdlib>
 
 export module aleph.threads:pool;
 
@@ -40,17 +41,34 @@ public:
         void* raw = ::operator new(static_cast<std::size_t>(n_) * sizeof(std::jthread));
         std::jthread* workers = static_cast<std::jthread*>(raw);
 
-        for (int t = 0; t < n_; ++t) {
-            new (workers + t) std::jthread([&next, end, &f]() {
-                for (;;) {
-                    int i = next.fetch_add(1, std::memory_order_relaxed);
-                    if (i >= end) return;
-                    f(i);
-                }
-            });
+        // std::jthread constructor is NOT noexcept — pthread_create can fail
+        // with EAGAIN under resource pressure. Track how many were successfully
+        // constructed so we join+destroy only those on exception.
+        int constructed = 0;
+        try {
+            for (int t = 0; t < n_; ++t) {
+                new (workers + t) std::jthread([&next, end, &f]() {
+                    for (;;) {
+                        int i = next.fetch_add(1, std::memory_order_relaxed);
+                        if (i >= end) return;
+                        f(i);
+                    }
+                });
+                ++constructed;
+            }
+        } catch (...) {
+            // Failed mid-construction. Join + destroy successfully-created
+            // threads, free the storage, then abort. Foundation cannot recover
+            // from partial thread-pool construction.
+            for (int t = 0; t < constructed; ++t) {
+                workers[t].~jthread();   // jthread dtor joins
+            }
+            ::operator delete(raw);
+            std::abort();
         }
 
-        // Join all — jthread::join() is safe to call even after construction.
+        // Join all — jthread dtor joins implicitly, but we want explicit join
+        // + in-place destruction before freeing raw storage.
         for (int t = 0; t < n_; ++t) {
             workers[t].join();
             workers[t].~jthread();

@@ -17,6 +17,7 @@ template<typename T, std::size_t N>
 class SmallVector {
     static_assert(std::is_trivially_copyable_v<T>,
                   "SmallVector requires trivially-copyable T");
+    static_assert(N > 0, "SmallVector requires N > 0");
 public:
     SmallVector() noexcept = default;
 
@@ -58,6 +59,7 @@ private:
     void grow() noexcept {
         const std::size_t new_cap = cap_ * 2;
         T* new_data = static_cast<T*>(std::malloc(sizeof(T) * new_cap));
+        if (!new_data) std::abort();                   // OOM is fatal; no exceptions in foundation
         std::memcpy(new_data, data_, sizeof(T) * sz_);
         if (!is_inline()) std::free(data_);
         data_ = new_data;

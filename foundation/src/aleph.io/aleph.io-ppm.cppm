@@ -70,7 +70,16 @@ load_ppm(std::span<const std::byte> bytes) noexcept {
     if (m->first != 255) return std::unexpected("PPM: maxval must be 255");
     i = m->second;
     if (i >= bytes.size()) return std::unexpected("PPM: truncated");
-    ++i;
+    ++i;   // consume the mandatory whitespace
+    // Also consume any optional extra whitespace some writers emit
+    // (e.g. ImageMagick / gimp write \n\n between maxval and pixels).
+    // Note: do NOT use skip_ws here — that also skips '#' comment lines,
+    // which are NOT valid between maxval and pixel data per P6 spec.
+    while (i < bytes.size()) {
+        const char c = static_cast<char>(bytes[i]);
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r') ++i;
+        else break;
+    }
 
     const std::size_t n = static_cast<std::size_t>(w->first) *
                           static_cast<std::size_t>(h->first) * 3u;
