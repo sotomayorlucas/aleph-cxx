@@ -10,7 +10,8 @@ target_sources(aleph_math
         aleph.math-rotor.cppm
         aleph.math-bivector.cppm
         aleph.math-multivector.cppm
-        aleph.math-dual.cppm)
+        aleph.math-dual.cppm
+        aleph.math-tangent.cppm)
 target_link_libraries(aleph_math
     PUBLIC  aleph_cpu
     PRIVATE aleph_flags_isa)

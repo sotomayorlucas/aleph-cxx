@@ -8,3 +8,4 @@ export import :rotor;
 export import :bivector;
 export import :multivector;
 export import :dual;
+export import :tangent;
