@@ -12,6 +12,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(cmake/aleph_flags.cmake)
 
 add_subdirectory(foundation)
+add_subdirectory(bench)
 
 enable_testing()
 add_subdirectory(tests)
