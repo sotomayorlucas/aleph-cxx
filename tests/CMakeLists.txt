@@ -24,7 +24,8 @@ add_executable(aleph_tests
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
-    io/test_mmap.cpp)
+    io/test_mmap.cpp
+    io/test_ppm.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
