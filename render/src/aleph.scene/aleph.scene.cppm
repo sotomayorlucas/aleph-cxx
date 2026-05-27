@@ -6,3 +6,4 @@ export import :tri_soa;
 export import :material_soa;
 export import :scene;
 export import :bvh;
+export import :hit;
