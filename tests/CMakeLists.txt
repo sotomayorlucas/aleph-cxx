@@ -34,6 +34,7 @@ add_executable(aleph_tests
     scene/test_scene.cpp
     scene/test_bvh_build.cpp
     scene/test_hit.cpp
+    render/test_camera.cpp
     render/test_film.cpp
     render/test_tonemap.cpp)
 target_include_directories(aleph_tests PRIVATE
