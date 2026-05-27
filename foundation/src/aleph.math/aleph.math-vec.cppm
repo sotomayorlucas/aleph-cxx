@@ -84,6 +84,16 @@ struct alignas(16) Vec4 {
     return v - n * (2.0f * dot(v, n));
 }
 
+// Snell's law refraction. etaI_over_etaT = eta_i / eta_t.
+// Assumes uv is a unit incident vector, n is unit normal facing incident side.
+[[nodiscard]] inline Vec3 refract(Vec3 uv, Vec3 n, f32 etaI_over_etaT) noexcept {
+    const f32 cos_theta = dot(-uv, n);
+    const Vec3 r_out_perp = (uv + n * cos_theta) * etaI_over_etaT;
+    const f32 k = 1.0f - dot(r_out_perp, r_out_perp);
+    const Vec3 r_out_para = n * -std::sqrt(k < 0.0f ? 0.0f : k);
+    return r_out_perp + r_out_para;
+}
+
 [[nodiscard]] constexpr bool near_zero(Vec3 v) noexcept {
     constexpr f32 eps = 1e-8f;
     auto abs_f = [](f32 x) constexpr { return x < 0 ? -x : x; };

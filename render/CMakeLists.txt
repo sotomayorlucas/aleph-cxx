@@ -1,7 +1,7 @@
 # Module libraries added in subsequent tasks via add_subdirectory.
 add_subdirectory(src/aleph.scene)
 add_subdirectory(src/aleph.render.common)
-# add_subdirectory(src/aleph.render.rt)     — added in Task 11
+add_subdirectory(src/aleph.render.rt)
 # add_subdirectory(src/aleph.render.sw)     — added in Task 14
 # if(ALEPH_HAVE_SDL2)
 #     add_subdirectory(src/aleph.window)    — added in Task 18
