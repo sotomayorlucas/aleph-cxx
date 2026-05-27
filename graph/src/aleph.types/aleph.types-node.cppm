@@ -3,6 +3,8 @@ module;
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <variant>
 
 export module aleph.types:node;
 
@@ -74,6 +76,27 @@ constexpr std::string_view as_tla(NodeKind k) noexcept {
         case NodeKind::Transform: return "transform";
     }
     return "";
+}
+
+using Node = std::variant<
+    Mesh, Material, Light, Volume, Camera, Texture, Transform
+>;
+
+constexpr NodeKind kind_of(const Node& n) noexcept {
+    return std::visit([](auto const& x) constexpr -> NodeKind {
+        using T = std::decay_t<decltype(x)>;
+        if constexpr      (std::is_same_v<T, Mesh>)      return NodeKind::Mesh;
+        else if constexpr (std::is_same_v<T, Material>)  return NodeKind::Material;
+        else if constexpr (std::is_same_v<T, Light>)     return NodeKind::Light;
+        else if constexpr (std::is_same_v<T, Volume>)    return NodeKind::Volume;
+        else if constexpr (std::is_same_v<T, Camera>)    return NodeKind::Camera;
+        else if constexpr (std::is_same_v<T, Texture>)   return NodeKind::Texture;
+        else                                              return NodeKind::Transform;
+    }, n);
+}
+
+constexpr NodeId id_of(const Node& n) noexcept {
+    return std::visit([](auto const& x) constexpr { return x.id; }, n);
 }
 
 }  // namespace aleph::types

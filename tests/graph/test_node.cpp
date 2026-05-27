@@ -1,6 +1,8 @@
 #include "doctest.h"
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <variant>
 
 import aleph.types;
 
@@ -69,4 +71,29 @@ TEST_CASE("Texture node carries dims + format") {
 TEST_CASE("Transform node carries pose slot") {
     Transform tr{NodeId{1}, 5};
     CHECK(tr.pose_slot == 5);
+}
+
+TEST_CASE("Node variant: holds any of the 7 kinds") {
+    Node n = Mesh{NodeId{4}, std::string("cube"), 12};
+    CHECK(kind_of(n) == NodeKind::Mesh);
+    CHECK(id_of(n).value == 4);
+
+    n = Camera{NodeId{2}, std::string("default")};
+    CHECK(kind_of(n) == NodeKind::Camera);
+    CHECK(id_of(n).value == 2);
+
+    n = Light{NodeId{3}, LightKind::Area, std::string("ies/area")};
+    CHECK(kind_of(n) == NodeKind::Light);
+    CHECK(id_of(n).value == 3);
+}
+
+TEST_CASE("Node variant: visit dispatches per kind") {
+    Node n = Material{NodeId{6}, MaterialKind::Dielectric};
+    auto label = std::visit([](auto const& x) -> std::string_view {
+        using T = std::decay_t<decltype(x)>;
+        if constexpr (std::is_same_v<T, Mesh>)      return "mesh";
+        else if constexpr (std::is_same_v<T, Material>) return "material";
+        else                                            return "other";
+    }, n);
+    CHECK(label == "material");
 }
