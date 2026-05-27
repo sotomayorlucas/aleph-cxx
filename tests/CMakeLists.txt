@@ -26,6 +26,7 @@ add_executable(aleph_tests
     graph/test_attribute.cpp
     graph/test_node.cpp
     graph/test_edge.cpp
+    graph/test_graph_basic.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
@@ -54,7 +55,7 @@ target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
     aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io
-    aleph_types
+    aleph_types aleph_graph
     aleph_scene aleph_render_common aleph_render_rt aleph_render_sw)
 add_test(NAME aleph_tests COMMAND aleph_tests)
 
