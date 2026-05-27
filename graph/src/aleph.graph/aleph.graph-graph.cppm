@@ -3,7 +3,6 @@ module;
 #include <cstdlib>
 #include <expected>
 #include <utility>
-#include <vector>
 
 export module aleph.graph:graph;
 
@@ -83,11 +82,13 @@ public:
     }
 
     void remove_node_cascade(aleph::types::NodeId id) {
-        std::vector<aleph::types::EdgeId> incident;
+        aleph::containers::SmallVector<aleph::types::EdgeId, 16> incident;
         for (auto [eid, e] : edges_) {
             if (e.src == id || e.dst == id) incident.push_back(eid);
         }
-        for (auto eid : incident) (void)edges_.remove(eid);
+        for (std::size_t i = 0; i < incident.size(); ++i) {
+            (void)edges_.remove(incident[i]);
+        }
         (void)nodes_.remove(id);
     }
 
