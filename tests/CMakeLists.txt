@@ -7,7 +7,8 @@ add_executable(aleph_tests
     math/test_mat.cpp
     math/test_quat.cpp
     math/test_rotor.cpp
-    math/test_bivector.cpp)
+    math/test_bivector.cpp
+    math/test_multivector.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE

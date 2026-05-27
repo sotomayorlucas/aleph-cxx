@@ -31,7 +31,6 @@ struct alignas(16) Vec3 {
 
     constexpr Vec3 operator+(Vec3 b) const noexcept { return {x + b.x, y + b.y, z + b.z}; }
     constexpr Vec3 operator-(Vec3 b) const noexcept { return {x - b.x, y - b.y, z - b.z}; }
-    constexpr Vec3 operator*(Vec3 b) const noexcept { return {x * b.x, y * b.y, z * b.z}; }
     constexpr Vec3 operator*(f32 s)  const noexcept { return {x * s,   y * s,   z * s}; }
     constexpr Vec3 operator/(f32 s)  const noexcept { return {x / s,   y / s,   z / s}; }
     constexpr Vec3 operator-()       const noexcept { return {-x, -y, -z}; }
@@ -89,6 +88,12 @@ struct alignas(16) Vec4 {
     constexpr f32 eps = 1e-8f;
     auto abs_f = [](f32 x) constexpr { return x < 0 ? -x : x; };
     return abs_f(v.x) < eps && abs_f(v.y) < eps && abs_f(v.z) < eps;
+}
+
+// Component-wise (Hadamard) product. Named to avoid collision with the
+// geometric product operator*(Vec3,Vec3)->Multivector in :multivector.
+[[nodiscard]] constexpr Vec3 hadamard(Vec3 a, Vec3 b) noexcept {
+    return {a.x * b.x, a.y * b.y, a.z * b.z};
 }
 
 }  // namespace aleph::math

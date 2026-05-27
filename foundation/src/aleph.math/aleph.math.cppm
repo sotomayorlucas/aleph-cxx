@@ -6,3 +6,4 @@ export import :mat;
 export import :quat;
 export import :rotor;
 export import :bivector;
+export import :multivector;
