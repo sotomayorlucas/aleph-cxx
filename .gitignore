@@ -1,0 +1,7 @@
+build*/
+compile_commands.json
+*.gcm
+*.cppm.o.modmap
+.cache/
+.vscode/
+.idea/
