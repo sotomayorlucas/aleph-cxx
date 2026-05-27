@@ -3,7 +3,8 @@ target_sources(aleph_math
     PUBLIC FILE_SET CXX_MODULES FILES
         aleph.math.cppm
         aleph.math-types.cppm
-        aleph.math-concepts.cppm)
+        aleph.math-concepts.cppm
+        aleph.math-vec.cppm)
 target_link_libraries(aleph_math
     PUBLIC  aleph_cpu
     PRIVATE aleph_flags_isa)

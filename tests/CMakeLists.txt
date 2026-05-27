@@ -2,7 +2,8 @@ add_executable(aleph_tests
     test_main.cpp
     test_smoke.cpp
     cpu/test_cpu.cpp
-    math/test_types.cpp)
+    math/test_types.cpp
+    math/test_vec.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
