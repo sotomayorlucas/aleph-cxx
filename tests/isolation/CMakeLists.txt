@@ -26,3 +26,4 @@ if(ALEPH_HAVE_SDL2)
 endif()
 
 aleph_iso_test(types aleph_types)
+aleph_iso_test(graph aleph_graph)
