@@ -17,6 +17,19 @@ target_compile_options(aleph_flags_strict INTERFACE
     -funroll-loops -fpeel-loops -ftree-vectorize)
 target_link_libraries(aleph_flags_strict INTERFACE aleph_flags_common)
 
+# ISA + optimisation flags without ABI-breaking -fno-exceptions/-fno-rtti.
+# Use for C++ module libraries whose BMI will be imported by test binaries
+# (which need exceptions for doctest). GCC tags BMI dialect with exception/
+# rtti mode and refuses cross-dialect imports.
+add_library(aleph_flags_isa INTERFACE)
+target_compile_options(aleph_flags_isa INTERFACE
+    -march=x86-64-v3 -mavx2 -mfma -mbmi2
+    -fno-plt -fno-semantic-interposition
+    -fno-stack-protector
+    -fvisibility=hidden -fvisibility-inlines-hidden
+    -funroll-loops -fpeel-loops -ftree-vectorize)
+target_link_libraries(aleph_flags_isa INTERFACE aleph_flags_common)
+
 add_library(aleph_flags_test INTERFACE)
 # tests need exceptions for doctest; keep ISA strict so SIMD code paths
 # behave identically to production.
