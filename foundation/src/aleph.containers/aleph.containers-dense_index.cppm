@@ -22,8 +22,6 @@ struct Handle {
 template<typename Tag, typename T>
 class DenseIndex {
 public:
-    // GCC 16 placement-new SFINAE bug workaround: avoid vector's push_back
-    // which triggers problematic noexcept checks. Instead, resize and copy.
     Handle<Tag> push(const T& v) {
         const std::uint32_t id = static_cast<std::uint32_t>(data_.size());
         data_.resize(data_.size() + 1, v);
