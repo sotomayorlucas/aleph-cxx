@@ -19,7 +19,8 @@ add_executable(aleph_tests
     alloc/test_freelist.cpp
     alloc/test_pmr_adapter.cpp
     containers/test_small_vector.cpp
-    containers/test_flat_set.cpp)
+    containers/test_flat_set.cpp
+    containers/test_dense_index.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
