@@ -9,3 +9,4 @@ export import :bivector;
 export import :multivector;
 export import :dual;
 export import :tangent;
+export import :geom;
