@@ -1,0 +1,65 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "release-strict",
+      "displayName": "Release (cycle-tight ship build)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-release-strict",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (with tests)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS_RELEASE": "-O3 -DNDEBUG"
+      }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS_DEBUG": "-O0 -g3 -fno-omit-frame-pointer"
+      }
+    },
+    {
+      "name": "asan",
+      "displayName": "ASan + UBSan",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-asan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO":
+          "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined"
+      }
+    },
+    {
+      "name": "bench",
+      "displayName": "Bench",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build-bench",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_FLAGS_RELEASE":
+          "-O3 -DNDEBUG -fno-inline-functions-called-once"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release-strict", "configurePreset": "release-strict" },
+    { "name": "release",        "configurePreset": "release" },
+    { "name": "debug",          "configurePreset": "debug" },
+    { "name": "asan",           "configurePreset": "asan" },
+    { "name": "bench",          "configurePreset": "bench" }
+  ]
+}

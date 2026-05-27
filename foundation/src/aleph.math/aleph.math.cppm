@@ -1,0 +1,12 @@
+export module aleph.math;
+export import :types;
+export import :concepts;
+export import :vec;
+export import :mat;
+export import :quat;
+export import :rotor;
+export import :bivector;
+export import :multivector;
+export import :dual;
+export import :tangent;
+export import :geom;
