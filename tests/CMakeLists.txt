@@ -25,6 +25,7 @@ add_executable(aleph_tests
     graph/test_id.cpp
     graph/test_attribute.cpp
     graph/test_node.cpp
+    graph/test_edge.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
