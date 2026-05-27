@@ -51,4 +51,9 @@ target_link_libraries(aleph_tests PRIVATE
     aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io aleph_scene aleph_render_common aleph_render_rt aleph_render_sw)
 add_test(NAME aleph_tests COMMAND aleph_tests)
 
+if(ALEPH_HAVE_SDL2)
+    target_sources(aleph_tests PRIVATE window/test_window_init.cpp)
+    target_link_libraries(aleph_tests PRIVATE aleph_window)
+endif()
+
 add_subdirectory(isolation)
