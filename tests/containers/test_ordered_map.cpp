@@ -88,3 +88,24 @@ TEST_CASE("OrderedMap: clear empties without resetting bucket capacity") {
     CHECK(m.size() == 0);
     CHECK(m.get(50) == nullptr);
 }
+
+TEST_CASE("OrderedMap: tombstone load triggers rehash before buffer overrun") {
+    // 16 buckets default. Insert 11, remove 5, insert 5 more (16 occupied:
+    // 11 live + 5 tombstones). Then insert one more — without the
+    // tombstones-aware load check, probe would return SIZE_MAX and the
+    // next insert would write past the buckets vector.
+    OrderedMap<int, int> m;
+    for (int i = 0; i < 11; ++i) m.insert(i, i * 10);
+    for (int i = 0; i < 5;  ++i) m.remove(i);
+    CHECK(m.size() == 6);
+    for (int i = 100; i < 105; ++i) m.insert(i, i);
+    CHECK(m.size() == 11);
+    // Next insert: would crash without the fix
+    m.insert(200, 200);
+    CHECK(m.size() == 12);
+    CHECK(*m.get(200) == 200);
+    // And iteration order is still sane (LL is intact)
+    std::vector<int> keys;
+    for (auto [k, v] : m) keys.push_back(k);
+    CHECK(keys.size() == 12);
+}

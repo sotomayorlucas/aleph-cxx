@@ -30,10 +30,11 @@ class OrderedMap {
     std::size_t         slots_cap_= 0;
 
     std::vector<std::size_t> buckets_;
-    std::size_t              head_  {SIZE_MAX};
-    std::size_t              tail_  {SIZE_MAX};
-    std::size_t              free_  {SIZE_MAX};
-    std::size_t              count_ {0};
+    std::size_t              head_        {SIZE_MAX};
+    std::size_t              tail_        {SIZE_MAX};
+    std::size_t              free_        {SIZE_MAX};
+    std::size_t              count_       {0};
+    std::size_t              tombstones_  {0};
 
     static constexpr std::size_t TOMBSTONE       = SIZE_MAX - 1;
     static constexpr std::size_t INITIAL_BUCKETS = 16;
@@ -94,7 +95,10 @@ class OrderedMap {
 
     void maybe_rehash() {
         if (buckets_.empty()) { ensure_buckets(); return; }
-        if (count_ * 10 >= buckets_.size() * 7) {
+        // Include tombstones in the load check: tombstones occupy buckets and
+        // can exhaust the table even when live count_ is low.  Rehash when
+        // (live + tombstone) slots cross 70% of bucket capacity.
+        if ((count_ + tombstones_) * 10 >= buckets_.size() * 7) {
             const std::size_t new_n = buckets_.size() * 2;
             buckets_.assign(new_n, SIZE_MAX);
             const std::size_t mask = new_n - 1;
@@ -103,6 +107,7 @@ class OrderedMap {
                 while (buckets_[b] != SIZE_MAX) b = (b + 1) & mask;
                 buckets_[b] = s;
             }
+            tombstones_ = 0;  // rehash wipes all tombstones
         }
     }
 
@@ -135,23 +140,26 @@ public:
     OrderedMap(OrderedMap&& o) noexcept
         : slots_(o.slots_), slots_sz_(o.slots_sz_), slots_cap_(o.slots_cap_),
           buckets_(std::move(o.buckets_)),
-          head_(o.head_), tail_(o.tail_), free_(o.free_), count_(o.count_)
+          head_(o.head_), tail_(o.tail_), free_(o.free_),
+          count_(o.count_), tombstones_(o.tombstones_)
     {
         o.slots_ = nullptr; o.slots_sz_ = 0; o.slots_cap_ = 0;
-        o.head_ = o.tail_ = o.free_ = SIZE_MAX; o.count_ = 0;
+        o.head_ = o.tail_ = o.free_ = SIZE_MAX;
+        o.count_ = 0; o.tombstones_ = 0;
     }
 
     OrderedMap& operator=(OrderedMap&& o) noexcept {
         if (this != &o) {
             slots_release();
-            slots_     = o.slots_;     o.slots_     = nullptr;
-            slots_sz_  = o.slots_sz_;  o.slots_sz_  = 0;
-            slots_cap_ = o.slots_cap_; o.slots_cap_ = 0;
-            buckets_   = std::move(o.buckets_);
-            head_  = o.head_;  o.head_  = SIZE_MAX;
-            tail_  = o.tail_;  o.tail_  = SIZE_MAX;
-            free_  = o.free_;  o.free_  = SIZE_MAX;
-            count_ = o.count_; o.count_ = 0;
+            slots_       = o.slots_;       o.slots_       = nullptr;
+            slots_sz_    = o.slots_sz_;    o.slots_sz_    = 0;
+            slots_cap_   = o.slots_cap_;   o.slots_cap_   = 0;
+            buckets_     = std::move(o.buckets_);
+            head_        = o.head_;        o.head_        = SIZE_MAX;
+            tail_        = o.tail_;        o.tail_        = SIZE_MAX;
+            free_        = o.free_;        o.free_        = SIZE_MAX;
+            count_       = o.count_;       o.count_       = 0;
+            tombstones_  = o.tombstones_;  o.tombstones_  = 0;
         }
         return *this;
     }
@@ -201,6 +209,7 @@ public:
         if (p != SIZE_MAX) slots_[p].next = n; else head_ = n;
         if (n != SIZE_MAX) slots_[n].prev = p; else tail_ = p;
         buckets_[b] = TOMBSTONE;
+        ++tombstones_;
         slots_[s].next = free_;
         free_ = s;
         --count_;
@@ -209,24 +218,26 @@ public:
 
     void clear() noexcept {
         for (auto& bkt : buckets_) bkt = SIZE_MAX;
-        // Destroy all live slot contents, then reset indices.
-        // Walk live list only (free slots have stale/moved-from values).
+        // Destroy all live slot K/V, then placement-new empty Slots so the
+        // raw storage is ready for reuse.
         for (std::size_t s = head_; s != SIZE_MAX; ) {
             const std::size_t nxt = slots_[s].next;
             slots_[s].~Slot();
-            new (slots_ + s) Slot{};     // trivially re-initialise indices
+            new (slots_ + s) Slot{};     // re-initialise indices to SIZE_MAX / 0
             s = nxt;
         }
-        // Also reset free-list entries' index fields.
+        // Free-list slots: value was moved-out by remove(), but key was NOT —
+        // destroy them explicitly to avoid leaking heap-owning K types.
         for (std::size_t s = free_; s != SIZE_MAX; ) {
             const std::size_t nxt = slots_[s].next;
-            // Just reset next to SIZE_MAX; key/value already moved-from.
-            slots_[s].next = SIZE_MAX;
+            slots_[s].~Slot();
+            new (slots_ + s) Slot{};
             s = nxt;
         }
         head_ = tail_ = free_ = SIZE_MAX;
         slots_sz_ = 0;
         count_ = 0;
+        tombstones_ = 0;
     }
 
     // ---- iterators ----------------------------------------------------------
