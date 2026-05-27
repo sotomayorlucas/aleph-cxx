@@ -20,9 +20,10 @@ add_executable(aleph_tests
     alloc/test_pmr_adapter.cpp
     containers/test_small_vector.cpp
     containers/test_flat_set.cpp
-    containers/test_dense_index.cpp)
+    containers/test_dense_index.cpp
+    threads/test_pool.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
-    aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers)
+    aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads)
 add_test(NAME aleph_tests COMMAND aleph_tests)
