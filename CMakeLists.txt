@@ -12,6 +12,26 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(cmake/aleph_flags.cmake)
 
 add_subdirectory(foundation)
+
+# ─── SDL2 detection ─────────────────────────────────────────────────
+find_package(SDL2 QUIET)
+if(NOT SDL2_FOUND)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(SDL2 IMPORTED_TARGET sdl2)
+    endif()
+endif()
+if(SDL2_FOUND OR SDL2_LIBRARIES)
+    set(ALEPH_HAVE_SDL2 ON)
+    message(STATUS "aleph-cxx: SDL2 found — window + editor + aleph_sw will be built.")
+else()
+    set(ALEPH_HAVE_SDL2 OFF)
+    message(STATUS "aleph-cxx: SDL2 NOT found — window + editor + aleph_sw skipped.")
+endif()
+
+add_subdirectory(render)
+add_subdirectory(apps)
+
 add_subdirectory(bench)
 
 enable_testing()
