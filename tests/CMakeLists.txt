@@ -52,8 +52,11 @@ target_link_libraries(aleph_tests PRIVATE
 add_test(NAME aleph_tests COMMAND aleph_tests)
 
 if(ALEPH_HAVE_SDL2)
-    target_sources(aleph_tests PRIVATE window/test_window_init.cpp)
-    target_link_libraries(aleph_tests PRIVATE aleph_window)
+    target_sources(aleph_tests PRIVATE
+        window/test_window_init.cpp
+        editor/test_orbit.cpp
+        editor/test_pick.cpp)
+    target_link_libraries(aleph_tests PRIVATE aleph_window aleph_editor)
 endif()
 
 add_subdirectory(isolation)
