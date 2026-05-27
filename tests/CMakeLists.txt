@@ -32,3 +32,5 @@ target_include_directories(aleph_tests PRIVATE
 target_link_libraries(aleph_tests PRIVATE
     aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io)
 add_test(NAME aleph_tests COMMAND aleph_tests)
+
+add_subdirectory(isolation)
