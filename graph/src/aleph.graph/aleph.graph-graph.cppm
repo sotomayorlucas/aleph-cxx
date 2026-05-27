@@ -1,7 +1,9 @@
 module;
 #include <cstddef>
 #include <cstdlib>
+#include <expected>
 #include <utility>
+#include <vector>
 
 export module aleph.graph:graph;
 
@@ -46,8 +48,46 @@ public:
     };
     NodeRange nodes() const noexcept { return {&nodes_}; }
 
-    // T10 adds edge-side ops + true cascade. For T9, just remove the node.
+    // ── Edge ops ──────────────────────────────────────────────────
+    std::expected<aleph::types::EdgeId, GraphError>
+    add_edge(aleph::types::EdgeKind kind,
+             aleph::types::NodeId   src,
+             aleph::types::NodeId   dst) {
+        const aleph::types::Node* sn = nodes_.get(src);
+        if (!sn) return std::unexpected(GraphError::NodeNotFound);
+        const aleph::types::Node* dn = nodes_.get(dst);
+        if (!dn) return std::unexpected(GraphError::NodeNotFound);
+        if (!aleph::types::allows(kind, aleph::types::kind_of(*sn), aleph::types::kind_of(*dn))) {
+            return std::unexpected(GraphError::EdgeTypeMismatch);
+        }
+        const aleph::types::EdgeId id = ids_.alloc_edge();
+        edges_.insert(id, aleph::types::Edge{id, kind, src, dst});
+        return id;
+    }
+
+    const aleph::types::Edge* edge(aleph::types::EdgeId id) const noexcept {
+        return edges_.get(id);
+    }
+
+    struct EdgeRange {
+        const EdgeMap* m;
+        EdgeMap::const_iterator begin() const noexcept { return m->cbegin(); }
+        EdgeMap::const_iterator end()   const noexcept { return m->cend(); }
+    };
+    EdgeRange edges() const noexcept { return {&edges_}; }
+
+    std::size_t in_degree(aleph::types::NodeId id) const noexcept {
+        std::size_t n = 0;
+        for (auto [eid, e] : edges_) if (e.dst == id) ++n;
+        return n;
+    }
+
     void remove_node_cascade(aleph::types::NodeId id) {
+        std::vector<aleph::types::EdgeId> incident;
+        for (auto [eid, e] : edges_) {
+            if (e.src == id || e.dst == id) incident.push_back(eid);
+        }
+        for (auto eid : incident) (void)edges_.remove(eid);
         (void)nodes_.remove(id);
     }
 
