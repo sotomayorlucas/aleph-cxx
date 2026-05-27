@@ -22,6 +22,7 @@ add_executable(aleph_tests
     containers/test_flat_set.cpp
     containers/test_dense_index.cpp
     containers/test_ordered_map.cpp
+    graph/test_id.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
@@ -49,7 +50,9 @@ add_executable(aleph_tests
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
-    aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io aleph_scene aleph_render_common aleph_render_rt aleph_render_sw)
+    aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io
+    aleph_types
+    aleph_scene aleph_render_common aleph_render_rt aleph_render_sw)
 add_test(NAME aleph_tests COMMAND aleph_tests)
 
 if(ALEPH_HAVE_SDL2)
