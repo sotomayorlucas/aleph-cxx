@@ -39,11 +39,12 @@ add_executable(aleph_tests
     render/test_tonemap.cpp
     render/test_material_scatter.cpp
     render/test_ray_color.cpp
-    render/test_path_trace.cpp)
+    render/test_path_trace.cpp
+    render/test_sw_clip.cpp)
 target_include_directories(aleph_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_link_libraries(aleph_tests PRIVATE
-    aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io aleph_scene aleph_render_common aleph_render_rt)
+    aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io aleph_scene aleph_render_common aleph_render_rt aleph_render_sw)
 add_test(NAME aleph_tests COMMAND aleph_tests)
 
 add_subdirectory(isolation)
