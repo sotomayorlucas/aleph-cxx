@@ -24,3 +24,5 @@ if(ALEPH_HAVE_SDL2)
     aleph_iso_test(window aleph_window)
     aleph_iso_test(editor aleph_editor)
 endif()
+
+aleph_iso_test(types aleph_types)
