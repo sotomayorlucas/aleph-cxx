@@ -21,6 +21,7 @@ add_executable(aleph_tests
     containers/test_small_vector.cpp
     containers/test_flat_set.cpp
     containers/test_dense_index.cpp
+    containers/test_ordered_map.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp

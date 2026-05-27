@@ -4,7 +4,8 @@ target_sources(aleph_containers
         aleph.containers.cppm
         aleph.containers-small_vector.cppm
         aleph.containers-flat_set.cppm
-        aleph.containers-dense_index.cppm)
+        aleph.containers-dense_index.cppm
+        aleph.containers-ordered_map.cppm)
 target_link_libraries(aleph_containers
     PUBLIC  aleph_alloc
     PRIVATE aleph_flags_isa)
