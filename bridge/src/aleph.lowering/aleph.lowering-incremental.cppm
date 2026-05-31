@@ -47,10 +47,43 @@
 // light-group-dirty (SPEC §3.4) and recomputed via `light_groups_of(after)`
 // (which, topology being unchanged, yields the same value — still byte-identical).
 //
+// ── This wave: STRUCTURAL ops (AddObject / AddLight / DeleteObject) ─────────
+// These change graph TOPOLOGY: AddObject mints a Mesh+Material (and its
+// References/Contains edges), AddLight mints a Light (and its Contains edge),
+// DeleteObject removes a Mesh and cascades its incident edges. `rec` carries the
+// delta: `rec.created_nodes` (mesh+material / light) and `rec.deleted_nodes`
+// (the removed mesh). The EXISTING (surviving) nodes' Contains chains and
+// References are UNCHANGED — only nodes were added or removed — so every
+// surviving entity is CLEAN and its lowered payload is reused VERBATIM from
+// `prev`; only the created Mesh's payload is recomputed (SPEC §4.1/§4.2).
+//
+// Byte-identical ordering (SPEC §4.3): `full lower()` emits entities in DFS
+// order over the `Contains` hierarchy (roots in node insertion order, children
+// in edge insertion order). A structural op shifts that order — a deleted mesh
+// vanishes from its slot; a created mesh appears at its DFS position (appended
+// last among its parent's Contains children, since `apply_op` adds the Contains
+// edge last). Rather than guess the new slot, we RE-WALK the very DFS `lower()`
+// runs over `after` (`detail::dfs_emit`) to produce the exact emission order,
+// then for each emitted Mesh we REUSE `prev`'s payload (clean survivor) or
+// RECOMPUTE it (created). This reproduces full's entity order, light table and
+// handle_map byte-for-byte while recomputing only |created| Mesh payloads —
+// O(dirty), not O(N) (SPEC §6.3).
+//
+// `light_groups` (the sheaf H⁰ partition) depends ONLY on Influences/Adjacent
+// topology + Light existence + per-material emission. A structural op is
+// light-group-dirty iff it added/removed a `Light`, added/removed an
+// `Influences` edge, or changed emissive membership (AddObject of an emissive
+// material; DeleteObject of a mesh that was emissive). When NONE of those hold
+// (the common AddObject-of-a-lambertian / DeleteObject-of-a-non-emissive case
+// with no incident Influences), `prev.light_groups` is reused verbatim and
+// `stats.light_groups_recomputed` stays false; otherwise it is recomputed via
+// `light_groups_of(after)` (topology-correct, hence byte-identical, SPEC §4.4).
+//
 // ── Not-yet-incremental ops fall back to full ──────────────────────────────
-// AddObject / AddLight / DeleteObject / ApplyRule change topology; their
-// dirty-set patch is a later wave (SPEC §8 W2). Until then they FALL BACK to a
-// full `lower(after)`, which is byte-identical by being exactly that call.
+// `ApplyRule` is an arbitrary DPO rewrite whose dirty set is harder to bound
+// (SPEC §5); it FALLS BACK to a full `lower(after)`, which is byte-identical by
+// being exactly that call. (A structural patch that hits an inconsistency also
+// falls back, never compromising the byte-identical contract.)
 //
 // No exceptions (aleph_flags_isa): the fallible path is `std::expected`,
 // forwarded verbatim from `lower()`.
@@ -241,9 +274,318 @@ inline void contains_descendants(const Graph& g, NodeId root,
     return true;
 }
 
+// ── DFS-replay for structural ops (SPEC §4.3) ───────────────────────────────
+// One emission event from `lower()`'s Contains DFS: the node it would emit and
+// the world matrix under which it would emit it. `is_light` distinguishes a
+// Light node (always a light-table entry) from a Mesh (an `entities` entry that
+// is ALSO a light-table entry iff its resolved material is emissive).
+struct EmitEvent {
+    NodeId id;
+    Mat4   world;
+    bool   is_light;  // true => Light node; false => Mesh node
+};
+
+// Replay `lower()`'s EXACT Contains-DFS over `g`, recording the ordered Mesh /
+// Light emission events (the same order, world matrices and once-per-node
+// reachability `lower()` produces). This is a faithful transcription of the DFS
+// in `:lower` (roots = Transforms with no incoming Contains, in node insertion
+// order; children in edge insertion order; world = parent.world * local; closed
+// set so a node reached twice emits once; active-path cycle guard). Returns
+// false on a Contains cycle (`lower()`'s InvalidHierarchy) so the caller can
+// fall back to full. Pure ordering: it does NOT resolve materials or transform
+// geometry — the caller reuses/recomputes per event.
+[[nodiscard]] inline bool dfs_emit(const Graph& g, std::vector<EmitEvent>& out) {
+    auto has_incoming_contains = [&](NodeId id) noexcept -> bool {
+        for (auto [eid, e] : g.edges()) {
+            (void)eid;
+            if (e.kind == EdgeKind::Contains && e.dst == id) return true;
+        }
+        return false;
+    };
+
+    aleph::containers::FlatSet<NodeId> closed{};
+    std::vector<NodeId>                path{};
+    auto path_contains = [&](NodeId id) noexcept -> bool {
+        for (NodeId p : path) if (p == id) return true;
+        return false;
+    };
+    auto path_pop = [&](NodeId id) noexcept {
+        for (std::size_t i = path.size(); i-- > 0;) {
+            if (path[i] == id) {
+                path.erase(path.begin() + static_cast<std::ptrdiff_t>(i));
+                return;
+            }
+        }
+    };
+
+    struct Frame { NodeId id; Mat4 world; bool entering; };
+    std::vector<Frame> stack{};
+
+    for (auto [rid, rnode] : g.nodes()) {
+        if (t::kind_of(rnode) != NodeKind::Transform) continue;
+        if (has_incoming_contains(rid)) continue;  // not a root
+
+        stack.clear();
+        const auto& root_xf = std::get<t::Transform>(rnode);
+        stack.push_back(Frame{rid, root_xf.local.m, true});
+
+        while (!stack.empty()) {
+            Frame fr = stack.back();
+            stack.pop_back();
+
+            if (!fr.entering) {            // leaving frame: pop the active path
+                path_pop(fr.id);
+                continue;
+            }
+            if (path_contains(fr.id)) return false;   // Contains cycle
+            if (closed.contains(fr.id)) continue;     // reached via another path
+            path.push_back(fr.id);
+            closed.insert(fr.id);
+
+            const t::Node* np = g.node(fr.id);
+            if (np != nullptr) {
+                const NodeKind k = t::kind_of(*np);
+                if (k == NodeKind::Mesh) {
+                    out.push_back(EmitEvent{fr.id, fr.world, false});
+                } else if (k == NodeKind::Light) {
+                    out.push_back(EmitEvent{fr.id, fr.world, true});
+                }
+            }
+
+            stack.push_back(Frame{fr.id, fr.world, false});  // leave marker
+
+            // Contains children in edge insertion order, pushed reversed so the
+            // first child is processed first (matching `lower()`).
+            std::vector<NodeId> children{};
+            for (auto [eid, e] : g.edges()) {
+                (void)eid;
+                if (e.kind == EdgeKind::Contains && e.src == fr.id) {
+                    children.push_back(e.dst);
+                }
+            }
+            for (std::size_t i = children.size(); i-- > 0;) {
+                const NodeId cid = children[i];
+                const t::Node* cn = g.node(cid);
+                Mat4 child_world = fr.world;
+                if (cn != nullptr && t::kind_of(*cn) == NodeKind::Transform) {
+                    child_world = fr.world * std::get<t::Transform>(*cn).local.m;
+                }
+                stack.push_back(Frame{cid, child_world, true});
+            }
+        }
+    }
+    return true;
+}
+
+// Build the world-space payload for a Mesh emission event WITHOUT re-deriving
+// the ancestor chain: the event already carries the world matrix `lower()` would
+// use. Resolves the Mesh's Material through `References` exactly as `lower()`.
+// Returns false on a dangling reference (the caller falls back to full).
+[[nodiscard]] inline bool entity_from_event(const Graph& g, const EmitEvent& ev,
+                                            LoweredEntity& out) {
+    const t::Node* mn = g.node(ev.id);
+    if (mn == nullptr || t::kind_of(*mn) != NodeKind::Mesh) return false;
+    NodeId mat_id{};
+    if (!referenced_material(g, ev.id, mat_id)) return false;
+    const t::Node* mat = g.node(mat_id);
+    if (mat == nullptr || t::kind_of(*mat) != NodeKind::Material) return false;
+    out.source         = ev.id;
+    out.world_geometry = to_world(std::get<t::Mesh>(*mn).geometry, ev.world);
+    out.material       = to_params(std::get<t::Material>(*mat));
+    return true;
+}
+
+// Build the light-table payload for a Light emission event, mirroring `lower()`.
+[[nodiscard]] inline bool light_from_event(const Graph& g, const EmitEvent& ev,
+                                           LoweredEntity& out) {
+    const t::Node* ln = g.node(ev.id);
+    if (ln == nullptr || t::kind_of(*ln) != NodeKind::Light) return false;
+    const auto& light = std::get<t::Light>(*ln);
+    out.source         = ev.id;
+    out.world_geometry = to_world(light.geometry, ev.world);
+    out.material       = MaterialParams{
+        aleph::types::MaterialKind::Emissive,
+        light.emission,
+        0.0f, 1.5f,
+        light.emission};
+    return true;
+}
+
 }  // namespace aleph::lowering::detail
 
 export namespace aleph::lowering {
+
+// ── lower_incremental_structural (SPEC §4) ──────────────────────────────────
+// Incremental patch for the STRUCTURAL ops AddObject / AddLight / DeleteObject.
+// The result is BYTE-IDENTICAL to `lower(after)`: we re-walk `lower()`'s exact
+// Contains DFS over `after` (so entity order, light order and handle_map order
+// all match full), but for each emitted node we REUSE `prev`'s already-lowered
+// payload when the node is a clean survivor and only RECOMPUTE it when the node
+// was created by the op. Surviving nodes' Contains chains and References are
+// untouched by these ops, so a survivor's payload is provably identical to what
+// full would emit (same world matrix from the same DFS, same material) — hence
+// reuse is sound. `recomputed_entities` counts only the recomputed (created)
+// Meshes, proving O(dirty). `light_groups` is recomputed via the sheaf ONLY when
+// the op changed Influences/Light/emission, else reused from `prev`.
+//
+// Any inconsistency (DFS cycle, dangling reference, a "clean" survivor missing
+// from `prev`) FALLS BACK to a full `lower(after)` — correctness over speed.
+[[nodiscard]] inline std::expected<LoweredScene, LowerError>
+lower_incremental_structural(const LoweredScene&              prev,
+                             const aleph::graph::Graph&       after,
+                             const aleph::lowering::Op&       op,
+                             const aleph::dpo::RewriteRecord& rec,
+                             IncrementalStats*                stats) {
+    using aleph::types::NodeId;
+    namespace t = aleph::types;
+
+    auto fall_back_to_full = [&]() -> std::expected<LoweredScene, LowerError> {
+        std::expected<LoweredScene, LowerError> full = lower(after);
+        if (full.has_value() && stats != nullptr) {
+            stats->recomputed_entities     = full->entities.size();
+            stats->light_groups_recomputed = true;
+        }
+        return full;
+    };
+
+    // `created` = the set of NodeIds the op minted (AddObject -> [mesh, material];
+    // AddLight -> [light]; DeleteObject -> none). A created Mesh/Light has no
+    // entry in `prev`, so its payload must be recomputed; everything else is a
+    // clean survivor reused verbatim. `deleted_nodes` simply will not appear in
+    // the DFS over `after`, so it needs no explicit handling here.
+    aleph::containers::FlatSet<NodeId> created;
+    for (NodeId id : rec.created_nodes) created.insert(id);
+
+    // Fast lookup of a survivor's lowered ENTITY by source: reuse `prev.entities`
+    // verbatim, indexed through `prev.handle_map` (NodeId -> entities index).
+    auto reuse_entity = [&](NodeId src, LoweredEntity& out) -> bool {
+        const std::uint32_t* idx = prev.handle_map.get(src);
+        if (idx == nullptr || *idx >= prev.entities.size()) return false;
+        out = prev.entities[*idx];
+        return true;
+    };
+
+    // ── Reproduce `lower()`'s DFS emission order over `after`. ──────────────
+    std::vector<detail::EmitEvent> events;
+    if (!detail::dfs_emit(after, events)) {
+        return fall_back_to_full();  // Contains cycle: full reports InvalidHierarchy
+    }
+
+    LoweredScene out{};
+    out.camera = prev.camera;  // structural ops never touch the Camera node
+
+    std::size_t recomputed = 0;
+
+    // Walk the DFS events IN ORDER, building `entities`, `handle_map` and the
+    // light table exactly as `lower()` interleaves them.
+    for (const detail::EmitEvent& ev : events) {
+        if (ev.is_light) {
+            // A Light node: a light-table entry only (never an `entities` entry).
+            LoweredEntity lent{};
+            if (created.contains(ev.id)) {
+                if (!detail::light_from_event(after, ev, lent)) return fall_back_to_full();
+                ++recomputed;
+            } else {
+                // Clean Light survivor: reuse its `prev.lights` entry verbatim.
+                bool found = false;
+                for (const LoweredEntity& pl : prev.lights) {
+                    if (pl.source == ev.id) { lent = pl; found = true; break; }
+                }
+                if (!found) return fall_back_to_full();
+            }
+            out.lights.push_back(lent);
+            continue;
+        }
+
+        // A Mesh node: an `entities` entry, ALSO a light-table entry iff emissive.
+        LoweredEntity ent{};
+        if (created.contains(ev.id)) {
+            if (!detail::entity_from_event(after, ev, ent)) return fall_back_to_full();
+            ++recomputed;
+        } else {
+            if (!reuse_entity(ev.id, ent)) return fall_back_to_full();
+        }
+        const auto index = static_cast<std::uint32_t>(out.entities.size());
+        out.entities.push_back(ent);
+        (void)out.handle_map.insert(ev.id, index);
+        // Light-table policy (SPEC §3): an emissive Mesh joins the light table at
+        // its DFS position — exactly where `lower()` would push it.
+        if (is_emissive(ent.material)) {
+            out.lights.push_back(ent);
+        }
+    }
+
+    // ── light_groups (SPEC §4.4) ────────────────────────────────────────────
+    // Recompute the sheaf H⁰ partition ONLY when the op may have changed it:
+    //   * AddLight     — created a `Light` node (a new singleton group at least);
+    //   * AddObject    — created a `Material`; if it is emissive the new mesh is
+    //                    a light (changes membership). A non-emissive AddObject
+    //                    adds neither a Light, an Influences edge, nor emission,
+    //                    so the partition is unchanged — reuse `prev`.
+    //   * DeleteObject — removed a Mesh; if that mesh was emissive (a member of
+    //                    the light table / groups) or had incident Influences
+    //                    edges, the partition changes — recompute. Otherwise the
+    //                    deleted mesh never touched Influences/Light/emission, so
+    //                    the partition is unchanged — reuse `prev`.
+    // When NONE of those hold we reuse `prev.light_groups` verbatim (no sheaf
+    // pass) and leave `light_groups_recomputed` false. Recompute is always
+    // topology-correct, hence byte-identical, so being conservative is safe.
+    bool light_groups_dirty = false;
+    if (std::holds_alternative<AddLight>(op)) {
+        light_groups_dirty = true;  // a Light node was added
+    } else if (std::holds_alternative<AddObject>(op)) {
+        // AddObject adds NO `Light`, `Influences`, or `Adjacent` edge — only a
+        // Mesh+Material with `References` + parent `Contains`. The new mesh is an
+        // isolated 1-skeleton vertex with an empty visibility stalk, so it forms
+        // no group and grabs no Light; the Light partition is therefore UNCHANGED
+        // for a non-emissive AddObject and `prev.light_groups` is reused. We still
+        // flag dirty when the new material is EMISSIVE — emission changed (SPEC
+        // §3.4) — and recompute (byte-identical regardless), so the literal "emit
+        // changed ⇒ recompute" rule holds and the §6.4 reuse test exercises the
+        // clean (non-emissive) path. Inspect the created mesh's material in `after`.
+        for (NodeId id : rec.created_nodes) {
+            const t::Node* n = after.node(id);
+            if (n == nullptr || t::kind_of(*n) != t::NodeKind::Mesh) continue;
+            NodeId mat_id{};
+            if (detail::referenced_material(after, id, mat_id)) {
+                const t::Node* mat = after.node(mat_id);
+                if (mat != nullptr && t::kind_of(*mat) == t::NodeKind::Material
+                    && detail::luminance(std::get<t::Material>(*mat).emit) > 0.0f) {
+                    light_groups_dirty = true;
+                }
+            }
+        }
+    } else {  // DeleteObject
+        // DeleteObject removes a Mesh and CASCADES its incident edges — possibly
+        // `Adjacent` edges (changing the 1-skeleton / flag complex) and/or
+        // `Influences` edges (changing which lights touch a region). Either can
+        // merge or split H⁰ components, hence change the Light grouping, even if
+        // the mesh was not itself a light. The mesh's pre-state incident edges are
+        // no longer in `after` and are not recorded in `prev` (which holds only
+        // lowered IR + Light-id groups), so we cannot cheaply PROVE the partition
+        // is unchanged. We therefore conservatively RECOMPUTE `light_groups` for
+        // every DeleteObject. (`light_groups_of(after)` is topology-correct, so
+        // this stays byte-identical; the reuse fast-path is reserved for the
+        // provably-clean Add* cases above.)
+        light_groups_dirty = true;
+    }
+
+    if (light_groups_dirty) {
+        out.light_groups = light_groups_of(after);
+        if (stats != nullptr) {
+            stats->recomputed_entities     = recomputed;
+            stats->light_groups_recomputed = true;
+        }
+        return out;
+    }
+
+    out.light_groups = prev.light_groups;  // reused verbatim (no sheaf recompute)
+    if (stats != nullptr) {
+        stats->recomputed_entities     = recomputed;
+        stats->light_groups_recomputed = false;
+    }
+    return out;
+}
 
 // ── lower_incremental (SPEC §3/§4) ──────────────────────────────────────────
 //
@@ -268,25 +610,47 @@ lower_incremental(const LoweredScene&              prev,
     using aleph::types::NodeId;
     namespace t = aleph::types;
 
-    // `rec` carries structural deltas; attribute ops report none. It is unused on
-    // the attribute path (the dirty set comes from `op`), but is part of the
-    // contract for the structural waves and the full-fallback below.
-    (void)rec;
-
-    // Is this an ATTRIBUTE op (SetMaterial / SetTransform)? Those are the only
-    // ops this wave patches incrementally; everything else falls back to full.
-    const bool is_attr = std::holds_alternative<SetMaterial>(op)
-                         || std::holds_alternative<SetTransform>(op);
-    if (!is_attr) {
-        // FALLBACK: AddObject / AddLight / DeleteObject / ApplyRule are a later
-        // wave. A full re-lower is byte-identical by being exactly `lower(after)`.
+    // A small helper: take the whole result from a full `lower(after)` (the
+    // proven byte-identical path) and stamp the stats as a full recompute. Used
+    // by every fallback below so the byte-identical contract is never at risk.
+    auto fall_back_to_full = [&]() -> std::expected<LoweredScene, LowerError> {
         std::expected<LoweredScene, LowerError> full = lower(after);
         if (full.has_value() && stats != nullptr) {
             stats->recomputed_entities     = full->entities.size();
             stats->light_groups_recomputed = true;
         }
         return full;
+    };
+
+    // ApplyRule is an arbitrary DPO rewrite (SPEC §5): FALL BACK to full, which
+    // is byte-identical by being exactly `lower(after)`.
+    if (std::holds_alternative<ApplyRule>(op)) {
+        return fall_back_to_full();
     }
+
+    // ── STRUCTURAL ops (AddObject / AddLight / DeleteObject) ────────────────
+    // `rec` carries the topology delta. Surviving nodes are unchanged, so every
+    // surviving entity is reused verbatim and only created Meshes are recomputed;
+    // we re-walk `lower()`'s DFS to reproduce its exact emission order.
+    const bool is_structural = std::holds_alternative<AddObject>(op)
+                            || std::holds_alternative<AddLight>(op)
+                            || std::holds_alternative<DeleteObject>(op);
+    if (is_structural) {
+        return lower_incremental_structural(prev, after, op, rec, stats);
+    }
+
+    // Is this an ATTRIBUTE op (SetMaterial / SetTransform)? Those are patched by
+    // the dirty-set path below; everything else has already returned above.
+    const bool is_attr = std::holds_alternative<SetMaterial>(op)
+                         || std::holds_alternative<SetTransform>(op);
+    if (!is_attr) {
+        // Defensive: an op kind not handled above. Full is always byte-identical.
+        return fall_back_to_full();
+    }
+
+    // `rec` carries structural deltas; attribute ops report none — the dirty set
+    // comes from `op`, so `rec` is unused on the attribute path below.
+    (void)rec;
 
     // ── Dirty set (SPEC §3) ─────────────────────────────────────────────────
     // `dirty` is the set of MESH NodeIds whose lowered entity must be recomputed.
