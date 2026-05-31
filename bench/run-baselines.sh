@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Run the bench and assert each baseline is within target. Returns 0 on
 # success, 1 if any baseline regressed.
+#
+# Measurement basis: aleph.cpu:perf CycleCounter (perf_event
+# PERF_COUNT_HW_CPU_CYCLES) — true core cycles, frequency-invariant, unlike the
+# old rdtscp TSC-tick count. The compute benches measure sustained throughput
+# (8 independent accumulators). The bench binary pins itself to a P-core (cpu 2)
+# at startup, because a hardware-cycles event reads 0 on the hybrid Core Ultra 7
+# 155H's E-cores. Targets below are calibrated for that configuration.
 set -euo pipefail
 
 BIN="${BIN:-./build-bench/bench/aleph_bench}"
