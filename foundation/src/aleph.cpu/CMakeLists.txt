@@ -4,7 +4,8 @@ target_sources(aleph_cpu
         aleph.cpu.cppm
         aleph.cpu-isa.cppm
         aleph.cpu-cycles.cppm
-        aleph.cpu-hints.cppm)
+        aleph.cpu-hints.cppm
+        aleph.cpu-perf.cppm)
 # Use aleph_flags_isa (not aleph_flags_strict) so the module BMI dialect
 # (exceptions/rtti mode) matches test consumers that use aleph_flags_test.
 # GCC hard-errors on cross-dialect BMI imports.
