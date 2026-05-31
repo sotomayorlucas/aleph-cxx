@@ -22,7 +22,11 @@ using aleph::math::from_axis_angle;
 int main() {
     // Pin to a P-core (cpu 2): on the hybrid Core Ultra 7 155H a hardware-cycles
     // perf event reads 0 on E-cores, so a consistent P-core is required for
-    // valid, stable measurements (run-baselines.sh also pins — belt and braces).
+    // valid measurements. Kept as a BARE call on purpose: these benches run at
+    // 0.5-4 cyc/op, so they are dominated by code alignment — wrapping this in a
+    // branch grew main() just enough to shift the throughput loops out of the
+    // uop cache and skewed them ~5x. The failed-pin case (which would report a
+    // bogus ~0 cyc/op) is caught layout-neutrally by run-baselines.sh's floor.
     cpu_set_t cpus;
     CPU_ZERO(&cpus);
     CPU_SET(2, &cpus);

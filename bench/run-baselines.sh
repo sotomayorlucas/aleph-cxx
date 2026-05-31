@@ -10,6 +10,8 @@
 # 155H's E-cores. Targets below are calibrated for that configuration.
 set -euo pipefail
 
+# BIN must be a single executable path (run via "$BIN", no word-splitting). The
+# binary self-pins to a P-core, so do not prefix with taskset.
 BIN="${BIN:-./build-bench/bench/aleph_bench}"
 [[ -x "$BIN" ]] || { echo "missing $BIN — run cmake --build build-bench first" >&2; exit 2; }
 
@@ -40,8 +42,15 @@ for name in "${!TARGETS[@]}"; do
         continue
     fi
     cyc=$(echo "$line" | awk '{for (i=1;i<=NF;i++) if ($i ~ /^[0-9.]+$/) {print $i; exit}}')
+    # Floor check: a real op cannot retire in < 0.05 core cycles. A near-zero
+    # reading means the cycle counter returned 0 — i.e. the bench ran unpinned on
+    # a hybrid E-core. Treat that as a failure, not a (false) pass.
     awk -v c="$cyc" -v t="$target" -v n="$name" \
-        'BEGIN { if (c+0 > t+0) { printf "FAIL %s: %s cyc > %s target\n", n, c, t; exit 1 } else { printf "OK   %s: %s cyc <= %s target\n", n, c, t } }' \
+        'BEGIN {
+            if (c+0 < 0.05)   { printf "FAIL %s: %s cyc implausibly low — pinning likely failed (E-core reads 0)\n", n, c; exit 1 }
+            else if (c+0 > t+0) { printf "FAIL %s: %s cyc > %s target\n", n, c, t; exit 1 }
+            else              { printf "OK   %s: %s cyc <= %s target\n", n, c, t }
+        }' \
         || fail=1
 done
 exit "$fail"
