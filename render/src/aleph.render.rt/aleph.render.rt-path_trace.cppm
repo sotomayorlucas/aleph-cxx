@@ -45,7 +45,8 @@ inline void render_tile(const aleph::scene::Scene& scene,
             aleph::math::Vec3 accum{};
             for (int s = 0; s < opts.spp; ++s) {
                 const aleph::math::Ray r = aleph::render::common::camera_get_ray(cam, i, j, rng);
-                accum = accum + ray_color(scene, r, opts.max_depth, sky, true, rng);
+                accum = accum + ray_color(scene, r, opts.max_depth, sky, true, rng,
+                                          opts.grouped_nee);
             }
             film.pixels[j * film.stride_pixels + i] = accum * inv_spp;
         }

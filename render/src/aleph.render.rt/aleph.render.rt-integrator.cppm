@@ -55,7 +55,7 @@ inline aleph::math::Vec3 direct_light_quad(
 [[nodiscard]] inline aleph::math::Vec3
 ray_color(const aleph::scene::Scene& scene, aleph::math::Ray r, int depth,
            aleph::render::common::Sky sky, bool include_emission,
-           aleph::render::common::Pcg32& rng) noexcept {
+           aleph::render::common::Pcg32& rng, bool grouped_nee = false) noexcept {
     if (depth <= 0) return aleph::math::Vec3{};
 
     auto rec_opt = aleph::scene::hit(scene, r, 0.001f,
@@ -77,10 +77,28 @@ ray_color(const aleph::scene::Scene& scene, aleph::math::Ray r, int depth,
             (rec.mat.kind == aleph::scene::MaterialKind::Lambertian)
                 ? scene.lamb.albedo[rec.mat.idx]
                 : sample_textured_albedo(scene, rec.mat.idx, rec.u, rec.v);
-        for (auto Lh : scene.lights) {
-            if (Lh.hittable_kind() != aleph::scene::HittableKind::Quad) continue;
-            direct = direct + detail::direct_light_quad(scene, Lh, rec.p, rec.normal,
-                                                         surf_albedo, rng);
+        if (grouped_nee && !scene.light_groups.empty()) {
+            // Group-stratified NEE (SPEC §4.3): for each group pick ONE light
+            // uniformly at random and weight its contribution by the group
+            // size. With one group per scene this matches the all-sum path in
+            // expectation (unbiased); with many lights it lowers variance.
+            for (const auto& group : scene.light_groups) {
+                if (group.empty()) continue;
+                const std::uint32_t n =
+                    static_cast<std::uint32_t>(group.size());
+                const aleph::scene::Handle32 Lh = group[rng.next() % n];
+                if (Lh.hittable_kind() != aleph::scene::HittableKind::Quad) continue;
+                const aleph::math::f32 w = static_cast<aleph::math::f32>(n);
+                direct = direct + detail::direct_light_quad(scene, Lh, rec.p,
+                                                            rec.normal, surf_albedo,
+                                                            rng) * w;
+            }
+        } else {
+            for (auto Lh : scene.lights) {
+                if (Lh.hittable_kind() != aleph::scene::HittableKind::Quad) continue;
+                direct = direct + detail::direct_light_quad(scene, Lh, rec.p, rec.normal,
+                                                             surf_albedo, rng);
+            }
         }
     }
 
@@ -89,7 +107,7 @@ ray_color(const aleph::scene::Scene& scene, aleph::math::Ray r, int depth,
 
     const bool nee_done = is_diffuse && !scene.lights.empty();
     const aleph::math::Vec3 indirect = ray_color(scene, scat->scattered, depth - 1,
-                                                   sky, !nee_done, rng);
+                                                   sky, !nee_done, rng, grouped_nee);
     return emit_v + direct
          + aleph::math::Vec3{
                scat->attenuation.x * indirect.x,

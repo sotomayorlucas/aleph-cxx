@@ -1,4 +1,5 @@
-// apps/aleph_lower_demo — Phase 5 end-to-end smoke (SPEC §8 item 9 / §9).
+// apps/aleph_lower_demo — Phase 5 end-to-end smoke (SPEC §8 item 9 / §9) plus
+// the Phase 5.x-a light-grouping smoke (SPEC §5 test 6).
 //
 //   GraphScene ──lower()──▶ LoweredScene ──build──▶ RenderScene ──path_trace──▶ PPM
 //
@@ -13,12 +14,20 @@
 // (insertion order, OrderedMap, f32). The render seed is fixed so the PPM is
 // reproducible.
 //
-// NOTE on `build_render_scene`: SPEC §4.3 sanctions that translation inside
-// `aleph.lowering:build`. That partition is still a W3 stub, so this demo
-// performs the *same* thin, decision-free translation locally (dispatch on the
-// `GeometryPayload` variant + `MaterialKind`, forward to the matching
-// `scene_add_*`, then build the BVH). When `:build` lands, the body of
-// `build_render_scene_local` is its implementation verbatim.
+// ── Light-grouping mode (Phase 5.x-a, SPEC §5 test 6) ────────────────────────
+// An optional flag — argv "grouped" or "--grouped" (in any position) — switches
+// the demo to a MULTI-light grouped scene: several area lights, some sharing the
+// mesh region they Influence so the VisibilitySheaf H⁰ grouping is NON-trivial
+// (more than one group, at least one group with >1 light). That path uses the
+// REAL `aleph::lowering::build_render_scene`, which bakes the IR's H⁰ light
+// groups into `Scene::light_groups`; rendering enables `RenderOpts.grouped_nee`
+// so the renderer reads that table (SPEC §4.2/§4.3). render.rt never imports
+// `aleph.sheaf` — it only sees the plain `scene.light_groups` field.
+//
+// NOTE on `build_render_scene`: the DEFAULT (no-flag) path keeps the original
+// thin local translation (`build_render_scene_local`) verbatim so it stays
+// byte-stable. The grouped path needs `Scene::light_groups`, which only the
+// shipped `aleph.lowering:build` partition populates, so it calls that instead.
 
 #include <cstdint>
 #include <cstdio>
@@ -105,6 +114,96 @@ aleph::graph::Graph build_enriched_graph() {
     return g;
 }
 
+// ── Author a MULTI-light grouped scene (SPEC §5 test 6 / §4.1) ───────────────
+//
+// A fully lowerable scene whose VisibilitySheaf H⁰ grouping is NON-trivial:
+//
+//   root Transform (identity)
+//     ├─Contains─▶ Camera
+//     ├─Contains─▶ Mesh ma ─References─▶ Material (Lambertian grey)
+//     ├─Contains─▶ Mesh mb ─References─▶ Material (Lambertian grey)
+//     ├─Contains─▶ Light la   ─Influences─▶ ma         (group {la})
+//     ├─Contains─▶ Light lb0  ─Influences─▶ mb     ┐
+//     ├─Contains─▶ Light lb1  ─Influences─▶ mb     ┘    (group {lb0, lb1})
+//     └─Contains─▶ Light lone (no Influences edge)      (group {lone})
+//
+// ma and mb are disjoint mesh regions (no Adjacent edge), so la's region and
+// the mb region are SEPARATE H⁰ components ⇒ separate groups; lb0 and lb1 both
+// Influence the SAME mesh mb, so they MERGE into one group; lone Influences
+// nothing, so it is its own singleton. Result: three groups, one of size two —
+// a grouping the path tracer's group-stratified NEE can act on.
+aleph::graph::Graph build_grouped_graph() {
+    using namespace aleph::types;
+    aleph::graph::Graph g;
+
+    const NodeId root = g.alloc_node_id();
+    g.insert_node(Transform{root, 0, LocalTransform{Mat4::identity()}});
+
+    const NodeId cam_id = g.alloc_node_id();
+    Camera cam{cam_id, std::string("sensor0")};
+    cam.look_from  = Vec3{0.0f, 1.5f, 6.0f};
+    cam.look_at    = Vec3{0.0f, 0.5f, 0.0f};
+    cam.up         = Vec3{0.0f, 1.0f, 0.0f};
+    cam.vfov_deg   = 50.0f;
+    cam.aperture   = 0.0f;
+    cam.focus_dist = 6.0f;
+    g.insert_node(std::move(cam));
+
+    // Two disjoint analytic spheres (no Adjacent edge between them).
+    const NodeId ma_id = g.alloc_node_id();
+    Mesh ma{ma_id, std::string("sphere_a"), 0};
+    ma.geometry = SphereLocal{Vec3{-1.5f, 0.5f, 0.0f}, 0.5f};
+    g.insert_node(std::move(ma));
+
+    const NodeId mb_id = g.alloc_node_id();
+    Mesh mb{mb_id, std::string("sphere_b"), 0};
+    mb.geometry = SphereLocal{Vec3{1.5f, 0.5f, 0.0f}, 0.5f};
+    g.insert_node(std::move(mb));
+
+    // One shared Lambertian grey material (non-emissive ⇒ stays out of the
+    // light table). Both meshes reference it.
+    const NodeId mat_id = g.alloc_node_id();
+    Material mat{mat_id, MaterialKind::Lambertian};
+    mat.albedo = Vec3{0.70f, 0.70f, 0.72f};
+    mat.emit   = Vec3{0.0f, 0.0f, 0.0f};
+    g.insert_node(std::move(mat));
+
+    // Four standalone area Lights, each its OWN emissive quad geometry.
+    auto add_area_light = [&](const char* name, Vec3 anchor) -> NodeId {
+        const NodeId id = g.alloc_node_id();
+        Light l{id, LightKind::Area, std::string(name)};
+        l.emission = Vec3{6.0f, 6.0f, 6.0f};
+        l.geometry = QuadLocal{anchor, Vec3{0.6f, 0.0f, 0.0f}, Vec3{0.0f, 0.0f, 0.6f}};
+        g.insert_node(std::move(l));
+        return id;
+    };
+    const NodeId la   = add_area_light("la",   Vec3{-1.8f, 2.5f, 0.0f});
+    const NodeId lb0  = add_area_light("lb0",  Vec3{1.2f, 2.5f, 0.0f});
+    const NodeId lb1  = add_area_light("lb1",  Vec3{1.8f, 2.5f, 0.0f});
+    const NodeId lone = add_area_light("lone", Vec3{0.0f, 3.0f, -1.5f});
+
+    // Hierarchy: root Contains the camera, both meshes and all four lights.
+    (void)g.add_edge(EdgeKind::Contains, root, cam_id);
+    (void)g.add_edge(EdgeKind::Contains, root, ma_id);
+    (void)g.add_edge(EdgeKind::Contains, root, mb_id);
+    (void)g.add_edge(EdgeKind::Contains, root, la);
+    (void)g.add_edge(EdgeKind::Contains, root, lb0);
+    (void)g.add_edge(EdgeKind::Contains, root, lb1);
+    (void)g.add_edge(EdgeKind::Contains, root, lone);
+
+    // Material resolution for both meshes (else DanglingReference).
+    (void)g.add_edge(EdgeKind::References, ma_id, mat_id);
+    (void)g.add_edge(EdgeKind::References, mb_id, mat_id);
+
+    // Influences edges drive the H⁰ grouping (SPEC §4.1):
+    //   la->ma  => group {la}; lb0->mb, lb1->mb => group {lb0,lb1};
+    //   lone has NO Influences edge => singleton {lone}.
+    (void)g.add_edge(EdgeKind::Influences, la,  ma_id);
+    (void)g.add_edge(EdgeKind::Influences, lb0, mb_id);
+    (void)g.add_edge(EdgeKind::Influences, lb1, mb_id);
+    return g;
+}
+
 // ── A scene material handle from normalized IR params (SPEC §4.3 dispatch) ───
 aleph::scene::MaterialHandle add_material(aleph::scene::Scene& s,
                                           const aleph::lowering::MaterialParams& m) {
@@ -164,11 +263,28 @@ aleph::scene::Scene build_render_scene_local(const aleph::lowering::LoweredScene
 }  // namespace
 
 int main(int argc, char** argv) {
-    const std::string out_path =
-        argc > 1 ? std::string(argv[1]) : std::string("/tmp/aleph_lower_demo.ppm");
+    // ── 0. Parse args: an optional grouping flag ("grouped" / "--grouped") in
+    // any position, plus an optional output path (the first non-flag arg). ─────
+    bool grouped = false;
+    std::string out_path;
+    for (int i = 1; i < argc; ++i) {
+        const std::string_view arg{argv[i]};
+        if (arg == "grouped" || arg == "--grouped") {
+            grouped = true;
+        } else if (out_path.empty()) {
+            out_path = std::string(arg);
+        }
+    }
+    if (out_path.empty()) {
+        out_path = grouped ? std::string("/tmp/aleph_lower_demo_grouped.ppm")
+                           : std::string("/tmp/aleph_lower_demo.ppm");
+    }
 
     // ── 1. The graph is the truth. ───────────────────────────────────────────
-    const aleph::graph::Graph g = build_enriched_graph();
+    // Default: the single-light enriched scene. With --grouped: a multi-light
+    // scene whose H⁰ light grouping is non-trivial (SPEC §5 test 6).
+    const aleph::graph::Graph g =
+        grouped ? build_grouped_graph() : build_enriched_graph();
 
     // ── 2. Lower: GraphScene → LoweredScene (frozen semantic IR). ─────────────
     auto lowered = aleph::lowering::lower(g);
@@ -185,9 +301,15 @@ int main(int argc, char** argv) {
     const aleph::lowering::LoweredScene& ls = *lowered;
 
     // ── 3. Build the RenderScene (SoA + BVH). ─────────────────────────────────
+    // Default path: the original thin local translation (byte-stable). Grouped
+    // path: the shipped `aleph.lowering:build`, which additionally bakes the
+    // IR's H⁰ light groups into `Scene::light_groups` (SPEC §4.2) — the only
+    // surface render.rt reads to drive group-stratified NEE.
     static unsigned char bvh_scratch[1 << 20];
     aleph::alloc::Arena bvh_arena{bvh_scratch, sizeof(bvh_scratch)};
-    aleph::scene::Scene scene = build_render_scene_local(ls, bvh_arena);
+    aleph::scene::Scene scene =
+        grouped ? aleph::lowering::build_render_scene(ls).scene
+                : build_render_scene_local(ls, bvh_arena);
 
     // ── 4. Path-trace into a film. ────────────────────────────────────────────
     constexpr int W = 320, H = 240;
@@ -205,8 +327,11 @@ int main(int argc, char** argv) {
     int threads = static_cast<int>(std::thread::hardware_concurrency());
     if (threads <= 0) threads = 1;
     aleph::threads::Pool pool(threads);
-    aleph::render::rt::path_trace(scene, cam, sky, film, pool,
-        aleph::render::rt::RenderOpts{32, 8, 42ull, 32});
+    // grouped_nee opts into group-stratified NEE off `scene.light_groups`; the
+    // default path leaves it false so the all-lights-sum render is unchanged.
+    aleph::render::rt::RenderOpts opts{32, 8, 42ull, 32};
+    opts.grouped_nee = grouped;
+    aleph::render::rt::path_trace(scene, cam, sky, film, pool, opts);
 
     // ── 5. Write the PPM (gamma 2.0 via byte_from_linear), like aleph_rt. ─────
     std::FILE* f = std::fopen(out_path.c_str(), "wb");
@@ -229,9 +354,12 @@ int main(int argc, char** argv) {
     }
     std::fclose(f);
 
-    // ── 6. Report the loop's shape (entity / light counts). ───────────────────
-    std::printf("aleph_lower_demo: entities=%zu lights=%zu handles=%zu -> %s (%dx%d)\n",
+    // ── 6. Report the loop's shape (entity / light / group counts). ───────────
+    std::printf("aleph_lower_demo: mode=%s entities=%zu lights=%zu handles=%zu "
+                "light_groups=%zu scene_groups=%zu grouped_nee=%d -> %s (%dx%d)\n",
+                grouped ? "grouped" : "default",
                 ls.entities.size(), ls.lights.size(), ls.handle_map.size(),
-                out_path.c_str(), W, H);
+                ls.light_groups.size(), scene.light_groups.size(),
+                opts.grouped_nee ? 1 : 0, out_path.c_str(), W, H);
     return 0;
 }
