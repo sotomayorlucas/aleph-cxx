@@ -14,6 +14,7 @@ import aleph.graph;       // Graph: nodes()/edges()/node()/edge()
 import aleph.types;       // enriched Node/Edge payloads (§3)
 import aleph.math;        // Vec3/Vec4/Mat4 + operator*
 import :grouping;         // light_groups_of (VisibilitySheaf H⁰ → light groups)
+import :importance;       // entity_importance (Ollivier-Ricci → per-Mesh importance)
 
 // ---------------------------------------------------------------------------
 // aleph.lowering:lower — the lowering functor (SPEC §4.2).
@@ -388,6 +389,22 @@ lower(const aleph::graph::Graph& g) {
     // (independent of the Contains traversal above), so it is computed once
     // here and baked into the frozen IR. Deterministic (insertion order).
     out.light_groups = light_groups_of(g);
+
+    // ── Per-entity importance (SPEC §4.1, Phase 5.x-b). Run Ollivier-Ricci over
+    // the Adjacent mesh skeleton (aggregated per Mesh, normalized to [0,1]) and
+    // bake it onto the frozen IR aligned to `entities`: importance[i] is the
+    // value for `entities[i].source`. A Mesh absent from the map (no Adjacent
+    // edges / degenerate "uniform" graph) gets 0. This is the ONLY place flow
+    // reaches the IR; downstream (`build_render_scene`) copies it into the Scene
+    // as a plain f32 array — `aleph.scene`/`render.rt` never see `aleph.flow`.
+    {
+        const auto imp = entity_importance(g);
+        out.importance.resize(out.entities.size(), 0.0);
+        for (std::size_t i = 0; i < out.entities.size(); ++i) {
+            const double* v = imp.get(out.entities[i].source);
+            out.importance[i] = (v != nullptr) ? *v : 0.0;
+        }
+    }
 
     return out;
 }

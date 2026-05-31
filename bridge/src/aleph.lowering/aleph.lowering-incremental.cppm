@@ -103,6 +103,7 @@ import :lowered;     // LoweredScene / LoweredEntity / MaterialParams (frozen IR
 import :lower;       // lower(), LoweredScene, LowerError, detail::to_world/to_params/luminance
 import :ops;         // Op (the editor op vocabulary)
 import :grouping;    // light_groups_of (kept in the partition closure)
+import :importance;  // entity_importance (Ollivier-Ricci → per-Mesh importance)
 import aleph.graph;  // Graph
 import aleph.dpo;    // RewriteRecord (what apply_op reported)
 import aleph.types;  // NodeId / NodeKind / EdgeKind / Mesh/Material/Transform
@@ -118,6 +119,13 @@ export namespace aleph::lowering {
 struct IncrementalStats {
     std::size_t recomputed_entities{};
     bool        light_groups_recomputed{false};
+    // Whether the Ollivier-Ricci → per-entity importance pass ran (SPEC §4.1,
+    // Phase 5.x-b). Importance is a pure function of the Adjacent mesh skeleton +
+    // the set of Meshes, so it is recomputed ONLY when the op dirtied that
+    // topology (a structural op that added/removed a Mesh or cascaded Adjacent
+    // edges); attribute ops (SetMaterial/SetTransform) and AddLight reuse
+    // `prev.importance` verbatim and leave this false (SPEC §6 incremental_importance).
+    bool        importance_recomputed{false};
 };
 
 }  // namespace aleph::lowering
@@ -444,6 +452,7 @@ lower_incremental_structural(const LoweredScene&              prev,
         if (full.has_value() && stats != nullptr) {
             stats->recomputed_entities     = full->entities.size();
             stats->light_groups_recomputed = true;
+            stats->importance_recomputed   = true;  // full lower recomputed importance
         }
         return full;
     };
@@ -515,6 +524,41 @@ lower_incremental_structural(const LoweredScene&              prev,
         }
     }
 
+    // ── importance (SPEC §4.1, Phase 5.x-b) ─────────────────────────────────
+    // Per-entity importance is a pure function of the Adjacent mesh skeleton +
+    // the set of Meshes (Ollivier-Ricci aggregated per Mesh, then min-max
+    // normalized across ALL meshes). A STRUCTURAL op that adds or removes a Mesh
+    // (AddObject / DeleteObject) changes that vertex/edge set — the normalization
+    // range and incident-edge sets shift — so importance MUST be recomputed.
+    // AddLight touches neither the mesh set nor any Adjacent edge, so every
+    // mesh's importance is unchanged; we reuse `prev`'s values, re-aligned to the
+    // new entity order by source (the mesh order is itself unchanged, but the
+    // by-source lookup is robust and costs O(N) over a copyable f64 map).
+    const bool importance_dirty = std::holds_alternative<AddObject>(op)
+                               || std::holds_alternative<DeleteObject>(op);
+    out.importance.resize(out.entities.size(), 0.0);
+    if (importance_dirty) {
+        const auto imp = entity_importance(after);
+        for (std::size_t i = 0; i < out.entities.size(); ++i) {
+            const double* v = imp.get(out.entities[i].source);
+            out.importance[i] = (v != nullptr) ? *v : 0.0;
+        }
+    } else {
+        // Reuse `prev.importance` verbatim, mapped by source: build the source ->
+        // importance association from `prev` (aligned to `prev.entities`) and
+        // re-emit it in `out`'s entity order. A survivor missing from `prev`
+        // cannot happen on the clean AddLight path (no mesh was added), but if it
+        // did we degrade to 0 (uniform) for that slot rather than misalign.
+        for (std::size_t i = 0; i < out.entities.size(); ++i) {
+            const NodeId src = out.entities[i].source;
+            const std::uint32_t* idx = prev.handle_map.get(src);
+            out.importance[i] =
+                (idx != nullptr && *idx < prev.importance.size())
+                    ? prev.importance[*idx]
+                    : 0.0;
+        }
+    }
+
     // ── light_groups (SPEC §4.4) ────────────────────────────────────────────
     // Recompute the sheaf H⁰ partition ONLY when the op may have changed it:
     //   * AddLight     — created a `Light` node (a new singleton group at least);
@@ -575,6 +619,7 @@ lower_incremental_structural(const LoweredScene&              prev,
         if (stats != nullptr) {
             stats->recomputed_entities     = recomputed;
             stats->light_groups_recomputed = true;
+            stats->importance_recomputed   = importance_dirty;
         }
         return out;
     }
@@ -583,6 +628,7 @@ lower_incremental_structural(const LoweredScene&              prev,
     if (stats != nullptr) {
         stats->recomputed_entities     = recomputed;
         stats->light_groups_recomputed = false;
+        stats->importance_recomputed   = importance_dirty;
     }
     return out;
 }
@@ -618,6 +664,7 @@ lower_incremental(const LoweredScene&              prev,
         if (full.has_value() && stats != nullptr) {
             stats->recomputed_entities     = full->entities.size();
             stats->light_groups_recomputed = true;
+            stats->importance_recomputed   = true;  // full lower recomputed importance
         }
         return full;
     };
@@ -672,6 +719,7 @@ lower_incremental(const LoweredScene&              prev,
             if (full.has_value() && stats != nullptr) {
                 stats->recomputed_entities     = full->entities.size();
                 stats->light_groups_recomputed = true;
+                stats->importance_recomputed   = true;  // full lower recomputed importance
             }
             return full;
         }
@@ -737,6 +785,7 @@ lower_incremental(const LoweredScene&              prev,
                 if (full.has_value() && stats != nullptr) {
                     stats->recomputed_entities     = full->entities.size();
                     stats->light_groups_recomputed = true;
+                    stats->importance_recomputed   = true;  // full lower recomputed importance
                 }
                 return full;
             }
@@ -748,6 +797,15 @@ lower_incremental(const LoweredScene&              prev,
         out.entities.push_back(ent);
         (void)out.handle_map.insert(src, index);
     }
+
+    // ── importance (SPEC §4.1, Phase 5.x-b) ─────────────────────────────────
+    // An ATTRIBUTE op (SetMaterial / SetTransform) changes NO graph topology: the
+    // mesh set and every `Adjacent` edge are untouched, so the Ollivier-Ricci
+    // aggregate and its min-max normalization are byte-identical to `prev`'s.
+    // `out.entities` is rebuilt in `prev.entities`' exact order, so `prev.
+    // importance` (aligned to `prev.entities`) re-aligns 1:1 — reuse it verbatim,
+    // skipping the flow pass entirely (SPEC §6 incremental_importance reuse case).
+    out.importance = prev.importance;
 
     // ── Light table ─────────────────────────────────────────────────────────
     // `lower()` builds `lights` during the SAME DFS that builds `entities`,
@@ -783,6 +841,10 @@ lower_incremental(const LoweredScene&              prev,
         if (stats != nullptr) {
             stats->recomputed_entities     = recomputed;
             stats->light_groups_recomputed = true;
+            // importance is topology-invariant under an attribute op: `out.
+            // importance` was reused from `prev` above (== full's), so the flow
+            // pass did NOT run.
+            stats->importance_recomputed   = false;
         }
         return out;
     }
@@ -812,6 +874,7 @@ lower_incremental(const LoweredScene&              prev,
                 if (full.has_value() && stats != nullptr) {
                     stats->recomputed_entities     = full->entities.size();
                     stats->light_groups_recomputed = true;
+                    stats->importance_recomputed   = true;  // full lower recomputed importance
                 }
                 return full;
             }
@@ -830,6 +893,8 @@ lower_incremental(const LoweredScene&              prev,
     if (stats != nullptr) {
         stats->recomputed_entities     = recomputed;
         stats->light_groups_recomputed = false;
+        // Attribute op: importance reused from `prev` verbatim (no flow pass).
+        stats->importance_recomputed   = false;
     }
     return out;
 }
