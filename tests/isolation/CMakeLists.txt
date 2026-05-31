@@ -33,3 +33,4 @@ aleph_iso_test(linalg_gf2    aleph_linalg_gf2)
 aleph_iso_test(linalg_sparse aleph_linalg_sparse)
 
 aleph_iso_test(sheaf aleph_sheaf)
+aleph_iso_test(flow  aleph_flow)

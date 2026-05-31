@@ -49,6 +49,11 @@ add_executable(aleph_tests
     sheaf/test_dec.cpp
     sheaf/test_mayer_vietoris.cpp
     sheaf/test_zigzag.cpp
+    flow/test_wasserstein1.cpp
+    flow/test_wasserstein2.cpp
+    flow/test_ollivier_ricci.cpp
+    flow/test_laplacian.cpp
+    flow/test_flow.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
@@ -79,7 +84,7 @@ target_compile_definitions(aleph_tests PRIVATE
     ALEPH_TLA_SCENE_GRAPH_PATH="${CMAKE_SOURCE_DIR}/formal/scene_graph.tla")
 target_link_libraries(aleph_tests PRIVATE
     aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io
-    aleph_types aleph_graph aleph_dpo aleph_sheaf
+    aleph_types aleph_graph aleph_dpo aleph_sheaf aleph_flow
     aleph_linalg_gf2 aleph_linalg_sparse
     aleph_scene aleph_render_common aleph_render_rt aleph_render_sw)
 add_test(NAME aleph_tests COMMAND aleph_tests)
