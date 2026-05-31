@@ -13,6 +13,7 @@ import aleph.containers;   // OrderedMap (move-only, insertion-ordered)
 import aleph.graph;       // Graph: nodes()/edges()/node()/edge()
 import aleph.types;       // enriched Node/Edge payloads (§3)
 import aleph.math;        // Vec3/Vec4/Mat4 + operator*
+import :grouping;         // light_groups_of (VisibilitySheaf H⁰ → light groups)
 
 // ---------------------------------------------------------------------------
 // aleph.lowering:lower — the lowering functor (SPEC §4.2).
@@ -88,6 +89,11 @@ struct LoweredScene {
     LoweredCamera              camera{};
     // NodeId -> index into `entities`. Stable, move-only (OrderedMap).
     aleph::containers::OrderedMap<aleph::types::NodeId, std::uint32_t> handle_map{};
+
+    // Light grouping by VisibilitySheaf H⁰ components (SPEC §4.1). Populated by
+    // `lower()` via `light_groups_of`. Empty => every light its own implicit
+    // group downstream (degenerate-but-valid).
+    std::vector<std::vector<aleph::types::NodeId>> light_groups{};
 
     LoweredScene() = default;
     LoweredScene(LoweredScene&&) = default;
@@ -371,6 +377,12 @@ lower(const aleph::graph::Graph& g) {
             }
         }
     }
+
+    // ── Light grouping (SPEC §4.1): partition lights by VisibilitySheaf H⁰
+    // connected components. Derived from the graph's Influences/Adjacent edges
+    // (independent of the Contains traversal above), so it is computed once
+    // here and baked into the frozen IR. Deterministic (insertion order).
+    out.light_groups = light_groups_of(g);
 
     return out;
 }
