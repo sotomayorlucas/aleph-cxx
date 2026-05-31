@@ -107,6 +107,11 @@ struct LoweredScene {
     // stable across re-lowering of the same graph (SPEC §7 determinism).
     containers::OrderedMap<types::NodeId, std::uint32_t> handle_map{};
 
+    // Light grouping by VisibilitySheaf H⁰ components (SPEC §4.1). Default
+    // empty; populated by the lowering. Empty => every light its own implicit
+    // group downstream (degenerate-but-valid).
+    std::vector<std::vector<types::NodeId>> light_groups;
+
     LoweredScene() = default;
 
     LoweredScene(const LoweredScene&)            = delete;

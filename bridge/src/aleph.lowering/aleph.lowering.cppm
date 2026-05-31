@@ -3,3 +3,4 @@ export import :lowered;
 export import :lower;
 export import :build;
 export import :ops;
+export import :grouping;

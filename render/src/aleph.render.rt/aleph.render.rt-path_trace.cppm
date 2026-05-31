@@ -18,6 +18,9 @@ struct RenderOpts {
     int max_depth{8};
     aleph::math::u64 base_seed{42};
     int tile_size{32};
+    // Opt-in group-stratified NEE (SPEC §4.3). Default false preserves the
+    // existing all-lights-sum path byte-for-byte.
+    bool grouped_nee{false};
 };
 
 namespace detail {

@@ -37,6 +37,10 @@ struct Scene {
     TexturedLambertianSoA   tex_lamb;
     std::vector<aleph::io::Image> textures;
     std::vector<Handle32>   lights;
+    // Groups of emissive-quad handles from `lights`, carried from the lowering
+    // (SPEC §4.2). Default empty => integrator treats all lights as one
+    // implicit group (= current behavior).
+    std::vector<std::vector<Handle32>> light_groups;
     BvhNodeArr              bvh;
 };
 
