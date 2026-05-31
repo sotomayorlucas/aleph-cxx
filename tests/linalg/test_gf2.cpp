@@ -1,6 +1,7 @@
 #include "doctest.h"
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <utility>
 #include <vector>
 import aleph.linalg.gf2;
@@ -160,4 +161,167 @@ TEST_CASE("null_space of all-zero matrix spans all of cols") {
     auto ker = m.null_space();
     CHECK(ker.size() == 4);
     for (const auto& k : ker) CHECK(mat_vec_mul(m, k).is_zero());
+}
+
+TEST_CASE("apply(identity, x) == x") {
+    BitMatrix i = BitMatrix::identity(70);  // spans 2 words
+    BitVec x(70);
+    const std::size_t idx[] = {0, 3, 63, 64, 69};
+    for (std::size_t k : idx) x.set(k, true);
+    BitVec y = i.apply(x);
+    CHECK(y == x);
+    // and against the independent oracle
+    CHECK(i.apply(x) == mat_vec_mul(i, x));
+}
+
+TEST_CASE("apply agrees with the independent oracle on a non-square matrix") {
+    BitMatrix m(2, 3);
+    m.set(0, 0, true); m.set(0, 2, true);  // row 0: 1 0 1
+    m.set(1, 1, true);                      // row 1: 0 1 0
+    BitVec v(3);
+    v.set(0, true); v.set(1, true);          // v = 1 1 0
+    BitVec out = m.apply(v);
+    CHECK(out == mat_vec_mul(m, v));
+    CHECK(out.get(0));   // row0 . v = 1
+    CHECK(out.get(1));   // row1 . v = 1
+}
+
+TEST_CASE("M.apply(k) == 0 for every k in kernel_basis()") {
+    std::uint64_t state = 0xD1B54A32D192ED03ull;
+    auto next_bit = [&state]() -> bool {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        return (state >> 33) & 1u;
+    };
+    const std::pair<std::size_t, std::size_t> shapes[] = {
+        {5, 7}, {6, 6}, {3, 9}, {8, 4},
+    };
+    for (auto [rows, cols] : shapes) {
+        for (int trial = 0; trial < 6; ++trial) {
+            BitMatrix m(rows, cols);
+            for (std::size_t r = 0; r < rows; ++r)
+                for (std::size_t c = 0; c < cols; ++c)
+                    if (next_bit()) m.set(r, c, true);
+            auto ker = m.kernel_basis();
+            CHECK(ker.size() == cols - m.rank());
+            for (const auto& k : ker) {
+                CHECK(k.size() == cols);
+                CHECK(m.apply(k).is_zero());
+            }
+        }
+    }
+}
+
+TEST_CASE("image_basis().size() == rank() and basis vectors are columns") {
+    std::uint64_t state = 0x2545F4914F6CDD1Dull;
+    auto next_bit = [&state]() -> bool {
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        return (state >> 33) & 1u;
+    };
+    const std::pair<std::size_t, std::size_t> shapes[] = {
+        {5, 7}, {7, 5}, {6, 6}, {4, 9}, {9, 3},
+    };
+    for (auto [rows, cols] : shapes) {
+        for (int trial = 0; trial < 6; ++trial) {
+            BitMatrix m(rows, cols);
+            for (std::size_t r = 0; r < rows; ++r)
+                for (std::size_t c = 0; c < cols; ++c)
+                    if (next_bit()) m.set(r, c, true);
+            auto img = m.image_basis();
+            CHECK(img.size() == m.rank());
+            for (const auto& b : img) CHECK(b.size() == rows);
+            // The image basis must itself be independent: stacking the basis
+            // vectors as columns of a (rows x rank) matrix gives full rank.
+            BitMatrix stacked = BitMatrix::from_cols(img, rows);
+            CHECK(stacked.rank() == img.size());
+        }
+    }
+}
+
+TEST_CASE("reduce_modulo_image of an original column is zero") {
+    BitMatrix m(4, 5);
+    // A deliberately rank-deficient matrix.
+    m.set(0, 0, true); m.set(1, 1, true); m.set(2, 2, true);
+    m.set(0, 3, true); m.set(1, 3, true);              // col3 = col0 xor col1
+    m.set(0, 4, true); m.set(2, 4, true); m.set(3, 4, true);
+    auto img = m.image_basis();
+    CHECK(img.size() == m.rank());
+    // Every original column lies in the column span, so reduces to zero.
+    for (std::size_t c = 0; c < m.cols(); ++c) {
+        BitVec col(m.rows());
+        for (std::size_t r = 0; r < m.rows(); ++r)
+            if (m.at(r, c)) col.set(r, true);
+        BitVec res = m.reduce_modulo_image(col, std::span<const BitVec>(img));
+        CHECK(res.is_zero());
+    }
+    // A vector outside the span reduces to something non-zero. The span here
+    // is all of R^4 only if rank == 4; build a vector guaranteed outside by
+    // checking the residue is non-zero whenever rank < rows.
+    if (m.rank() < m.rows()) {
+        // Find a standard basis vector not in the span.
+        bool found_outside = false;
+        for (std::size_t r = 0; r < m.rows() && !found_outside; ++r) {
+            BitVec e(m.rows());
+            e.set(r, true);
+            if (!m.reduce_modulo_image(e, std::span<const BitVec>(img)).is_zero())
+                found_outside = true;
+        }
+        CHECK(found_outside);
+    }
+}
+
+TEST_CASE("mul: associativity (A*B)*C == A*(B*C) on a small example") {
+    // A: 2x3, B: 3x2, C: 2x4 -> products are 2x4.
+    BitMatrix a(2, 3);
+    a.set(0, 0, true); a.set(0, 2, true);
+    a.set(1, 1, true); a.set(1, 2, true);
+    BitMatrix b(3, 2);
+    b.set(0, 0, true); b.set(0, 1, true);
+    b.set(1, 1, true);
+    b.set(2, 0, true);
+    BitMatrix c(2, 4);
+    c.set(0, 0, true); c.set(0, 3, true);
+    c.set(1, 1, true); c.set(1, 2, true);
+
+    BitMatrix lhs = a.mul(b).mul(c);
+    BitMatrix rhs = a.mul(b.mul(c));
+    CHECK(lhs.rows() == 2);
+    CHECK(lhs.cols() == 4);
+    for (std::size_t r = 0; r < 2; ++r)
+        for (std::size_t cc = 0; cc < 4; ++cc)
+            CHECK(lhs.at(r, cc) == rhs.at(r, cc));
+}
+
+TEST_CASE("mul against identity returns the original; is_zero detects zero matrix") {
+    BitMatrix a(3, 3);
+    a.set(0, 1, true);
+    a.set(1, 0, true);
+    a.set(2, 2, true);
+    BitMatrix i = BitMatrix::identity(3);
+    BitMatrix ai = a.mul(i);
+    BitMatrix ia = i.mul(a);
+    for (std::size_t r = 0; r < 3; ++r)
+        for (std::size_t c = 0; c < 3; ++c) {
+            CHECK(ai.at(r, c) == a.at(r, c));
+            CHECK(ia.at(r, c) == a.at(r, c));
+        }
+    CHECK_FALSE(a.is_zero());
+    CHECK(BitMatrix(4, 6).is_zero());
+    CHECK(a.mul(BitMatrix(3, 2)).is_zero());  // anything times zero is zero
+}
+
+TEST_CASE("from_cols places each vector down a column") {
+    BitVec c0(3); c0.set(0, true); c0.set(2, true);
+    BitVec c1(3); c1.set(1, true);
+    std::vector<BitVec> cols = {c0, c1};
+    BitMatrix m = BitMatrix::from_cols(std::span<const BitVec>(cols), 3);
+    CHECK(m.rows() == 3);
+    CHECK(m.cols() == 2);
+    CHECK(m.at(0, 0));
+    CHECK(m.at(2, 0));
+    CHECK(m.at(1, 1));
+    CHECK_FALSE(m.at(1, 0));
+    CHECK_FALSE(m.at(0, 1));
+    // apply(from_cols(cols), e_c) recovers column c.
+    BitVec e0(2); e0.set(0, true);
+    CHECK(m.apply(e0) == c0);
 }

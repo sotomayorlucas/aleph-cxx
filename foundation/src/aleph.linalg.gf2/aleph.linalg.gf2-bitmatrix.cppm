@@ -1,5 +1,7 @@
 module;
+#include <bit>
 #include <cstddef>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -115,6 +117,153 @@ public:
             basis.push_back(std::move(x));
         }
         return basis;
+    }
+
+    // Kernel basis: alias for null_space(). Basis of all x (cols-wide) with
+    // M x = 0; dimension cols - rank().
+    std::vector<BitVec> kernel_basis() const { return null_space(); }
+
+    // Matrix-vector product M*x over GF(2). `x` has width `cols`; the result
+    // has width `rows`. result[r] = XOR over c of (M[r][c] AND x[c]).
+    // Precondition: x.size() == cols(). No exceptions; ill-sized input is UB.
+    BitVec apply(const BitVec& x) const {
+        BitVec out(rows_count_);
+        for (std::size_t r = 0; r < rows_count_; ++r) {
+            // Row dot x over GF(2): xor of bits where both row and x are set.
+            const BitVec& row_r = rows_[r];
+            // Dot product over GF(2) = parity of the AND of the two bit vectors.
+            int ones = 0;
+            const std::size_t wc = row_r.word_count();
+            for (std::size_t k = 0; k < wc; ++k) {
+                ones += std::popcount(row_r.word(k) & x.word(k));
+            }
+            out.set(r, (ones & 1) != 0);
+        }
+        return out;
+    }
+
+    // Matrix product this * other over GF(2). Result is rows() x other.cols().
+    // Precondition: cols() == other.rows(). No exceptions; mismatch is UB.
+    BitMatrix mul(const BitMatrix& other) const {
+        BitMatrix out(rows_count_, other.cols_count_);
+        for (std::size_t r = 0; r < rows_count_; ++r) {
+            const BitVec& row_r = rows_[r];
+            for (std::size_t k = 0; k < cols_count_; ++k) {
+                // For each set entry M[r][k], add (xor) row k of `other`.
+                if (row_r.get(k)) out.rows_[r] ^= other.rows_[k];
+            }
+        }
+        return out;
+    }
+
+    // True iff every entry is zero.
+    bool is_zero() const noexcept {
+        for (const BitVec& r : rows_) {
+            if (!r.is_zero()) return false;
+        }
+        return true;
+    }
+
+    // Build a matrix whose column c is cols[c]. The result is
+    // `nrows` x cols.size(). Each input vector contributes its bits 0..nrows-1
+    // down the corresponding column. Precondition: every column has size
+    // >= nrows. No exceptions.
+    static BitMatrix from_cols(std::span<const BitVec> cols, std::size_t nrows) {
+        BitMatrix m(nrows, cols.size());
+        for (std::size_t c = 0; c < cols.size(); ++c) {
+            for (std::size_t r = 0; r < nrows; ++r) {
+                if (cols[c].get(r)) m.set(r, c, true);
+            }
+        }
+        return m;
+    }
+
+    // Basis of the column space im(M) over GF(2): the original columns of M
+    // that become pivot columns after row reduction. Each returned vector has
+    // width `rows`. Size equals rank().
+    std::vector<BitVec> image_basis() const {
+        std::vector<BitVec> m = rows_;  // working copy, reduced in place
+
+        std::vector<bool> is_pivot_col(cols_count_, false);
+        std::size_t pivot_row = 0;
+        for (std::size_t col = 0; col < cols_count_ && pivot_row < rows_count_; ++col) {
+            std::size_t sel = rows_count_;
+            for (std::size_t r = pivot_row; r < rows_count_; ++r) {
+                if (m[r].get(col)) { sel = r; break; }
+            }
+            if (sel == rows_count_) continue;
+            std::swap(m[pivot_row], m[sel]);
+            for (std::size_t r = 0; r < rows_count_; ++r) {
+                if (r != pivot_row && m[r].get(col)) m[r] ^= m[pivot_row];
+            }
+            is_pivot_col[col] = true;
+            ++pivot_row;
+        }
+
+        std::vector<BitVec> basis;
+        for (std::size_t c = 0; c < cols_count_; ++c) {
+            if (!is_pivot_col[c]) continue;
+            // Emit the original (unreduced) column c as a rows-wide vector.
+            BitVec col(rows_count_);
+            for (std::size_t r = 0; r < rows_count_; ++r) {
+                if (rows_[r].get(c)) col.set(r, true);
+            }
+            basis.push_back(std::move(col));
+        }
+        return basis;
+    }
+
+    // Reduce `v` modulo the span of `image` over GF(2). `image` is a set of
+    // rows-wide vectors (e.g. from image_basis()); the result is the residue
+    // v + span(image), reduced by Gaussian elimination. The residue is zero
+    // iff v lies in span(image). `image` need not be reduced or independent.
+    // No exceptions.
+    BitVec reduce_modulo_image(const BitVec& v, std::span<const BitVec> image) const {
+        // Build an echelon set keyed by pivot (lowest set bit) so reduction is
+        // independent of any assumed structure in `image`.
+        const std::size_t width = v.size();
+        std::vector<BitVec> echelon;          // each has a distinct pivot
+        std::vector<std::size_t> pivots;       // pivot index of echelon[i]
+
+        auto lowest_set = [width](const BitVec& b) -> std::size_t {
+            for (std::size_t i = 0; i < width; ++i) {
+                if (b.get(i)) return i;
+            }
+            return width;  // all-zero sentinel
+        };
+
+        for (const BitVec& bv : image) {
+            BitVec cur = bv;
+            std::size_t p = lowest_set(cur);
+            while (p < width) {
+                // Find an existing echelon vector with the same pivot.
+                std::size_t hit = echelon.size();
+                for (std::size_t i = 0; i < echelon.size(); ++i) {
+                    if (pivots[i] == p) { hit = i; break; }
+                }
+                if (hit == echelon.size()) break;  // new pivot
+                cur ^= echelon[hit];
+                p = lowest_set(cur);
+            }
+            if (p < width) {
+                echelon.push_back(std::move(cur));
+                pivots.push_back(p);
+            }
+        }
+
+        // Reduce v by the echelon set.
+        BitVec res = v;
+        std::size_t p = lowest_set(res);
+        while (p < width) {
+            std::size_t hit = echelon.size();
+            for (std::size_t i = 0; i < echelon.size(); ++i) {
+                if (pivots[i] == p) { hit = i; break; }
+            }
+            if (hit == echelon.size()) break;
+            res ^= echelon[hit];
+            p = lowest_set(res);
+        }
+        return res;
     }
 
 private:
