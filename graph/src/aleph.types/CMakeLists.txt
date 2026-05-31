@@ -7,4 +7,5 @@ target_sources(aleph_types
         aleph.types-node.cppm
         aleph.types-edge.cppm)
 # Populated by Tasks 3-8.
+target_link_libraries(aleph_types PUBLIC aleph_math)
 target_link_libraries(aleph_types PRIVATE aleph_flags_isa)

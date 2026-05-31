@@ -10,30 +10,53 @@ export module aleph.types:node;
 
 import :id;
 import :attribute;
+import aleph.math;  // Vec3, Mat4
 
 export namespace aleph::types {
 
-struct Mesh {
+// LOWERABLE LOCAL geometry payload — explicitly NOT the final mesh model.
+// v1 = analytic primitives; later grows to TriangleMeshRef / ObjMesh / Procedural / Sdf
+// without breaking the contract. Local space; world transform applied at lowering.
+struct SphereLocal { math::Vec3 center{}; math::f32 radius{1}; };
+struct QuadLocal   { math::Vec3 q{}, u{}, v{}; };
+struct TriLocal    { math::Vec3 a{}, b{}, c{}; };
+using GeometryPayload = std::variant<SphereLocal, QuadLocal, TriLocal>;
+
+// Local-transform abstraction. Storage is Mat4 in v1, but the graph depends on
+// LocalTransform (not a raw matrix) so it can grow to TRS / GA rotor / dual-quat /
+// constraints later without churning every consumer.
+struct LocalTransform { math::Mat4 m{ math::Mat4::identity() }; };
+
+struct Mesh {        // semantic entity + a lowerable geometry payload
     NodeId        id{};
     std::string   geometry_ref;
     std::uint32_t tris_count{};
+    GeometryPayload geometry{ SphereLocal{} };
 };
-struct Material {
+struct Material {    // physical params; `emit` is a RENDERABLE property, not "this is a light"
     NodeId       id{};
     MaterialKind kind{MaterialKind::Lambertian};
+    math::Vec3   albedo{0.8f, 0.8f, 0.8f};
+    math::f32    fuzz{0};
+    math::f32    ior{1.5f};
+    math::Vec3   emit{0, 0, 0};
 };
-struct Light {
+struct Light {       // an EXPLICIT sampling source in its own right (kept as a node)
     NodeId      id{};
     LightKind   kind{LightKind::Point};
     std::string emit_ref;
+    math::Vec3      emission{1, 1, 1};
+    GeometryPayload geometry{ QuadLocal{} };
 };
 struct Volume {
     NodeId     id{};
     MediumKind medium{MediumKind::Vacuum};
 };
-struct Camera {
+struct Camera {      // concrete pose
     NodeId      id{};
     std::string sensor_id;
+    math::Vec3  look_from{0, 0, 0}, look_at{0, 0, -1}, up{0, 1, 0};
+    math::f32   vfov_deg{40}, aperture{0}, focus_dist{1};
 };
 struct Texture {
     NodeId        id{};
@@ -44,6 +67,7 @@ struct Texture {
 struct Transform {
     NodeId        id{};
     std::uint32_t pose_slot{};
+    LocalTransform local{};
 };
 
 enum class NodeKind : std::uint8_t {

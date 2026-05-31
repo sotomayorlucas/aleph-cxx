@@ -40,22 +40,31 @@ class OrderedMap {
     static constexpr std::size_t INITIAL_BUCKETS = 16;
 
     // ---- slots_ raw storage helpers ----------------------------------------
+    // Slot may embed an over-aligned value (e.g. a variant holding an
+    // alignas(16) Vec3). When sizeof(Slot) is a multiple of 32 the optimiser
+    // emits 32-byte AVX (vmovdqa) stores while default-new only guarantees
+    // __STDCPP_DEFAULT_NEW_ALIGNMENT__ (16) -> SIGSEGV. Over-align the raw
+    // storage to at least the SIMD store width the codegen may assume.
+    static constexpr std::size_t kSlotAlign =
+        (alignof(Slot) < 32 && sizeof(Slot) % 32 == 0) ? 32 : alignof(Slot);
+    static constexpr std::align_val_t slots_align{kSlotAlign};
+
     void slots_release() noexcept {
         if (slots_) {
             for (std::size_t i = 0; i < slots_sz_; ++i) slots_[i].~Slot();
-            ::operator delete(slots_);
+            ::operator delete(slots_, slots_align);
             slots_ = nullptr; slots_sz_ = 0; slots_cap_ = 0;
         }
     }
 
     void slots_grow() {
         const std::size_t new_cap = (slots_cap_ == 0) ? 16 : slots_cap_ * 2;
-        Slot* nd = static_cast<Slot*>(::operator new(new_cap * sizeof(Slot)));
+        Slot* nd = static_cast<Slot*>(::operator new(new_cap * sizeof(Slot), slots_align));
         for (std::size_t i = 0; i < slots_sz_; ++i) {
             new (nd + i) Slot(std::move(slots_[i]));
             slots_[i].~Slot();
         }
-        ::operator delete(slots_);
+        ::operator delete(slots_, slots_align);
         slots_     = nd;
         slots_cap_ = new_cap;
     }
