@@ -31,6 +31,7 @@ else()
 endif()
 
 add_subdirectory(render)
+add_subdirectory(bridge)
 add_subdirectory(apps)
 
 add_subdirectory(bench)

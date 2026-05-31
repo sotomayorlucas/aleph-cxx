@@ -77,7 +77,15 @@ add_executable(aleph_tests
     render/test_sw_span_buffer.cpp
     render/test_sw_rasterize.cpp
     render/test_sw_lightmap.cpp
-    render/test_sw_rasterize_full.cpp)
+    render/test_sw_rasterize_full.cpp
+    lowering/test_lower_minimal.cpp
+    lowering/test_transform_hierarchy.cpp
+    lowering/test_build_render_scene.cpp
+    lowering/test_missing_reference.cpp
+    lowering/test_edit_material.cpp
+    lowering/test_add_object.cpp
+    lowering/test_dpo_edit.cpp
+    lowering/test_determinism.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_compile_definitions(aleph_tests PRIVATE
@@ -86,7 +94,8 @@ target_link_libraries(aleph_tests PRIVATE
     aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io
     aleph_types aleph_graph aleph_dpo aleph_sheaf aleph_flow
     aleph_linalg_gf2 aleph_linalg_sparse
-    aleph_scene aleph_render_common aleph_render_rt aleph_render_sw)
+    aleph_scene aleph_render_common aleph_render_rt aleph_render_sw
+    aleph_lowering)
 add_test(NAME aleph_tests COMMAND aleph_tests)
 
 if(ALEPH_HAVE_SDL2)
