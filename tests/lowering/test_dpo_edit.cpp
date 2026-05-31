@@ -15,6 +15,8 @@ import aleph.scene;
 import aleph.dpo;
 import aleph.lowering;
 
+#include "lowering_freeze.hpp"  // padding-proof, leaf-wise byte serializers
+
 // SPEC §8.7 — dpo_edit (anti-dangling). The STRUCTURAL leg of the return path.
 //
 //   editor gesture ──▶ Op ──▶ apply_op ──▶ TRANSACTIONAL graph rewrite ──▶ re-lower
@@ -155,88 +157,14 @@ Fixture make_fixture() {
 }
 
 // ── byte-image serializers (the rollback "unchanged" oracle) ─────────────────
-// LoweredScene holds a move-only OrderedMap, so it is neither copyable nor
-// trivially comparable. We freeze a lowering into a flat byte image (POD fields
-// in IR iteration order) and compare images with ==, the same technique
-// test_lower_minimal / test_edit_material use — which also pins insertion order
-// and f32 bit-patterns. Fields are walked explicitly (not memcpy'd) so the
-// alignas(16) padding inside Vec3-bearing structs never pollutes the compare.
-
-template <typename T>
-void put(std::vector<std::byte>& out, const T& v) {
-    static_assert(std::is_trivially_copyable_v<T>);
-    const auto* p = reinterpret_cast<const std::byte*>(&v);
-    out.insert(out.end(), p, p + sizeof(T));
-}
-
-void put_vec3(std::vector<std::byte>& out, const Vec3& v) {
-    put(out, v.x);
-    put(out, v.y);
-    put(out, v.z);
-}
-
-void put_geometry(std::vector<std::byte>& out,
-                  const aleph::types::GeometryPayload& g) {
-    put(out, static_cast<std::uint32_t>(g.index()));  // tag first
-    std::visit(
-        [&](const auto& prim) {
-            using P = std::decay_t<decltype(prim)>;
-            if constexpr (std::is_same_v<P, SphereLocal>) {
-                put_vec3(out, prim.center);
-                put(out, prim.radius);
-            } else if constexpr (std::is_same_v<P, QuadLocal>) {
-                put_vec3(out, prim.q);
-                put_vec3(out, prim.u);
-                put_vec3(out, prim.v);
-            } else {  // TriLocal
-                put_vec3(out, prim.a);
-                put_vec3(out, prim.b);
-                put_vec3(out, prim.c);
-            }
-        },
-        g);
-}
-
-void put_material(std::vector<std::byte>& out,
-                  const aleph::lowering::MaterialParams& m) {
-    put(out, static_cast<std::uint32_t>(m.kind));
-    put_vec3(out, m.albedo);
-    put(out, m.fuzz);
-    put(out, m.ior);
-    put_vec3(out, m.emit);
-}
-
-void put_entity(std::vector<std::byte>& out,
-                const aleph::lowering::LoweredEntity& e) {
-    put(out, e.source.value);
-    put_geometry(out, e.world_geometry);
-    put_material(out, e.material);
-}
-
-// Freeze a whole LoweredScene, walking everything in IR iteration order.
-std::vector<std::byte> freeze(const aleph::lowering::LoweredScene& ls) {
-    std::vector<std::byte> out;
-
-    put(out, static_cast<std::uint64_t>(ls.entities.size()));
-    for (const auto& e : ls.entities) put_entity(out, e);
-
-    put(out, static_cast<std::uint64_t>(ls.lights.size()));
-    for (const auto& e : ls.lights) put_entity(out, e);
-
-    put_vec3(out, ls.camera.look_from);
-    put_vec3(out, ls.camera.look_at);
-    put_vec3(out, ls.camera.up);
-    put(out, ls.camera.vfov_deg);
-    put(out, ls.camera.aperture);
-    put(out, ls.camera.focus_dist);
-
-    put(out, static_cast<std::uint64_t>(ls.handle_map.size()));
-    for (auto [nid, idx] : ls.handle_map) {
-        put(out, nid.value);
-        put(out, idx);
-    }
-    return out;
-}
+// Provided by lowering_freeze.hpp. LoweredScene holds a move-only OrderedMap, so
+// it is neither copyable nor trivially comparable. We freeze a lowering into a
+// flat byte image (scalar leaves in IR iteration order) and compare images with
+// ==, the same technique test_lower_minimal / test_edit_material use — which also
+// pins insertion order and f32 bit-patterns. Leaves are walked explicitly (not
+// memcpy'd) so the alignas(16) padding inside Vec3-bearing structs never
+// pollutes the compare.
+using aleph_test_freeze::freeze;
 
 // Count drawable primitives the RenderScene materialized. Used to confirm the
 // build is a total translation of the IR — a dangling handle would desync this.

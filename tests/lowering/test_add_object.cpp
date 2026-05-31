@@ -14,6 +14,8 @@ import aleph.graph;
 import aleph.dpo;       // RewriteRecord (apply_op's structured success report)
 import aleph.lowering;
 
+#include "lowering_freeze.hpp"  // padding-proof, leaf-wise byte serializers
+
 // SPEC §8.6 — add_object / add_light (the return path, STRUCTURAL ops).
 //
 //   Editing is a MORPHISM, not a mutation of the render product (SPEC §1): an
@@ -108,92 +110,15 @@ Seed make_seed() {
 }
 
 // ── padding-proof byte-image serializers for the frozen IR ───────────────────
-// We freeze entities / lights / camera / handle_map into flat byte images and
-// compare images. We walk FIELDS explicitly (never memcpy whole structs): the IR
-// value types embed `aleph::math::Vec3` (alignas(16)), so SphereLocal /
-// MaterialParams / LoweredCamera carry inter-field + trailing PADDING that
-// aggregate init does NOT zero. A raw memcpy would compare indeterminate padding
-// bytes; field-wise compares exactly the semantic state and is padding-proof.
-
-// Append the raw bytes of a scalar (integer / enum / f32) — no internal padding.
-template <typename T>
-void put(std::vector<std::byte>& out, const T& v) {
-    static_assert(std::is_trivially_copyable_v<T>);
-    const auto* p = reinterpret_cast<const std::byte*>(&v);
-    out.insert(out.end(), p, p + sizeof(T));
-}
-
-// A Vec3 by its three f32 components (skips the alignas(16) padding lane).
-void put_vec3(std::vector<std::byte>& out, const Vec3& v) {
-    put(out, v.x);
-    put(out, v.y);
-    put(out, v.z);
-}
-
-// A geometry primitive, field by field, after the variant tag.
-void put_geometry(std::vector<std::byte>& out,
-                  const aleph::types::GeometryPayload& g) {
-    put(out, static_cast<std::uint32_t>(g.index()));
-    std::visit(
-        [&](const auto& prim) {
-            using P = std::decay_t<decltype(prim)>;
-            if constexpr (std::is_same_v<P, SphereLocal>) {
-                put_vec3(out, prim.center);
-                put(out, prim.radius);
-            } else if constexpr (std::is_same_v<P, QuadLocal>) {
-                put_vec3(out, prim.q);
-                put_vec3(out, prim.u);
-                put_vec3(out, prim.v);
-            } else {  // TriLocal
-                put_vec3(out, prim.a);
-                put_vec3(out, prim.b);
-                put_vec3(out, prim.c);
-            }
-        },
-        g);
-}
-
-void put_material(std::vector<std::byte>& out,
-                  const aleph::lowering::MaterialParams& m) {
-    put(out, static_cast<std::uint32_t>(m.kind));
-    put_vec3(out, m.albedo);
-    put(out, m.fuzz);
-    put(out, m.ior);
-    put_vec3(out, m.emit);
-}
-
-// One entity (or light-table entry) -> flat bytes: source id, world geometry,
-// then the MaterialParams bundle — all field-wise (padding-proof).
-std::vector<std::byte> freeze_entity(const aleph::lowering::LoweredEntity& e) {
-    std::vector<std::byte> out;
-    put(out, e.source.value);
-    put_geometry(out, e.world_geometry);
-    put_material(out, e.material);
-    return out;
-}
-
-// The handle_map as bytes, walked in OrderedMap iteration order (id -> index).
-std::vector<std::byte> freeze_handle_map(const aleph::lowering::LoweredScene& ls) {
-    std::vector<std::byte> out;
-    put(out, static_cast<std::uint64_t>(ls.handle_map.size()));
-    for (auto [nid, idx] : ls.handle_map) {
-        put(out, nid.value);
-        put(out, idx);
-    }
-    return out;
-}
-
-// The camera pose as bytes, field by field (padding-proof).
-std::vector<std::byte> freeze_camera(const aleph::lowering::LoweredScene& ls) {
-    std::vector<std::byte> out;
-    put_vec3(out, ls.camera.look_from);
-    put_vec3(out, ls.camera.look_at);
-    put_vec3(out, ls.camera.up);
-    put(out, ls.camera.vfov_deg);
-    put(out, ls.camera.aperture);
-    put(out, ls.camera.focus_dist);
-    return out;
-}
+// Provided by lowering_freeze.hpp. We freeze entities / lights / camera /
+// handle_map into flat byte images and compare images. We walk LEAVES explicitly
+// (never memcpy whole structs): the IR value types embed `aleph::math::Vec3`
+// (alignas(16)), so SphereLocal / MaterialParams / LoweredCamera carry inter-
+// field + trailing PADDING that aggregate init does NOT zero. A raw memcpy would
+// compare indeterminate padding bytes; leaf-wise compares the semantic state.
+using aleph_test_freeze::freeze_camera;
+using aleph_test_freeze::freeze_entity;
+using aleph_test_freeze::freeze_handle_map;
 
 // Look up the entities index of `source` via the stable handle_map.
 const aleph::lowering::LoweredEntity*

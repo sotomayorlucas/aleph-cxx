@@ -13,6 +13,8 @@ import aleph.types;
 import aleph.graph;
 import aleph.lowering;
 
+#include "lowering_freeze.hpp"  // padding-proof, leaf-wise byte serializers
+
 // SPEC §8.1 — lower_minimal.
 //
 //   { root Transform -> Camera + Mesh(SphereLocal, Material Lambertian red) + Light }
@@ -87,49 +89,10 @@ Minimal make_minimal() {
 }
 
 // ── byte-image serializer for the frozen IR ─────────────────────────────────
-// Append the raw bytes of a trivially-copyable value.
-template <typename T>
-void put(std::vector<std::byte>& out, const T& v) {
-    static_assert(std::is_trivially_copyable_v<T>);
-    const auto* p = reinterpret_cast<const std::byte*>(&v);
-    out.insert(out.end(), p, p + sizeof(T));
-}
-
-void put_geometry(std::vector<std::byte>& out,
-                  const aleph::types::GeometryPayload& g) {
-    // Tag first so a Sphere/Quad/Tri of identical bytes can never collide.
-    put(out, static_cast<std::uint32_t>(g.index()));
-    std::visit([&](const auto& prim) { put(out, prim); }, g);
-}
-
-void put_entity(std::vector<std::byte>& out,
-                const aleph::lowering::LoweredEntity& e) {
-    put(out, e.source.value);
-    put_geometry(out, e.world_geometry);
-    // MaterialParams is a flat POD bundle of the normalized material fields.
-    put(out, e.material);
-}
-
-// Freeze a LoweredScene into a flat byte image, walking everything in IR
-// iteration order (entities, lights, camera, then handle_map order).
-std::vector<std::byte> freeze(const aleph::lowering::LoweredScene& ls) {
-    std::vector<std::byte> out;
-
-    put(out, static_cast<std::uint64_t>(ls.entities.size()));
-    for (const auto& e : ls.entities) put_entity(out, e);
-
-    put(out, static_cast<std::uint64_t>(ls.lights.size()));
-    for (const auto& e : ls.lights) put_entity(out, e);
-
-    put(out, ls.camera);
-
-    put(out, static_cast<std::uint64_t>(ls.handle_map.size()));
-    for (auto [nid, idx] : ls.handle_map) {
-        put(out, nid.value);
-        put(out, idx);
-    }
-    return out;
-}
+// Provided by lowering_freeze.hpp: leaf-wise, padding-proof. Whole-struct memcpy
+// of the IR's Vec3-bearing (alignas(16)) aggregates would capture indeterminate
+// padding and fail "byte-identical" CHECKs nondeterministically.
+using aleph_test_freeze::freeze;
 
 }  // namespace
 

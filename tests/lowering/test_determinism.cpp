@@ -13,6 +13,8 @@ import aleph.types;
 import aleph.graph;
 import aleph.lowering;
 
+#include "lowering_freeze.hpp"  // padding-proof, leaf-wise byte serializers
+
 // SPEC §8.8 — determinism.
 //
 //   "lower -> edit (an Op) -> lower yields a deterministic, consistent
@@ -135,106 +137,15 @@ Scene make_scene() {
     return s;
 }
 
-// ── byte-image serializers for the frozen IR (padding-proof, field-wise) ─────
-// Append the raw bytes of a scalar (integers / enums / f32). These have no
-// internal padding, so a raw copy is exact and deterministic.
-template <typename T>
-void put(std::vector<std::byte>& out, const T& v) {
-    static_assert(std::is_trivially_copyable_v<T>);
-    const auto* p = reinterpret_cast<const std::byte*>(&v);
-    out.insert(out.end(), p, p + sizeof(T));
-}
-
-// A Vec3 by its three f32 components (skips the alignas(16) padding lane).
-void put_vec3(std::vector<std::byte>& out, const Vec3& v) {
-    put(out, v.x);
-    put(out, v.y);
-    put(out, v.z);
-}
-
-// A geometry primitive, field by field, after the variant tag (so a
-// Sphere/Quad/Tri can never collide on payload bytes alone).
-void put_geometry(std::vector<std::byte>& out,
-                  const aleph::types::GeometryPayload& g) {
-    put(out, static_cast<std::uint32_t>(g.index()));
-    std::visit(
-        [&](const auto& prim) {
-            using P = std::decay_t<decltype(prim)>;
-            if constexpr (std::is_same_v<P, SphereLocal>) {
-                put_vec3(out, prim.center);
-                put(out, prim.radius);
-            } else if constexpr (std::is_same_v<P, QuadLocal>) {
-                put_vec3(out, prim.q);
-                put_vec3(out, prim.u);
-                put_vec3(out, prim.v);
-            } else {  // TriLocal
-                put_vec3(out, prim.a);
-                put_vec3(out, prim.b);
-                put_vec3(out, prim.c);
-            }
-        },
-        g);
-}
-
-// MaterialParams, field by field (kind + the four physical params).
-void put_material(std::vector<std::byte>& out,
-                  const aleph::lowering::MaterialParams& m) {
-    put(out, static_cast<std::uint32_t>(m.kind));
-    put_vec3(out, m.albedo);
-    put(out, m.fuzz);
-    put(out, m.ior);
-    put_vec3(out, m.emit);
-}
-
-// One entity (or light-table entry): source id, world geometry, MaterialParams.
-void put_entity(std::vector<std::byte>& out,
-                const aleph::lowering::LoweredEntity& e) {
-    put(out, e.source.value);
-    put_geometry(out, e.world_geometry);
-    put_material(out, e.material);
-}
-
-// Freeze a whole LoweredScene into a flat byte image, walking everything in IR
-// iteration order: entities, the light table, the camera pose, then the
-// handle_map in OrderedMap iteration (insertion) order. This is the literal
-// "byte-identical LoweredScene" the SPEC demands; it also pins insertion order
-// and f32 bit-patterns.
-std::vector<std::byte> freeze(const aleph::lowering::LoweredScene& ls) {
-    std::vector<std::byte> out;
-
-    put(out, static_cast<std::uint64_t>(ls.entities.size()));
-    for (const auto& e : ls.entities) put_entity(out, e);
-
-    put(out, static_cast<std::uint64_t>(ls.lights.size()));
-    for (const auto& e : ls.lights) put_entity(out, e);
-
-    put_vec3(out, ls.camera.look_from);
-    put_vec3(out, ls.camera.look_at);
-    put_vec3(out, ls.camera.up);
-    put(out, ls.camera.vfov_deg);
-    put(out, ls.camera.aperture);
-    put(out, ls.camera.focus_dist);
-
-    put(out, static_cast<std::uint64_t>(ls.handle_map.size()));
-    for (auto [nid, idx] : ls.handle_map) {
-        put(out, nid.value);
-        put(out, idx);
-    }
-    return out;
-}
-
-// Just the handle_map as bytes, walked in OrderedMap iteration order. The
-// determinism contract pins the handle_map specifically (SPEC §7/§8.8), so we
-// also diff it in isolation.
-std::vector<std::byte> freeze_handle_map(const aleph::lowering::LoweredScene& ls) {
-    std::vector<std::byte> out;
-    put(out, static_cast<std::uint64_t>(ls.handle_map.size()));
-    for (auto [nid, idx] : ls.handle_map) {
-        put(out, nid.value);
-        put(out, idx);
-    }
-    return out;
-}
+// ── byte-image serializers for the frozen IR (padding-proof, leaf-wise) ──────
+// Provided by lowering_freeze.hpp. Fields are walked EXPLICITLY (not memcpy'd
+// whole structs) because the IR's value types embed `aleph::math::Vec3`
+// (alignas(16)), so whole-struct copies would compare INDETERMINATE padding
+// bytes that `lower()`'s aggregate init does not zero. `freeze` walks the whole
+// scene; `freeze_handle_map` diffs the handle_map (the SPEC §7/§8.8 contract) in
+// isolation.
+using aleph_test_freeze::freeze;
+using aleph_test_freeze::freeze_handle_map;
 
 // ── handle_map consistency oracle (the "consistent handle_map" half of §8.8) ──
 // Against the live graph `g` the IR was lowered from:

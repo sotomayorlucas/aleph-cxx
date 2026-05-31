@@ -13,6 +13,8 @@ import aleph.types;
 import aleph.graph;
 import aleph.lowering;
 
+#include "lowering_freeze.hpp"  // padding-proof, leaf-wise byte serializers
+
 // SPEC §8.5 — edit_material (the return path, attribute op).
 //
 //   Editing is a MORPHISM, not a mutation (SPEC §1): an editor gesture becomes an
@@ -119,110 +121,21 @@ TwoMesh make_two_mesh() {
 }
 
 // ── byte-image serializers for the frozen IR ────────────────────────────────
-// We freeze each entity / light / camera / handle_map into a flat byte image and
-// compare the images. The oracle is "byte-identical meaningful state across the
-// re-lower"; to make that literal AND robust we walk FIELDS explicitly rather
-// than memcpy'ing whole structs.
+// Provided by lowering_freeze.hpp. We freeze each entity / light / camera /
+// handle_map into a flat byte image and compare images. The oracle is "byte-
+// identical meaningful state across the re-lower"; to make that literal AND
+// robust we walk LEAVES explicitly rather than memcpy'ing whole structs.
 //
-// Why field-wise: the IR's value types embed `aleph::math::Vec3`, which is
+// Why leaf-wise: the IR's value types embed `aleph::math::Vec3`, which is
 // `alignas(16)`. That makes `SphereLocal`/`MaterialParams`/`LoweredCamera` carry
-// inter-field and trailing PADDING (e.g. SphereLocal is 32 bytes for a 16-byte
-// payload). `lower()` builds these via aggregate init (`SphereLocal{world_pt,
-// r}`, `MaterialParams{kind,...}`), which does NOT zero padding — so a raw memcpy
-// would compare INDETERMINATE padding bytes that have nothing to do with the
-// edit, and a re-lower onto freshly-allocated vectors can leave different garbage
-// there. Walking fields compares exactly the semantic state and is padding-proof.
-
-// Append the raw bytes of a scalar (integers / enums / f32). These have no
-// internal padding, so a raw copy is exact and deterministic.
-template <typename T>
-void put(std::vector<std::byte>& out, const T& v) {
-    static_assert(std::is_trivially_copyable_v<T>);
-    const auto* p = reinterpret_cast<const std::byte*>(&v);
-    out.insert(out.end(), p, p + sizeof(T));
-}
-
-// A Vec3 by its three f32 components (skips the alignas(16) padding lane).
-void put_vec3(std::vector<std::byte>& out, const Vec3& v) {
-    put(out, v.x);
-    put(out, v.y);
-    put(out, v.z);
-}
-
-// A geometry primitive, field by field, after the variant tag.
-void put_geometry(std::vector<std::byte>& out,
-                  const aleph::types::GeometryPayload& g) {
-    // Tag first so a Sphere/Quad/Tri can never collide on payload bytes alone.
-    put(out, static_cast<std::uint32_t>(g.index()));
-    std::visit(
-        [&](const auto& prim) {
-            using P = std::decay_t<decltype(prim)>;
-            if constexpr (std::is_same_v<P, SphereLocal>) {
-                put_vec3(out, prim.center);
-                put(out, prim.radius);
-            } else if constexpr (std::is_same_v<P, QuadLocal>) {
-                put_vec3(out, prim.q);
-                put_vec3(out, prim.u);
-                put_vec3(out, prim.v);
-            } else {  // TriLocal
-                put_vec3(out, prim.a);
-                put_vec3(out, prim.b);
-                put_vec3(out, prim.c);
-            }
-        },
-        g);
-}
-
-// MaterialParams, field by field (kind + the four physical params).
-void put_material(std::vector<std::byte>& out,
-                  const aleph::lowering::MaterialParams& m) {
-    put(out, static_cast<std::uint32_t>(m.kind));
-    put_vec3(out, m.albedo);
-    put(out, m.fuzz);
-    put(out, m.ior);
-    put_vec3(out, m.emit);
-}
-
-// One entity (or light-table entry) -> flat bytes: source id, world geometry,
-// then the MaterialParams bundle — all field-wise (padding-proof).
-std::vector<std::byte> freeze_entity(const aleph::lowering::LoweredEntity& e) {
-    std::vector<std::byte> out;
-    put(out, e.source.value);
-    put_geometry(out, e.world_geometry);
-    put_material(out, e.material);
-    return out;
-}
-
-// Just the MaterialParams of an entity, as bytes. Used to assert the target's
-// material DID move and a bystander's did NOT.
-std::vector<std::byte> freeze_material(const aleph::lowering::LoweredEntity& e) {
-    std::vector<std::byte> out;
-    put_material(out, e.material);
-    return out;
-}
-
-// The handle_map as bytes, walked in OrderedMap iteration order (NodeId -> index).
-std::vector<std::byte> freeze_handle_map(const aleph::lowering::LoweredScene& ls) {
-    std::vector<std::byte> out;
-    put(out, static_cast<std::uint64_t>(ls.handle_map.size()));
-    for (auto [nid, idx] : ls.handle_map) {
-        put(out, nid.value);
-        put(out, idx);
-    }
-    return out;
-}
-
-// The camera pose as bytes, field by field (padding-proof).
-std::vector<std::byte> freeze_camera(const aleph::lowering::LoweredScene& ls) {
-    std::vector<std::byte> out;
-    put_vec3(out, ls.camera.look_from);
-    put_vec3(out, ls.camera.look_at);
-    put_vec3(out, ls.camera.up);
-    put(out, ls.camera.vfov_deg);
-    put(out, ls.camera.aperture);
-    put(out, ls.camera.focus_dist);
-    return out;
-}
+// inter-field and trailing PADDING. `lower()` builds these via aggregate init,
+// which does NOT zero padding — so a raw memcpy would compare INDETERMINATE
+// padding bytes that have nothing to do with the edit. Leaf-wise compares
+// exactly the semantic state and is padding-proof.
+using aleph_test_freeze::freeze_camera;
+using aleph_test_freeze::freeze_entity;
+using aleph_test_freeze::freeze_handle_map;
+using aleph_test_freeze::freeze_material;
 
 // Look up the entities index of `source` via the stable handle_map.
 const aleph::lowering::LoweredEntity*
