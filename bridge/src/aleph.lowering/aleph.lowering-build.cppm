@@ -51,17 +51,22 @@
 module;
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <type_traits>
 #include <variant>
+#include <vector>
 
 export module aleph.lowering:build;
 
-import aleph.scene;   // Scene, scene_add_sphere/quad/tri, scene_add_lambertian/
-                      // metal/dielectric/emissive, scene_build_bvh, MaterialHandle
-import aleph.types;   // GeometryPayload (SphereLocal/QuadLocal/TriLocal), MaterialKind
-import aleph.math;    // Vec3, f32
-import aleph.alloc;   // Arena (scratch for scene_build_bvh)
-import :lowered;      // LoweredScene, LoweredEntity, MaterialParams, LoweredCamera
+import aleph.scene;       // Scene, scene_add_sphere/quad/tri, scene_add_lambertian/
+                          // metal/dielectric/emissive, scene_build_bvh, MaterialHandle,
+                          // Handle32
+import aleph.types;       // GeometryPayload (SphereLocal/QuadLocal/TriLocal), MaterialKind,
+                          // NodeId
+import aleph.math;        // Vec3, f32
+import aleph.alloc;       // Arena (scratch for scene_build_bvh)
+import aleph.containers;  // OrderedMap (NodeId -> Handle32 light index, insertion-ordered)
+import :lowered;          // LoweredScene, LoweredEntity, MaterialParams, LoweredCamera
 
 namespace aleph::lowering::detail {
 
@@ -88,18 +93,22 @@ add_material(aleph::scene::Scene& s, const MaterialParams& m) {
 
 // Translate one resolved, world-space entity into the renderer scene: add its
 // material, then dispatch its `GeometryPayload` variant onto the matching
-// `scene_add_sphere/quad/tri`. Pure translation.
-inline void add_entity(aleph::scene::Scene& s, const LoweredEntity& e) {
+// `scene_add_sphere/quad/tri`. Pure translation. Returns the `Handle32` of the
+// primitive just appended — for an emissive entity this is exactly the handle
+// `scene_add_*` auto-registered into `Scene::lights`, which the light-grouping
+// pass (SPEC §4.2) maps back to the entity's source `NodeId`.
+[[nodiscard]] inline aleph::scene::Handle32
+add_entity(aleph::scene::Scene& s, const LoweredEntity& e) {
     const aleph::scene::MaterialHandle mat = add_material(s, e.material);
-    std::visit(
-        [&](const auto& g) {
+    return std::visit(
+        [&](const auto& g) -> aleph::scene::Handle32 {
             using G = std::decay_t<decltype(g)>;
             if constexpr (std::is_same_v<G, aleph::types::SphereLocal>) {
-                (void)aleph::scene::scene_add_sphere(s, g.center, g.radius, mat);
+                return aleph::scene::scene_add_sphere(s, g.center, g.radius, mat);
             } else if constexpr (std::is_same_v<G, aleph::types::QuadLocal>) {
-                (void)aleph::scene::scene_add_quad(s, g.q, g.u, g.v, mat);
+                return aleph::scene::scene_add_quad(s, g.q, g.u, g.v, mat);
             } else {  // aleph::types::TriLocal
-                (void)aleph::scene::scene_add_tri(s, g.a, g.b, g.c, mat);
+                return aleph::scene::scene_add_tri(s, g.a, g.b, g.c, mat);
             }
         },
         e.world_geometry);
@@ -129,11 +138,26 @@ struct RenderScene {
 build_render_scene(const LoweredScene& ls) {
     aleph::scene::Scene scene{};
 
+    // While replaying the IR we record, per emissive source `NodeId`, the
+    // `Handle32` that `scene_add_*` auto-registered into `Scene::lights`. This
+    // is the bridge the light-grouping pass (SPEC §4.2) uses to translate the
+    // IR's groups-of-NodeId into the Scene's groups-of-Handle32. Insertion-
+    // ordered `OrderedMap` keeps the build deterministic (SPEC §7); each light
+    // source produces exactly one emissive primitive, so the map is 1:1.
+    aleph::containers::OrderedMap<aleph::types::NodeId, aleph::scene::Handle32>
+        light_handle_of{};
+
     // Entities, in IR insertion order. Emissive Meshes self-register into the
     // renderer's light set via scene_add_* (Emissive material), matching the
     // §3 policy without an explicit re-add.
     for (const LoweredEntity& e : ls.entities) {
-        detail::add_entity(scene, e);
+        const aleph::scene::Handle32 h = detail::add_entity(scene, e);
+        // Record exactly the handles `scene_add_*` registered into
+        // `Scene::lights` — those with an Emissive-KIND material — so the
+        // NodeId->Handle32 map is 1:1 with the renderer's light set.
+        if (e.material.kind == aleph::types::MaterialKind::Emissive) {
+            (void)light_handle_of.insert(e.source, h);
+        }
     }
 
     // Standalone light-table entries: a `Light` node is NOT in `entities`
@@ -143,7 +167,33 @@ build_render_scene(const LoweredScene& ls) {
     // their geometry (SPEC §3 light-table policy).
     for (const LoweredEntity& l : ls.lights) {
         if (ls.handle_map.get(l.source) != nullptr) continue;  // emissive Mesh: already added
-        detail::add_entity(scene, l);
+        const aleph::scene::Handle32 h = detail::add_entity(scene, l);
+        if (l.material.kind == aleph::types::MaterialKind::Emissive) {
+            (void)light_handle_of.insert(l.source, h);
+        }
+    }
+
+    // Light grouping (SPEC §4.2): translate the IR's H⁰ light groups
+    // (groups of source `NodeId`) into groups of the emissive `Handle32`s now
+    // living in `Scene::lights`, mapping each grouped NodeId through the
+    // `light_handle_of` table built above. Order is preserved (groups in IR
+    // order, lights within a group in IR order) so the Scene grouping is
+    // byte-deterministic (SPEC §7). A NodeId with no emissive handle (defensive:
+    // it never reached the light table) is skipped, and a group that ends up
+    // empty is not emitted. If `ls.light_groups` is empty, `Scene::light_groups`
+    // stays empty and the integrator treats all lights as one implicit group
+    // (= current behavior, SPEC §4.2).
+    for (const std::vector<aleph::types::NodeId>& group : ls.light_groups) {
+        std::vector<aleph::scene::Handle32> mapped{};
+        mapped.reserve(group.size());
+        for (const aleph::types::NodeId id : group) {
+            if (const aleph::scene::Handle32* h = light_handle_of.get(id)) {
+                mapped.push_back(*h);
+            }
+        }
+        if (!mapped.empty()) {
+            scene.light_groups.push_back(std::move(mapped));
+        }
     }
 
     // Build the acceleration structure. `scene_build_bvh` takes a scratch arena
