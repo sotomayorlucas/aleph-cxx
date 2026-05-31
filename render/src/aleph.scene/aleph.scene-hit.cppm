@@ -19,8 +19,8 @@ struct HitRecord {
     aleph::math::f32  u, v;
     MaterialHandle    mat;
     bool              front_face;
-    // Per-primitive importance of the winning primitive (SPEC §4.1,
-    // Phase 5.x-b). Left 0 here; W2 wires hit() to set it from the store.
+    // Per-primitive importance of the winning primitive (SPEC §4.1/§4.2,
+    // Phase 5.x-b). hit() sets this from the winning primitive's SoA store.
     aleph::math::f32  importance{0};
 };
 
@@ -86,6 +86,9 @@ hit_sphere(const SphereSoA& s, std::uint32_t idx, aleph::math::Ray r,
     const aleph::math::f32 phi   = std::atan2(-outward.z, outward.x) + aleph::math::pi_f;
     rec.u = phi   / aleph::math::two_pi_f;
     rec.v = theta / aleph::math::pi_f;
+    // SPEC §4.2: carry the primitive's baked importance onto the record.
+    // Plain data from the parallel store; `aleph.scene` knows nothing of flow.
+    rec.importance = (idx < s.importance.size()) ? s.importance[idx] : 0.0f;
     return rec;
 }
 
@@ -109,6 +112,8 @@ hit_quad(const QuadSoA& q, std::uint32_t idx, aleph::math::Ray r,
     rec.t = t; rec.p = P; rec.mat = q.mat[idx]; rec.u = alpha; rec.v = beta;
     rec.front_face = aleph::math::dot(r.dir, n) < 0.0f;
     rec.normal     = rec.front_face ? n : -n;
+    // SPEC §4.2: carry the primitive's baked importance onto the record.
+    rec.importance = (idx < q.importance.size()) ? q.importance[idx] : 0.0f;
     return rec;
 }
 
@@ -137,6 +142,8 @@ hit_tri(const TriSoA& t, std::uint32_t idx, aleph::math::Ray r,
     const aleph::math::Vec3 outward = aleph::math::normalize(aleph::math::cross(e1, e2));
     rec.front_face = aleph::math::dot(r.dir, outward) < 0.0f;
     rec.normal     = rec.front_face ? outward : -outward;
+    // SPEC §4.2: carry the primitive's baked importance onto the record.
+    rec.importance = (idx < t.importance.size()) ? t.importance[idx] : 0.0f;
     return rec;
 }
 

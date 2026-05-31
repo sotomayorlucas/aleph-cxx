@@ -114,6 +114,35 @@ add_entity(aleph::scene::Scene& s, const LoweredEntity& e) {
         e.world_geometry);
 }
 
+// Bake one entity's importance (SPEC §4.2) into the SoA store that just received
+// its primitive. `add_entity` returned the appended primitive's `Handle32`, which
+// packs both the store family (`hittable_kind`) and the in-store index; we dispatch
+// on the family and overwrite `importance[index]` (default-initialized to 0 by the
+// `*_append` helpers) with the per-entity value, narrowed f64 -> f32 (SPEC §7: the
+// renderer-side store is f32; the IR keeps the f64 aggregate). Pure translation:
+// the index is exactly where the primitive landed, so the parallel `importance[]`
+// stays aligned 1:1 with the geometry arrays and the bake is insertion-ordered.
+inline void
+bake_importance(aleph::scene::Scene& s, aleph::scene::Handle32 h, double importance) {
+    const aleph::math::f32 v = static_cast<aleph::math::f32>(importance);
+    const std::uint32_t    idx = h.index();
+    switch (h.hittable_kind()) {
+        case aleph::scene::HittableKind::Sphere:
+            s.spheres.importance[idx] = v;
+            break;
+        case aleph::scene::HittableKind::Quad:
+            s.quads.importance[idx] = v;
+            break;
+        case aleph::scene::HittableKind::Tri:
+            s.tris.importance[idx] = v;
+            break;
+        case aleph::scene::HittableKind::BvhNode:
+            // Not a primitive store; `add_entity` never returns this. Defensive
+            // no-op keeps the dispatch total and deterministic.
+            break;
+    }
+}
+
 }  // namespace aleph::lowering::detail
 
 export namespace aleph::lowering {
@@ -150,8 +179,16 @@ build_render_scene(const LoweredScene& ls) {
     // Entities, in IR insertion order. Emissive Meshes self-register into the
     // renderer's light set via scene_add_* (Emissive material), matching the
     // §3 policy without an explicit re-add.
-    for (const LoweredEntity& e : ls.entities) {
+    for (std::size_t i = 0; i < ls.entities.size(); ++i) {
+        const LoweredEntity&         e = ls.entities[i];
         const aleph::scene::Handle32 h = detail::add_entity(scene, e);
+        // Bake this entity's importance into the SoA store the primitive landed
+        // in, at its appended index (SPEC §4.2). `ls.importance` is aligned to
+        // `ls.entities` (SPEC §4.1); guard the access so a shorter/empty vector
+        // (degenerate IR) simply leaves the store's default 0 importance =>
+        // uniform behavior, rather than reading out of bounds.
+        const double imp = (i < ls.importance.size()) ? ls.importance[i] : 0.0;
+        detail::bake_importance(scene, h, imp);
         // Record exactly the handles `scene_add_*` registered into
         // `Scene::lights` — those with an Emissive-KIND material — so the
         // NodeId->Handle32 map is 1:1 with the renderer's light set.
