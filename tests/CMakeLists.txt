@@ -31,6 +31,9 @@ add_executable(aleph_tests
     graph/test_graph_edges.cpp
     graph/test_invariants_1_5.cpp
     graph/test_invariants_6_10.cpp
+    linalg/test_gf2.cpp
+    linalg/test_sparse.cpp
+    dpo/test_dpo.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
@@ -61,7 +64,8 @@ target_compile_definitions(aleph_tests PRIVATE
     ALEPH_TLA_SCENE_GRAPH_PATH="${CMAKE_SOURCE_DIR}/formal/scene_graph.tla")
 target_link_libraries(aleph_tests PRIVATE
     aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io
-    aleph_types aleph_graph
+    aleph_types aleph_graph aleph_dpo
+    aleph_linalg_gf2 aleph_linalg_sparse
     aleph_scene aleph_render_common aleph_render_rt aleph_render_sw)
 add_test(NAME aleph_tests COMMAND aleph_tests)
 
