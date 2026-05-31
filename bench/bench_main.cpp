@@ -1,6 +1,10 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "bench_harness.hpp"
 #include <cstdio>
 #include <cstdint>
+#include <sched.h>
 
 import aleph.math;
 import aleph.alloc;
@@ -16,51 +20,96 @@ using aleph::math::Rotor;
 using aleph::math::from_axis_angle;
 
 int main() {
+    // Pin to a P-core (cpu 2): on the hybrid Core Ultra 7 155H a hardware-cycles
+    // perf event reads 0 on E-cores, so a consistent P-core is required for
+    // valid, stable measurements (run-baselines.sh also pins — belt and braces).
+    cpu_set_t cpus;
+    CPU_ZERO(&cpus);
+    CPU_SET(2, &cpus);
+    sched_setaffinity(0, sizeof(cpus), &cpus);
+
+    // NOTE: the throughput benches below run `iters / 8` outer iterations x 8
+    // lanes = `iters` ops, so the harness's `cycles / iters` is true per-op.
+    // This assumes `iters` is a multiple of 8 — the default (100000) is.
+
     aleph::cpu::assert_isa_compatible();
     std::printf("aleph-cxx foundation benchmarks (x86-64-v3, AVX2 + FMA)\n");
     std::printf("------------------------------------------------------\n");
 
-    // Rotor compose — target <= 6 cycles
+    // Rotor compose — throughput, 8 mutually-independent unit-rotor product
+    // chains (independent across lanes). Unit*unit stays unit-norm, so values
+    // never degenerate. Lanes are re-seeded from a0[] each sample so every
+    // sample measures identical work (matches the other benches' fresh-state).
     {
-        Rotor a = from_axis_angle({1, 0, 0}, 0.3f);
         const Rotor b = from_axis_angle({0, 1, 0}, 0.2f);
+        Rotor a0[8];
+        for (int k = 0; k < 8; ++k)
+            a0[k] = from_axis_angle({1, 0, 0}, 0.3f + 0.01f * static_cast<float>(k));
         aleph_bench::bench("Rotor compose", [&](std::uint64_t iters) {
-            for (std::uint64_t i = 0; i < iters; ++i) a = a * b;
-            return a;
+            Rotor a[8];
+            for (int k = 0; k < 8; ++k) a[k] = a0[k];
+            for (std::uint64_t i = 0; i < iters / 8; ++i)  // 8 lanes x iters/8 = iters ops
+                for (int k = 0; k < 8; ++k) a[k] = a[k] * b;
+            float acc = 0.0f;
+            for (int k = 0; k < 8; ++k) acc += a[k].s;  // escape all lanes
+            return acc;
         });
     }
 
-    // Vec3 dot — target <= 3 cycles
+    // Vec3 dot — throughput, 8 mutually-independent feedback chains (each lane a
+    // short feedback chain; lanes independent of each other for ILP).
+    // a[k].x = s[k]*1e-6 keeps each dot non-hoistable; s[k] stays small.
     {
-        Vec3 a{1, 2, 3};
-        const Vec3 b{4, 5, 6};
+        Vec3 a[8];
+        Vec3 b[8];
+        for (int k = 0; k < 8; ++k) {
+            a[k] = Vec3{1 + 0.1f * static_cast<float>(k), 2, 3};
+            b[k] = Vec3{4, 5, 6};
+        }
         aleph_bench::bench("Vec3 dot", [&](std::uint64_t iters) {
-            float s = 0;
-            for (std::uint64_t i = 0; i < iters; ++i) {
-                s += dot(a, b);
-                a.x = s * 1e-6f;
-            }
-            return s;
+            float s[8]{};
+            for (std::uint64_t i = 0; i < iters / 8; ++i)  // 8 lanes x iters/8 = iters ops
+                for (int k = 0; k < 8; ++k) {
+                    s[k] += dot(a[k], b[k]);
+                    a[k].x = s[k] * 1e-6f;
+                }
+            float acc = 0.0f;
+            for (int k = 0; k < 8; ++k) acc += s[k];
+            return acc;
         });
     }
 
-    // Vec3 add — target <= 3 cycles
+    // Vec3 add — throughput, 8 independent accumulators (each += b each iter,
+    // so never hoisted; magnitude ~iters, bounded).
     {
-        Vec3 a{0, 0, 0};
         const Vec3 b{1, 1, 1};
         aleph_bench::bench("Vec3 add", [&](std::uint64_t iters) {
-            for (std::uint64_t i = 0; i < iters; ++i) a = a + b;
-            return a;
+            Vec3 acc[8]{};
+            for (std::uint64_t i = 0; i < iters / 8; ++i)  // 8 lanes x iters/8 = iters ops
+                for (int k = 0; k < 8; ++k) acc[k] = acc[k] + b;
+            Vec3 r = acc[0];
+            for (int k = 1; k < 8; ++k) r = r + acc[k];
+            return r;
         });
     }
 
-    // Mat4 * Vec4 — target <= 8 cycles
+    // Mat4 * Vec4 — throughput, 8 independent matvecs accumulated per lane.
+    // v[k].x varies with i (so M*v[k] is not hoisted) but stays in [1, ~1.1];
+    // acc[k] grows to ~iters, bounded, no inf/denormal.
     {
         const Mat4 M = Mat4::perspective(1.0f, 16.0f/9.0f, 0.1f, 100.0f);
-        Vec4 v{1, 2, 3, 1};
+        Vec4 v[8];
+        for (int k = 0; k < 8; ++k) v[k] = Vec4{1.0f + 0.1f * static_cast<float>(k), 2, 3, 1};
         aleph_bench::bench("Mat4 * Vec4", [&](std::uint64_t iters) {
-            for (std::uint64_t i = 0; i < iters; ++i) v = M * v;
-            return v;
+            Vec4 acc[8]{};
+            for (std::uint64_t i = 0; i < iters / 8; ++i)  // 8 lanes x iters/8 = iters ops
+                for (int k = 0; k < 8; ++k) {
+                    v[k].x = 1.0f + 1e-6f * static_cast<float>(i + static_cast<std::uint64_t>(k));
+                    acc[k] = acc[k] + M * v[k];
+                }
+            Vec4 r = acc[0];
+            for (int k = 1; k < 8; ++k) r = r + acc[k];
+            return r;
         });
     }
 
