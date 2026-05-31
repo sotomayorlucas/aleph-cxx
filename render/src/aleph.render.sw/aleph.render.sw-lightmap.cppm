@@ -86,7 +86,7 @@ inline void bake_lightmap_face(Lightmap& lm,
     const aleph::math::Vec3 normal = aleph::math::normalize(aleph::math::cross(e1, e2));
     aleph::math::f32 u_min = face.uvs[0].x, u_max = face.uvs[0].x;
     aleph::math::f32 v_min = face.uvs[0].y, v_max = face.uvs[0].y;
-    for (int i = 1; i < 4; ++i) {
+    for (std::size_t i = 1; i < 4; ++i) {
         u_min = std::min(u_min, face.uvs[i].x);
         u_max = std::max(u_max, face.uvs[i].x);
         v_min = std::min(v_min, face.uvs[i].y);
@@ -112,7 +112,7 @@ inline void bake_lightmap_face(Lightmap& lm,
                 bool blocked = false;
                 for (int k = 0; k < n_faces; ++k) {
                     if (k == skip_idx) continue;
-                    if (detail::quad_blocks(all_faces[k], P_off, to_L, 1.0f)) {
+                    if (detail::quad_blocks(all_faces[static_cast<std::size_t>(k)], P_off, to_L, 1.0f)) {
                         blocked = true; break;
                     }
                 }
@@ -134,9 +134,9 @@ inline void bake_lightmaps(SceneRT& sr,
                             aleph::math::f32 ambient) noexcept {
     const int n = static_cast<int>(sr.faces.size());
     for (int i = 0; i < n; ++i) {
-        const aleph::math::u32 lmid = sr.faces[i].lightmap_id;
+        const aleph::math::u32 lmid = sr.faces[static_cast<std::size_t>(i)].lightmap_id;
         if (lmid == 0xFFFFFFFFu) continue;
-        bake_lightmap_face(sr.lightmaps[lmid], sr.faces[i],
+        bake_lightmap_face(sr.lightmaps[lmid], sr.faces[static_cast<std::size_t>(i)],
                             std::span<const Face>{sr.faces}, i,
                             light_pos, intensity, ambient);
     }

@@ -55,7 +55,7 @@ add_executable(aleph_tests
     render/test_sw_rasterize.cpp
     render/test_sw_lightmap.cpp
     render/test_sw_rasterize_full.cpp)
-target_include_directories(aleph_tests PRIVATE
+target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_compile_definitions(aleph_tests PRIVATE
     ALEPH_TLA_SCENE_GRAPH_PATH="${CMAKE_SOURCE_DIR}/formal/scene_graph.tla")

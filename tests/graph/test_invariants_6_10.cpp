@@ -33,10 +33,10 @@ TEST_CASE("check_material_referenced: each Mesh references exactly one Material"
         REQUIRE(!r.has_value());
         CHECK(r.error() == InvariantError::MaterialReferenced);
     }
-    g.add_edge(EdgeKind::References, mesh, mat);
+    (void)g.add_edge(EdgeKind::References, mesh, mat);
     CHECK(check_material_referenced(g).has_value());
     auto mat2 = g.alloc_node_id(); g.insert_node(Material{mat2, MaterialKind::Metal});
-    g.add_edge(EdgeKind::References, mesh, mat2);
+    (void)g.add_edge(EdgeKind::References, mesh, mat2);
     {
         auto r = check_material_referenced(g);
         REQUIRE(!r.has_value());
@@ -55,9 +55,9 @@ TEST_CASE("check_contains_antireflexive: Contains must not be symmetric") {
     Graph g;
     auto t1 = g.alloc_node_id(); g.insert_node(Transform{t1, 0});
     auto t2 = g.alloc_node_id(); g.insert_node(Transform{t2, 1});
-    g.add_edge(EdgeKind::Contains, t1, t2);
+    (void)g.add_edge(EdgeKind::Contains, t1, t2);
     CHECK(check_contains_antireflexive(g).has_value());
-    g.add_edge(EdgeKind::Contains, t2, t1);
+    (void)g.add_edge(EdgeKind::Contains, t2, t1);
     auto r = check_contains_antireflexive(g);
     REQUIRE(!r.has_value());
     CHECK(r.error() == InvariantError::ContainsAntireflexive);
@@ -68,7 +68,7 @@ TEST_CASE("check_bounded_degree: rejects in-degree above limit") {
     auto mat = g.alloc_node_id(); g.insert_node(Material{mat, MaterialKind::Lambertian});
     for (int i = 0; i < 5; ++i) {
         auto m = g.alloc_node_id(); g.insert_node(Mesh{m, std::string("m"), 1});
-        g.add_edge(EdgeKind::References, m, mat);
+        (void)g.add_edge(EdgeKind::References, m, mat);
     }
     CHECK(check_bounded_degree(g, 5).has_value());
     auto r = check_bounded_degree(g, 4);
@@ -86,14 +86,14 @@ TEST_CASE("validate_all: full suite on a well-formed scene") {
     auto b     = g.alloc_node_id(); g.insert_node(Mesh{b, std::string("b"), 1});
     auto mat   = g.alloc_node_id(); g.insert_node(Material{mat, MaterialKind::Lambertian});
     auto tex   = g.alloc_node_id(); g.insert_node(Texture{tex, 256, 256, TextureFormat::Rgb8});
-    g.add_edge(EdgeKind::Contains,   root,  child);
-    g.add_edge(EdgeKind::Contains,   child, a);
-    g.add_edge(EdgeKind::Contains,   child, b);
-    g.add_edge(EdgeKind::Contains,   root,  cam);
-    g.add_edge(EdgeKind::References, a,     mat);
-    g.add_edge(EdgeKind::References, b,     mat);
-    g.add_edge(EdgeKind::References, mat,   tex);
-    g.add_edge(EdgeKind::Influences, light, a);
+    (void)g.add_edge(EdgeKind::Contains,   root,  child);
+    (void)g.add_edge(EdgeKind::Contains,   child, a);
+    (void)g.add_edge(EdgeKind::Contains,   child, b);
+    (void)g.add_edge(EdgeKind::Contains,   root,  cam);
+    (void)g.add_edge(EdgeKind::References, a,     mat);
+    (void)g.add_edge(EdgeKind::References, b,     mat);
+    (void)g.add_edge(EdgeKind::References, mat,   tex);
+    (void)g.add_edge(EdgeKind::Influences, light, a);
 
     auto r = validate_all(g, 64);
     CHECK(r.has_value());

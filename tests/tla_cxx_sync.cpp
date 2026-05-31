@@ -52,7 +52,8 @@ extract_edge_type_compat(const std::string& source) {
     const std::regex header(R"(EdgeTypeCompat\s*==\s*\[)");
     std::smatch m;
     if (!std::regex_search(source, m, header)) return {};
-    const std::size_t start = static_cast<std::size_t>(m.position(0)) + m.length(0);
+    const std::size_t start =
+        static_cast<std::size_t>(m.position(0)) + static_cast<std::size_t>(m.length(0));
     // Walk from `start` until the matching `]`, accounting for nested `[`.
     int depth = 1;
     std::size_t end = start;
@@ -91,7 +92,8 @@ std::vector<std::string> extract_invariant_names(const std::string& source) {
     const std::regex header(R"(^Invariants\s*==)", std::regex::multiline);
     std::smatch m;
     if (!std::regex_search(source, m, header)) return {};
-    const std::size_t start = static_cast<std::size_t>(m.position(0)) + m.length(0);
+    const std::size_t start =
+        static_cast<std::size_t>(m.position(0)) + static_cast<std::size_t>(m.length(0));
     const std::string rest = source.substr(start);
 
     // Match every `/\ Word` token in the block.

@@ -26,7 +26,7 @@ TEST_CASE("check_edge_endpoints_exist: passes when all endpoints present") {
     Graph g;
     auto a = g.alloc_node_id(); g.insert_node(Mesh{a, std::string("a"), 1});
     auto b = g.alloc_node_id(); g.insert_node(Mesh{b, std::string("b"), 1});
-    g.add_edge(EdgeKind::Adjacent, a, b);
+    (void)g.add_edge(EdgeKind::Adjacent, a, b);
     CHECK(check_edge_endpoints_exist(g).has_value());
 }
 
@@ -35,8 +35,8 @@ TEST_CASE("check_edge_type_compat: passes on a well-typed graph") {
     auto a   = g.alloc_node_id(); g.insert_node(Mesh{a, std::string("a"), 1});
     auto b   = g.alloc_node_id(); g.insert_node(Mesh{b, std::string("b"), 1});
     auto mat = g.alloc_node_id(); g.insert_node(Material{mat, MaterialKind::Lambertian});
-    g.add_edge(EdgeKind::Adjacent,   a, b);
-    g.add_edge(EdgeKind::References, a, mat);
+    (void)g.add_edge(EdgeKind::Adjacent,   a, b);
+    (void)g.add_edge(EdgeKind::References, a, mat);
     CHECK(check_edge_type_compat(g).has_value());
 }
 
@@ -45,9 +45,9 @@ TEST_CASE("check_transform_acyclic: detects Contains cycle among Transforms") {
     auto t1 = g.alloc_node_id(); g.insert_node(Transform{t1, 0});
     auto t2 = g.alloc_node_id(); g.insert_node(Transform{t2, 1});
     auto t3 = g.alloc_node_id(); g.insert_node(Transform{t3, 2});
-    g.add_edge(EdgeKind::Contains, t1, t2);
-    g.add_edge(EdgeKind::Contains, t2, t3);
-    g.add_edge(EdgeKind::Contains, t3, t1);
+    (void)g.add_edge(EdgeKind::Contains, t1, t2);
+    (void)g.add_edge(EdgeKind::Contains, t2, t3);
+    (void)g.add_edge(EdgeKind::Contains, t3, t1);
     auto r = check_transform_acyclic(g);
     REQUIRE(!r.has_value());
     CHECK(r.error() == InvariantError::TransformAcyclic);

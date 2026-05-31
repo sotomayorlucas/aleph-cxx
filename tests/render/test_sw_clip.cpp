@@ -33,5 +33,5 @@ TEST_CASE("clip_triangle_near: 1 in, 2 out → 1 sub-tri") {
     std::array<ClipVert, 6> out{};
     const int n = clip_triangle_near(in, o1, o2, 0.1f, out);
     CHECK(n == 1);
-    for (int i = 0; i < 3; ++i) CHECK(out[i].w >= 0.1f);
+    for (std::size_t i = 0; i < 3; ++i) CHECK(out[i].w >= 0.1f);
 }

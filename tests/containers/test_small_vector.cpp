@@ -1,4 +1,5 @@
 #include "doctest.h"
+#include <cstddef>
 #include <utility>
 import aleph.containers;
 
@@ -9,7 +10,7 @@ TEST_CASE("SmallVector<int, 4>: inline up to N, no heap allocations") {
     for (int i = 0; i < 4; ++i) v.push_back(i);
     CHECK(v.size() == 4);
     CHECK(v.is_inline());
-    for (int i = 0; i < 4; ++i) CHECK(v[i] == i);
+    for (int i = 0; i < 4; ++i) CHECK(v[static_cast<std::size_t>(i)] == i);
 }
 
 TEST_CASE("SmallVector spills to heap past N") {
@@ -17,7 +18,7 @@ TEST_CASE("SmallVector spills to heap past N") {
     for (int i = 0; i < 10; ++i) v.push_back(i);
     CHECK(v.size() == 10);
     CHECK_FALSE(v.is_inline());
-    for (int i = 0; i < 10; ++i) CHECK(v[i] == i);
+    for (int i = 0; i < 10; ++i) CHECK(v[static_cast<std::size_t>(i)] == i);
 }
 
 TEST_CASE("SmallVector noexcept move + range-based for") {

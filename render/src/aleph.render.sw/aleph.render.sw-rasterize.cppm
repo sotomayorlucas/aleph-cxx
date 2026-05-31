@@ -44,23 +44,23 @@ inline void rasterize(const SceneRT& sr, aleph::math::Mat4 mvp,
                        aleph::render::common::Film& fb,
                        std::span<aleph::math::f32> depth,
                        aleph::threads::Pool& pool) noexcept {
-    const int N = static_cast<int>(sr.faces.size());
+    const std::size_t N = sr.faces.size();
     if (N == 0) return;
 
-    std::vector<int> order(static_cast<std::size_t>(N));
-    for (int i = 0; i < N; ++i) order[i] = i;
-    std::vector<aleph::math::f32> dist_sq(static_cast<std::size_t>(N), 0.0f);
-    for (int i = 0; i < N; ++i) {
+    std::vector<int> order(N);
+    for (std::size_t i = 0; i < N; ++i) order[i] = static_cast<int>(i);
+    std::vector<aleph::math::f32> dist_sq(N, 0.0f);
+    for (std::size_t i = 0; i < N; ++i) {
         const aleph::math::Vec3 c = detail::face_center(sr.faces[i]);
         const aleph::math::Vec4 cp = mvp * aleph::math::Vec4{c.x, c.y, c.z, 1.0f};
         dist_sq[i] = cp.z / (cp.w > 1e-6f ? cp.w : 1e-6f);
     }
     std::sort(order.begin(), order.end(),
-              [&](int a, int b){ return dist_sq[a] < dist_sq[b]; });
+              [&](int a, int b){ return dist_sq[static_cast<std::size_t>(a)] < dist_sq[static_cast<std::size_t>(b)]; });
 
-    std::vector<std::array<ClipVert, 4>> clip_verts(static_cast<std::size_t>(N));
-    for (int i = 0; i < N; ++i) {
-        for (int k = 0; k < 4; ++k) {
+    std::vector<std::array<ClipVert, 4>> clip_verts(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        for (std::size_t k = 0; k < 4; ++k) {
             const auto& vt = sr.faces[i].verts[k];
             const auto& uv = sr.faces[i].uvs[k];
             const aleph::math::Vec4 v{vt.x, vt.y, vt.z, 1.0f};
@@ -77,19 +77,19 @@ inline void rasterize(const SceneRT& sr, aleph::math::Mat4 mvp,
         constexpr std::array<std::array<aleph::math::u8, 3>, 2> quad_tris{{
             {0, 1, 2}, {0, 2, 3}
         }};
-        for (int oi = 0; oi < N; ++oi) {
-            const int idx = order[oi];
+        for (std::size_t oi = 0; oi < N; ++oi) {
+            const std::size_t idx = static_cast<std::size_t>(order[oi]);
             const Face& face = sr.faces[idx];
             const auto& cv = clip_verts[idx];
             const Lightmap* lm = (face.lightmap_id == 0xFFFFFFFFu)
                                   ? nullptr : &sr.lightmaps[face.lightmap_id];
-            for (int t = 0; t < 2; ++t) {
+            for (std::size_t t = 0; t < 2; ++t) {
                 const ClipVert a = cv[quad_tris[t][0]];
                 const ClipVert b = cv[quad_tris[t][1]];
                 const ClipVert c = cv[quad_tris[t][2]];
                 std::array<ClipVert, 6> clipped{};
                 const int n_tris = clip_triangle_near(a, b, c, 0.1f, clipped);
-                for (int k = 0; k < n_tris; ++k) {
+                for (std::size_t k = 0; k < static_cast<std::size_t>(n_tris); ++k) {
                     const ScreenVert s0 = detail::to_screen(clipped[k*3 + 0], fb.width, fb.height);
                     const ScreenVert s1 = detail::to_screen(clipped[k*3 + 1], fb.width, fb.height);
                     const ScreenVert s2 = detail::to_screen(clipped[k*3 + 2], fb.width, fb.height);

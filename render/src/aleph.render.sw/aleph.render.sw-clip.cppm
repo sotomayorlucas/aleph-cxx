@@ -1,5 +1,6 @@
 module;
 #include <array>
+#include <cstddef>
 
 export module aleph.render.sw:clip;
 
@@ -46,9 +47,9 @@ inline int clip_triangle_near(ClipVert a, ClipVert b, ClipVert c,
     if (n_in == 3) { out[0] = a; out[1] = b; out[2] = c; return 1; }
 
     std::array<ClipVert, 4> poly{};
-    int n = 0;
-    for (int i = 0; i < 3; ++i) {
-        const int j = (i + 1) % 3;
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < 3; ++i) {
+        const std::size_t j = (i + 1) % 3;
         if (ins[i]) poly[n++] = verts[i];
         if (ins[i] != ins[j]) {
             const aleph::math::f32 t =
@@ -58,14 +59,14 @@ inline int clip_triangle_near(ClipVert a, ClipVert b, ClipVert c,
             ++n;
         }
     }
-    int n_tris = 0;
-    for (int i = 1; i < n - 1; ++i) {
+    std::size_t n_tris = 0;
+    for (std::size_t i = 1; i + 1 < n; ++i) {
         out[n_tris * 3 + 0] = poly[0];
         out[n_tris * 3 + 1] = poly[i];
         out[n_tris * 3 + 2] = poly[i + 1];
         ++n_tris;
     }
-    return n_tris;
+    return static_cast<int>(n_tris);
 }
 
 }  // namespace aleph::render::sw

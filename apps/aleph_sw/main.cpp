@@ -58,7 +58,7 @@ int main(int /*argc*/, char** /*argv*/) {
         std::array<aleph::window::Event, 64> evbuf{};
         const int nev = win.poll_events(std::span<aleph::window::Event>{evbuf});
         bool clicked_pick = false;
-        for (int i = 0; i < nev; ++i) {
+        for (std::size_t i = 0; i < static_cast<std::size_t>(nev); ++i) {
             const auto& e = evbuf[i];
             switch (e.kind) {
                 case aleph::window::Event::Kind::Quit: running = false; break;

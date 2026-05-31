@@ -46,7 +46,7 @@ load_obj(std::span<const std::byte> bytes) noexcept {
                 mesh.verts.push_back(v);
         } else if (line.size() >= 2 && line[0] == 'f' && line[1] == ' ') {
             std::array<int, 16> idx{};
-            int n_idx = 0;
+            std::size_t n_idx = 0;
             const char* p   = buf + 2;
             const char* end = buf + len;
             while (p < end && n_idx < 16) {
@@ -60,7 +60,7 @@ load_obj(std::span<const std::byte> bytes) noexcept {
             }
             // Fan-triangulate: need at least 3 vertices.
             if (n_idx < 3) continue;
-            for (int k = 1; k < n_idx - 1; ++k) {
+            for (std::size_t k = 1; k < n_idx - 1; ++k) {
                 const int a = idx[0], b = idx[k], c = idx[k + 1];
                 const int n = static_cast<int>(mesh.verts.size());
                 if (a < 0 || a >= n || b < 0 || b >= n || c < 0 || c >= n) continue;

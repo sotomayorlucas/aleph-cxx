@@ -35,7 +35,7 @@ inline void render_tile(const aleph::scene::Scene& scene,
     const int x1 = std::min(x0 + opts.tile_size, film.width);
     const int y1 = std::min(y0 + opts.tile_size, film.height);
     aleph::render::common::Pcg32 rng(opts.base_seed,
-                                       static_cast<aleph::math::u64>(tile_idx) + 1ull);
+                                       static_cast<aleph::math::u64>(tile_idx) + aleph::math::u64{1});
     const aleph::math::f32 inv_spp = 1.0f / static_cast<aleph::math::f32>(opts.spp);
     for (int j = y0; j < y1; ++j) {
         for (int i = x0; i < x1; ++i) {
