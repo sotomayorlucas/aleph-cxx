@@ -167,3 +167,16 @@ The point is an honest, reproducible gate — not preserving the old aspirationa
   median-of-50.
 - Throughput numbers may move in **either** direction versus the old TSC figures; the
   recalibration in §5 is empirical and is the last implementation step.
+- **Hybrid E-cores read 0 cycles.** A `PERF_COUNT_HW_CPU_CYCLES` event returns 0 while the
+  thread runs on an E-core (cpu ≥ 12 on the 155H). Both the bench (`main()`) and the unit test
+  pin to a P-core (cpu 2). As a safety net, `run-baselines.sh` floor-checks each reading:
+  anything `< 0.05 cyc/op` is physically impossible and is failed as "pinning likely failed",
+  so a silent unpinned run can't produce a false green.
+- **Code-alignment sensitivity (learned the hard way).** At 0.5–4 cyc/op these throughput
+  loops are dominated by instruction-stream alignment. Adding an unrelated `if/fprintf` branch
+  to `main()` grew the function enough to shift the loops out of the µop cache and skewed the
+  benches ~5× (confirmed by an interleaved A/B build). Consequence: keep `main()` minimal (the
+  P-core pin is a deliberately *bare* `sched_setaffinity` call, not a checked one), and treat
+  the absolute baselines as valid only for the current binary layout. Hardening this against
+  future edits (e.g. `-falign-functions=32 -falign-loops=32` on the `bench` preset, then
+  re-calibrating) is reasonable follow-up work, out of scope here.
