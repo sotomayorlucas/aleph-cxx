@@ -34,6 +34,21 @@ add_executable(aleph_tests
     linalg/test_gf2.cpp
     linalg/test_sparse.cpp
     dpo/test_dpo.cpp
+    sheaf/test_simplex.cpp
+    sheaf/test_union_find.cpp
+    sheaf/test_skeleton.cpp
+    sheaf/test_flag_complex.cpp
+    sheaf/test_subgraph.cpp
+    sheaf/test_sheaf_trait.cpp
+    sheaf/test_sheaf_constant.cpp
+    sheaf/test_sheaf_visibility.cpp
+    sheaf/test_sheaf_spd.cpp
+    sheaf/test_cochain.cpp
+    sheaf/test_cohomology.cpp
+    sheaf/test_connecting.cpp
+    sheaf/test_dec.cpp
+    sheaf/test_mayer_vietoris.cpp
+    sheaf/test_zigzag.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
@@ -64,7 +79,7 @@ target_compile_definitions(aleph_tests PRIVATE
     ALEPH_TLA_SCENE_GRAPH_PATH="${CMAKE_SOURCE_DIR}/formal/scene_graph.tla")
 target_link_libraries(aleph_tests PRIVATE
     aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io
-    aleph_types aleph_graph aleph_dpo
+    aleph_types aleph_graph aleph_dpo aleph_sheaf
     aleph_linalg_gf2 aleph_linalg_sparse
     aleph_scene aleph_render_common aleph_render_rt aleph_render_sw)
 add_test(NAME aleph_tests COMMAND aleph_tests)
