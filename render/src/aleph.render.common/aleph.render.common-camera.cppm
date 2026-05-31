@@ -24,7 +24,10 @@ struct Pcg32 {
         std::uint32_t xorshifted =
             static_cast<std::uint32_t>(((oldstate >> 18u) ^ oldstate) >> 27u);
         std::uint32_t rot = oldstate >> 59u;
-        return (xorshifted >> rot) | (xorshifted << (32u - rot));
+        // Rotate right by `rot`. Mask the complementary left shift so rot==0
+        // gives a shift of 0, not the UB shift-by-32 (PCG canonical form). On
+        // x86 the hardware already masks the count, so emitted values are unchanged.
+        return (xorshifted >> rot) | (xorshifted << ((32u - rot) & 31u));
     }
 
     float float01() noexcept {

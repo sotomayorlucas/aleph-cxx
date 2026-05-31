@@ -1,0 +1,28 @@
+# LeakSanitizer suppressions for the ASan build (`cmake --preset asan`).
+#
+# The window/editor tests initialize SDL2, which on Wayland pulls in
+# libdecor -> GTK -> pango -> fontconfig. Those libraries keep process-lifetime
+# font/config caches that LeakSanitizer reports as leaks. They are third-party,
+# NOT aleph code (verified 2026-05-30: every leaked block is owned by a system
+# library; the only aleph frame in any leak stack is aleph::window::Window
+# calling SDL_CreateWindow). Suppressing them leaves a clean first-party signal.
+#
+# Run with:
+#   LSAN_OPTIONS=suppressions=tests/asan.supp \
+#   ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=print_stacktrace=1 \
+#   ./build-asan/tests/aleph_tests
+leak:libfontconfig
+leak:libfreetype
+leak:libpango-1.0
+leak:libpangoft2-1.0
+leak:libpangocairo-1.0
+leak:libcairo
+leak:libgobject-2.0
+leak:libglib-2.0
+leak:libgio-2.0
+leak:libgtk-3
+leak:libgdk-3
+leak:libdecor
+leak:libwayland-client
+leak:libX11
+leak:libSDL2
