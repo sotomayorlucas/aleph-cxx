@@ -7,49 +7,59 @@
 // GraphScene (the single source of truth), after which the caller re-lowers.
 // One truth; the rest is derived.
 //
-// This wave (W4) implements the ATTRIBUTE op family ONLY:
-//   * SetTransform — replace a `Transform` node's `LocalTransform`.
-//   * SetMaterial  — retarget the `Material` a `Mesh` References, replacing that
-//                    Material node's normalized params (the op names the MESH).
-// Both are TYPED, VALIDATED, in-place attribute mutations (no node's NodeKind
-// ever changes — only attributes). The STRUCTURAL op family
-// (AddObject / AddLight / DeleteObject / ApplyRule) is transactional via
-// `aleph.dpo` and arrives in W5 (SPEC §5 / §6 / §10). The `Op` variant and the
-// `apply_op` switch below leave a clearly marked extension point for them.
+// This file carries BOTH op families (SPEC §5):
+//   * ATTRIBUTE ops (W4) — typed, validated, in-place attribute mutations that
+//     never change a node's NodeKind:
+//       - SetTransform — replace a `Transform` node's `LocalTransform`.
+//       - SetMaterial  — retarget the `Material` a `Mesh` References, replacing
+//                        that Material node's normalized params.
+//   * STRUCTURAL ops (W5) — transactional create/delete of nodes+edges:
+//       - AddObject   — create a Mesh + Material, wired by a Mesh—References→
+//                       Material edge and a parent Transform—Contains→Mesh edge.
+//       - AddLight    — create a Light node, Contained by a parent Transform.
+//       - DeleteObject{NodeId} — delete a Mesh and cascade its incident edges
+//                       (its References→Material and parent Contains→Mesh).
+//       - ApplyRule{const dpo::Rule*, dpo::Match} — replay a DPO rewrite.
 //
 // ── ALL-OR-NOTHING (SPEC §5) ────────────────────────────────────────────────
 // Every op returns a NEW VALID state or fails with NO PARTIAL EFFECT. We obtain
-// this the same way `aleph::dpo::apply` does: we never mutate the live graph in
-// place. Instead we (1) VALIDATE the request against the live graph read-only
-// (the target exists and has the expected kind), then (2) build the post-state
-// in a SNAPSHOT `Graph` — copying every node, applying the attribute change to
-// the target's copy, and reconstructing every edge — (3) run `validate_all` on
-// the snapshot, and only (4) on success commit it back via `g = std::move(post)`.
-// On ANY failure path the live `g` is left byte-for-byte as it was. Node ids are
-// preserved (so `lower()`'s `handle_map` stays stable for survivors); edge ids
-// are reassigned by reconstruction, exactly as `dpo::apply` does — the structure
-// (kind/src/dst of every edge) is identical, which is what `lower()` reads.
+// this exactly the way `aleph::dpo::apply` does: we never mutate the live graph
+// in place. Instead we (1) VALIDATE the request against the live graph read-only
+// (targets exist and have the expected kinds), then (2) build the post-state in
+// a SNAPSHOT `Graph` — copying every surviving node (preserving its NodeId so
+// `lower()`'s `handle_map` stays stable for survivors), minting fresh ids for
+// created nodes, and reconstructing every surviving edge — (3) run `validate_all`
+// on the snapshot, and only (4) on success commit it back via `g = std::move`.
+// On ANY failure path the live `g` is left byte-for-byte as it was.
 //
-// The success report is an `aleph::dpo::RewriteRecord` so the whole return path
-// (attribute AND structural ops) speaks ONE vocabulary to the caller. An
-// attribute op creates and deletes nothing, so all four record vectors are empty
-// — the mutation is an in-place attribute edit, mirroring a DPO `ModifyAttr`.
+// Edge ids are reassigned by reconstruction, exactly as `dpo::apply` does — the
+// structure (kind/src/dst of every edge) is identical, which is what `lower()`
+// reads. The success report is an `aleph::dpo::RewriteRecord` so the whole
+// return path (attribute AND structural ops) speaks ONE vocabulary to the
+// caller: an attribute op creates/deletes nothing (all four record vectors
+// empty, mirroring a DPO `ModifyAttr`); a structural op fills created_*/
+// deleted_* with host-graph ids; `ApplyRule` forwards `dpo::apply`'s record
+// verbatim.
 //
 // No exceptions (aleph_flags_isa): every fallible path is `std::expected`.
 // Determinism (SPEC §7): node insertion order and edge insertion order are
-// preserved by the snapshot rebuild, so a re-lower of the committed graph is
-// byte-identical to lowering any graph with the same structure + attributes.
+// preserved by the snapshot rebuild; created node ids are minted off a node
+// allocator fast-forwarded past every preserved id (the `dpo::apply` recipe), so
+// a re-lower of the committed graph is deterministic and byte-stable.
 
 module;
+#include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <utility>
 #include <variant>
+#include <vector>
 
 export module aleph.lowering:ops;
 
-import aleph.graph;   // Graph: nodes()/edges()/node()/insert_node()/add_edge()/validate_all
-import aleph.types;   // Node/Edge, NodeId, NodeKind, EdgeKind, LocalTransform, Material, kind_of
-import aleph.dpo;     // RewriteRecord (the shared return-path report)
+import aleph.graph;   // Graph: nodes()/edges()/node()/insert_node()/add_edge()/alloc_node_id()/validate_all
+import aleph.types;   // Node/Edge, NodeId, EdgeId, NodeKind, EdgeKind, LocalTransform, Mesh/Material/Light, GeometryPayload, kind_of
+import aleph.dpo;     // Rule, Match, find_matches, apply, RewriteRecord, ApplyError (the shared return-path engine + report)
 import aleph.math;    // Vec3, f32 (carried by MaterialParams)
 import :lowered;      // MaterialParams (the normalized, renderer-independent material view)
 
@@ -88,23 +98,96 @@ struct SetMaterial {
     MaterialParams params{};
 };
 
-// The editor's op vocabulary. W4 = the ATTRIBUTE family only.
+// ── Structural ops (SPEC §5) ────────────────────────────────────────────────
+// These CREATE and/or DELETE nodes and edges. They are transactional via the
+// same snapshot/rollback wrapper `dpo::apply` uses, and (for `ApplyRule`)
+// directly via `dpo::apply` itself. Each is all-or-nothing: a post-state that
+// fails `validate_all` is never committed, so a graph invariant can never be
+// transiently broken (SPEC §5: no partial effects).
+
+// Add a renderable object: create a `Mesh` carrying `geometry` (LOCAL space —
+// lowering composes its world transform from the existing hierarchy) plus a
+// `Material` carrying `params`, then wire BOTH edges that make the object whole
+// and invariant-valid: `Mesh —References→ Material` (so `MaterialReferenced`
+// holds — the very anti-dangling property `lower()` relies on) and `parent
+// —Contains→ Mesh` (so the mesh is reachable by the transform DFS and actually
+// lowers). `parent` MUST name an existing `Transform`; otherwise the op fails
+// with a structured error and the graph is unchanged. New node ids are minted
+// deterministically in the post-state; the `RewriteRecord` reports them
+// (created_nodes = [mesh, material]) along with the two created edge ids.
+struct AddObject {
+    types::NodeId          parent{};                         // an existing Transform to Contain the mesh
+    types::GeometryPayload geometry{types::SphereLocal{}};   // LOCAL geometry payload
+    MaterialParams         material{};                       // normalized material for the new Material node
+};
+
+// Add an explicit sampling light: create a `Light` node (its own kind — NOT a
+// mesh; SPEC §3) carrying `emission` + a LOCAL `geometry`, Contained by an
+// existing `parent` Transform so it lowers into the light table. `parent` MUST
+// be a `Transform`. The `RewriteRecord` reports created_nodes = [light] and the
+// created Contains edge.
+struct AddLight {
+    types::NodeId          parent{};                         // an existing Transform to Contain the light
+    types::LightKind       kind{types::LightKind::Point};
+    math::Vec3             emission{1.0f, 1.0f, 1.0f};
+    types::GeometryPayload geometry{types::QuadLocal{}};     // LOCAL geometry payload
+};
+
+// Delete an object: remove the named `Mesh` and CASCADE every incident edge
+// (its `References→Material` and the parent `Contains→Mesh`), exactly as the
+// `remove_object` DPO rule does. The referenced Material is left in place
+// (possibly orphaned, which is invariant-valid: `MaterialReferenced` constrains
+// MESHES, not materials) — deleting it is a separate gesture. `target` MUST name
+// an existing `Mesh`. The `RewriteRecord` reports deleted_nodes = [mesh] and the
+// pre-state ids of the cascaded edges. After re-lowering there are NO dangling
+// handles (SPEC §8.7): the mesh's entity simply vanishes from `entities` /
+// `handle_map`; survivors keep their ids.
+struct DeleteObject {
+    types::NodeId target{};   // the MESH to remove (with its incident edges)
+};
+
+// Replay a DPO rewrite. `rule` is a borrowed pointer to a `dpo::Rule` (typically
+// one of `dpo::rules::*`); `match` is an OPTIONAL embedding produced by
+// `dpo::find_matches` (move-only — it owns `OrderedMap`s — so `ApplyRule`, and
+// therefore `Op`, are move-only too).
 //
-// EXTENSION POINT (W5, SPEC §5): the STRUCTURAL family is added here as
-//   std::variant<SetTransform, SetMaterial,
-//                AddObject, AddLight, DeleteObject, ApplyRule>
-// Those ops are transactional via `aleph.dpo` (they create/delete nodes+edges),
-// so they slot into `apply_op`'s switch alongside the attribute ops below and
-// reuse the very same `RewriteRecord` return type — no signature change.
-using Op = std::variant<SetTransform, SetMaterial>;
+// The editor gesture is "apply THIS rule" — it usually does not pre-compute the
+// embedding. So when `match` is left empty (its `node_map` has no bindings),
+// `apply_op` DISCOVERS the embedding itself, deterministically: it runs
+// `dpo::find_matches(rule, g)` (VF2 backtracking in host insertion order, SPEC
+// §7) and applies the FIRST match. A rule with no embedding in the live graph is
+// a STRUCTURED error (`NoMatch`) — never a silent no-op — and leaves the graph
+// unchanged. A caller that DOES pre-compute a specific embedding may pass it in
+// `match` (non-empty `node_map`); `apply_op` then uses exactly that one.
+//
+// Either way the transaction is `dpo::apply`, the canonical transactional engine:
+// build the post-state, `validate_all`, commit or roll back. The `RewriteRecord`
+// is returned VERBATIM (created/deleted node + edge ids in host-graph ids). A
+// null `rule` is a structured error, never a crash. A rolled-back rewrite
+// (post-state fails an invariant) leaves the graph and thus the next `lower()`
+// unchanged (SPEC §8.7).
+struct ApplyRule {
+    const dpo::Rule* rule{nullptr};
+    dpo::Match       match{};
+};
+
+// The editor's op vocabulary: the ATTRIBUTE family ∪ the STRUCTURAL family
+// (SPEC §5). `ApplyRule` embeds a move-only `dpo::Match`, so `Op` is a move-only
+// value type — it is constructed in place and passed to `apply_op` by const
+// reference; it is never copied.
+using Op = std::variant<SetTransform, SetMaterial,
+                        AddObject, AddLight, DeleteObject, ApplyRule>;
 
 // Structured failure of an op (SPEC §5: no silent defaults). Every failure
 // leaves the graph unchanged.
 enum class OpError {
-    NodeNotFound,        // the target NodeId is not in the graph
+    NodeNotFound,        // a target/parent NodeId is not in the graph
     KindMismatch,        // the target exists but is the wrong NodeKind for the op
     DanglingReference,   // SetMaterial's mesh has no / a broken References→Material
     InvariantViolation,  // the post-state failed validate_all -> NOT committed
+    EdgeTypeMismatch,    // a created edge was rejected by the typed-edge rules
+    NullRule,            // ApplyRule was handed a null Rule pointer
+    NoMatch,             // ApplyRule's rule has no embedding in the live graph
 };
 
 }  // namespace aleph::lowering
@@ -112,7 +195,48 @@ enum class OpError {
 // ── Implementation (non-exported) ───────────────────────────────────────────
 namespace aleph::lowering::detail {
 
-// Commit an attribute mutation transactionally (the `dpo::apply` pattern).
+// Translate a `dpo::ApplyError` into the op vocabulary so `ApplyRule` speaks one
+// `OpError` enum to the caller while delegating the transaction to `dpo::apply`.
+[[nodiscard]] inline OpError from_apply_error(aleph::dpo::ApplyError e) noexcept {
+    switch (e) {
+        case aleph::dpo::ApplyError::InvariantViolation:
+            return OpError::InvariantViolation;
+        case aleph::dpo::ApplyError::AttrSetMismatch:
+            return OpError::KindMismatch;
+        case aleph::dpo::ApplyError::DanglingEdgeAfterDelete:
+            return OpError::InvariantViolation;
+    }
+    return OpError::InvariantViolation;
+}
+
+// Project a normalized `MaterialParams` onto a fresh graph `Material` node body.
+[[nodiscard]] inline aleph::types::Material
+material_from(aleph::types::NodeId id, const MaterialParams& p) noexcept {
+    aleph::types::Material m{};
+    m.id     = id;
+    m.kind   = p.kind;
+    m.albedo = p.albedo;
+    m.fuzz   = p.fuzz;
+    m.ior    = p.ior;
+    m.emit   = p.emit;
+    return m;
+}
+
+// Advance `out`'s node allocator past every preserved node id so freshly minted
+// ids never collide with ids carried over from the pre-state. Mirrors
+// `dpo::apply`'s `fast_forward_node_alloc` (we cannot call that private detail,
+// so we replicate it on the public Graph API).
+inline void fast_forward_node_alloc(aleph::graph::Graph& out) {
+    std::uint32_t max_id = 0;
+    bool any = false;
+    for (auto [nid, node] : out.nodes()) {
+        (void)node; any = true;
+        if (nid.value > max_id) max_id = nid.value;
+    }
+    if (any) while (out.alloc_node_id().value <= max_id) { /* drain */ }
+}
+
+// Commit an ATTRIBUTE mutation transactionally (the `dpo::apply` pattern).
 //
 // `expect` is the NodeKind the target must have; `mutate(Node&)` edits the
 // target's COPY in the snapshot (it must not change the node's kind). The live
@@ -169,6 +293,143 @@ commit_attr(aleph::graph::Graph& g,
     // An attribute edit creates/deletes nothing (node ids preserved, edge
     // structure identical) — the RewriteRecord is empty, like a DPO ModifyAttr.
     return aleph::dpo::RewriteRecord{};
+}
+
+// Commit a STRUCTURAL mutation transactionally (the `dpo::apply` pattern, for
+// create/delete). `build(post, rec)` populates the post-state snapshot — it
+// inserts surviving + created nodes (preserving survivor ids, minting created
+// ids off the fast-forwarded allocator), reconstructs surviving edges, adds
+// created edges, and records every created/deleted host id into `rec`. On
+// success the snapshot is committed and `rec` returned; on any failure the live
+// graph is untouched.
+//
+// The builder owns the post-state shape entirely; this wrapper only validates
+// (`validate_all`) and commits-or-rolls-back, so all four structural ops share
+// one transactional spine and one all-or-nothing guarantee (SPEC §5).
+template <typename Build>
+[[nodiscard]] std::expected<aleph::dpo::RewriteRecord, OpError>
+commit_structural(aleph::graph::Graph& g, Build&& build) {
+    aleph::graph::Graph        post;
+    aleph::dpo::RewriteRecord  rec;
+
+    // The builder reports its own structured failure (e.g. a bad endpoint kind).
+    if (auto e = build(post, rec); !e.has_value()) {
+        return std::unexpected(e.error());  // g untouched
+    }
+
+    // Post-condition: commit only if every invariant still holds.
+    if (auto ok = aleph::graph::validate_all(post, static_cast<std::size_t>(-1));
+        !ok.has_value()) {
+        return std::unexpected(OpError::InvariantViolation);  // g untouched
+    }
+
+    g = std::move(post);  // commit
+    return rec;
+}
+
+// Copy every node of `src` into `dst` preserving ids, then fast-forward `dst`'s
+// node allocator past them so created ids are collision-free. Edges are NOT
+// copied here — callers add surviving/created edges themselves (so a delete can
+// skip cascaded edges).
+inline void clone_nodes(const aleph::graph::Graph& src, aleph::graph::Graph& dst) {
+    for (auto [nid, node] : src.nodes()) {
+        (void)nid;
+        aleph::types::Node copy = node;
+        dst.insert_node(copy);
+    }
+    fast_forward_node_alloc(dst);
+}
+
+// The first root Transform (a Transform with no incoming Contains), in node
+// insertion order — the same "root" notion `lower()` uses (SPEC §4.2 step 1).
+// Returns false if the graph has no root Transform.
+[[nodiscard]] inline bool first_root_transform(const aleph::graph::Graph& g,
+                                               aleph::types::NodeId& out) noexcept {
+    for (auto [nid, node] : g.nodes()) {
+        if (aleph::types::kind_of(node) != aleph::types::NodeKind::Transform) continue;
+        bool incoming = false;
+        for (auto [eid, e] : g.edges()) {
+            (void)eid;
+            if (e.kind == aleph::types::EdgeKind::Contains && e.dst == nid) {
+                incoming = true;
+                break;
+            }
+        }
+        if (!incoming) { out = nid; return true; }
+    }
+    return false;
+}
+
+// Does `id` have any incoming `Contains` edge (i.e. is it reachable by the
+// transform DFS `lower()` runs)?
+[[nodiscard]] inline bool has_incoming_contains(const aleph::graph::Graph& g,
+                                                aleph::types::NodeId id) noexcept {
+    for (auto [eid, e] : g.edges()) {
+        (void)eid;
+        if (e.kind == aleph::types::EdgeKind::Contains && e.dst == id) return true;
+    }
+    return false;
+}
+
+// After a DPO rewrite that MINTED new Mesh nodes (e.g. a monotone "refine"
+// split), those meshes carry their References→Material edge but are NOT yet
+// wired into the Contains hierarchy — so `lower()`'s transform DFS would never
+// reach them and they would silently fail to materialize as entities. A
+// structural op must produce a state that re-lowers to a VALID Scene with the
+// added geometry visible (SPEC §5/§8.7), so we wire each freshly-created Mesh
+// that has NO incoming Contains under the FIRST root Transform (insertion order
+// — the same root `lower()` uses), in a SEPARATE transactional step (snapshot →
+// validate_all → commit-or-rollback). This adds ONLY Contains edges (no nodes),
+// so the rewrite's RewriteRecord — its created_nodes/deleted_nodes — is
+// unchanged, and survivors keep their ids so `lower()`'s handle_map stays stable
+// for them. If there is no root Transform, or no created Mesh needs reattaching,
+// the graph is left exactly as it was.
+[[nodiscard]] inline std::expected<void, OpError>
+attach_created_meshes(aleph::graph::Graph& g,
+                      const std::vector<aleph::types::NodeId>& created) {
+    // Collect the created Mesh ids that still lack an incoming Contains.
+    std::vector<aleph::types::NodeId> orphans;
+    for (aleph::types::NodeId id : created) {
+        const aleph::types::Node* n = g.node(id);
+        if (n == nullptr) continue;
+        if (aleph::types::kind_of(*n) != aleph::types::NodeKind::Mesh) continue;
+        if (has_incoming_contains(g, id)) continue;
+        orphans.push_back(id);
+    }
+    if (orphans.empty()) return {};  // nothing to wire — g untouched
+
+    aleph::types::NodeId root{};
+    if (!first_root_transform(g, root)) {
+        // No hierarchy root to attach under: leave the graph as the rewrite left
+        // it (the caller can still inspect the RewriteRecord).
+        return {};
+    }
+
+    // Transactional rebuild: copy survivors (ids preserved), rebuild every edge,
+    // then add one Contains edge per orphan, validate, commit-or-rollback.
+    auto r = commit_structural(
+        g,
+        [&](aleph::graph::Graph& post, aleph::dpo::RewriteRecord& rec)
+            -> std::expected<void, OpError> {
+            clone_nodes(g, post);
+            for (auto [eid, e] : g.edges()) {
+                (void)eid;
+                auto rr = post.add_edge(e.kind, e.src, e.dst);
+                if (!rr.has_value()) {
+                    return std::unexpected(OpError::InvariantViolation);
+                }
+            }
+            for (aleph::types::NodeId id : orphans) {
+                auto con = post.add_edge(aleph::types::EdgeKind::Contains, root, id);
+                if (!con.has_value()) {
+                    return std::unexpected(OpError::EdgeTypeMismatch);
+                }
+                rec.created_edges.push_back(*con);  // local record, discarded
+            }
+            return {};
+        });
+    if (!r.has_value()) return std::unexpected(r.error());
+    return {};
 }
 
 }  // namespace aleph::lowering::detail
@@ -239,15 +500,208 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                         m.ior    = o.params.ior;
                         m.emit   = o.params.emit;
                     });
-            }
-            // EXTENSION POINT (W5): structural ops (AddObject / AddLight /
-            // DeleteObject / ApplyRule) add their own branches here, returning
-            // their `dpo::apply` RewriteRecord. No signature change.
-            else {
-                // Unreachable for the current `Op` variant; keeps the visitor
-                // total so no path falls off the end of a non-void lambda.
+
+            } else if constexpr (std::is_same_v<T, AddObject>) {
+                // Create Mesh + Material + the two edges that make the object
+                // whole and invariant-valid (References + parent Contains).
+                // Validate the parent (exists + is a Transform) up front so a bad
+                // parent fails BEFORE any snapshot work; the snapshot then mints
+                // the new ids, copies survivors, rebuilds surviving edges, and
+                // adds the two new edges — all-or-nothing.
+                const aleph::types::Node* parent = g.node(o.parent);
+                if (parent == nullptr) {
+                    return std::unexpected(OpError::NodeNotFound);
+                }
+                if (aleph::types::kind_of(*parent) != aleph::types::NodeKind::Transform) {
+                    return std::unexpected(OpError::KindMismatch);
+                }
+                return detail::commit_structural(
+                    g,
+                    [&](aleph::graph::Graph& post, aleph::dpo::RewriteRecord& rec)
+                        -> std::expected<void, OpError> {
+                        // Survivors first (ids preserved), then fast-forward the
+                        // allocator so new ids are collision-free.
+                        detail::clone_nodes(g, post);
+
+                        const aleph::types::NodeId mesh_id = post.alloc_node_id();
+                        aleph::types::Mesh mesh{};
+                        mesh.id       = mesh_id;
+                        mesh.geometry = o.geometry;
+                        post.insert_node(aleph::types::Node{std::move(mesh)});
+                        rec.created_nodes.push_back(mesh_id);
+
+                        const aleph::types::NodeId mat_id = post.alloc_node_id();
+                        post.insert_node(aleph::types::Node{
+                            detail::material_from(mat_id, o.material)});
+                        rec.created_nodes.push_back(mat_id);
+
+                        // Reconstruct every surviving edge (insertion order).
+                        for (auto [eid, e] : g.edges()) {
+                            (void)eid;
+                            auto r = post.add_edge(e.kind, e.src, e.dst);
+                            if (!r.has_value()) {
+                                return std::unexpected(OpError::InvariantViolation);
+                            }
+                        }
+
+                        // Mesh —References→ Material (satisfies MaterialReferenced).
+                        auto ref = post.add_edge(aleph::types::EdgeKind::References,
+                                                 mesh_id, mat_id);
+                        if (!ref.has_value()) {
+                            return std::unexpected(OpError::EdgeTypeMismatch);
+                        }
+                        rec.created_edges.push_back(*ref);
+
+                        // parent —Contains→ Mesh (makes the mesh lower).
+                        auto con = post.add_edge(aleph::types::EdgeKind::Contains,
+                                                 o.parent, mesh_id);
+                        if (!con.has_value()) {
+                            return std::unexpected(OpError::EdgeTypeMismatch);
+                        }
+                        rec.created_edges.push_back(*con);
+                        return {};
+                    });
+
+            } else if constexpr (std::is_same_v<T, AddLight>) {
+                // Create a Light node Contained by an existing Transform. A Light
+                // is its OWN node (SPEC §3) — not a mesh — so no Material/
+                // References edge is involved; only the parent Contains edge.
+                const aleph::types::Node* parent = g.node(o.parent);
+                if (parent == nullptr) {
+                    return std::unexpected(OpError::NodeNotFound);
+                }
+                if (aleph::types::kind_of(*parent) != aleph::types::NodeKind::Transform) {
+                    return std::unexpected(OpError::KindMismatch);
+                }
+                return detail::commit_structural(
+                    g,
+                    [&](aleph::graph::Graph& post, aleph::dpo::RewriteRecord& rec)
+                        -> std::expected<void, OpError> {
+                        detail::clone_nodes(g, post);
+
+                        const aleph::types::NodeId light_id = post.alloc_node_id();
+                        aleph::types::Light light{};
+                        light.id       = light_id;
+                        light.kind     = o.kind;
+                        light.emission = o.emission;
+                        light.geometry = o.geometry;
+                        post.insert_node(aleph::types::Node{std::move(light)});
+                        rec.created_nodes.push_back(light_id);
+
+                        for (auto [eid, e] : g.edges()) {
+                            (void)eid;
+                            auto r = post.add_edge(e.kind, e.src, e.dst);
+                            if (!r.has_value()) {
+                                return std::unexpected(OpError::InvariantViolation);
+                            }
+                        }
+
+                        auto con = post.add_edge(aleph::types::EdgeKind::Contains,
+                                                 o.parent, light_id);
+                        if (!con.has_value()) {
+                            return std::unexpected(OpError::EdgeTypeMismatch);
+                        }
+                        rec.created_edges.push_back(*con);
+                        return {};
+                    });
+
+            } else if constexpr (std::is_same_v<T, DeleteObject>) {
+                // Remove a Mesh and cascade its incident edges (References→
+                // Material and parent Contains→Mesh), like the `remove_object`
+                // DPO rule. Validate target (exists + is a Mesh) up front.
+                const aleph::types::Node* mesh = g.node(o.target);
+                if (mesh == nullptr) {
+                    return std::unexpected(OpError::NodeNotFound);
+                }
+                if (aleph::types::kind_of(*mesh) != aleph::types::NodeKind::Mesh) {
+                    return std::unexpected(OpError::KindMismatch);
+                }
+                return detail::commit_structural(
+                    g,
+                    [&](aleph::graph::Graph& post, aleph::dpo::RewriteRecord& rec)
+                        -> std::expected<void, OpError> {
+                        // Copy every node EXCEPT the target (preserving survivor
+                        // ids), then fast-forward (no new ids minted, but keeps
+                        // the allocator consistent with the dpo::apply recipe).
+                        for (auto [nid, node] : g.nodes()) {
+                            if (nid == o.target) continue;
+                            aleph::types::Node copy = node;
+                            post.insert_node(copy);
+                        }
+                        detail::fast_forward_node_alloc(post);
+                        rec.deleted_nodes.push_back(o.target);
+
+                        // Reconstruct edges, skipping (cascading away) every edge
+                        // incident to the deleted mesh; report their PRE-state ids
+                        // (matching dpo::apply's deletion-id convention).
+                        for (auto [eid, e] : g.edges()) {
+                            if (e.src == o.target || e.dst == o.target) {
+                                rec.deleted_edges.push_back(eid);
+                                continue;
+                            }
+                            auto r = post.add_edge(e.kind, e.src, e.dst);
+                            if (!r.has_value()) {
+                                return std::unexpected(OpError::InvariantViolation);
+                            }
+                        }
+                        return {};
+                    });
+
+            } else if constexpr (std::is_same_v<T, ApplyRule>) {
+                // Forward to the canonical DPO engine. A null rule is a structured
+                // error (never a deref).
+                if (o.rule == nullptr) {
+                    return std::unexpected(OpError::NullRule);
+                }
+                // The editor gesture is "apply THIS rule" — it usually does not
+                // pre-compute the embedding. If the supplied match carries no
+                // bindings, DISCOVER one deterministically (VF2 in host insertion
+                // order, SPEC §7) and apply the FIRST embedding. A rule with no
+                // embedding in the live graph is a STRUCTURED error (NoMatch),
+                // never a silent no-op — the graph is left unchanged. A caller
+                // that pre-computed a specific embedding passes it in `o.match`
+                // (non-empty node_map) and that exact one is used.
+                aleph::dpo::RewriteRecord rec;
+                if (o.match.node_map.empty()) {
+                    std::vector<aleph::dpo::Match> matches =
+                        aleph::dpo::find_matches(*o.rule, g);
+                    if (matches.empty()) {
+                        return std::unexpected(OpError::NoMatch);  // g untouched
+                    }
+                    auto r = aleph::dpo::apply(*o.rule, matches.front(), g);
+                    if (!r.has_value()) {
+                        return std::unexpected(detail::from_apply_error(r.error()));
+                    }
+                    rec = std::move(*r);
+                } else {
+                    // Caller-supplied embedding: apply exactly that one.
+                    auto r = aleph::dpo::apply(*o.rule, o.match, g);
+                    if (!r.has_value()) {
+                        return std::unexpected(detail::from_apply_error(r.error()));
+                    }
+                    rec = std::move(*r);
+                }
+                // A monotone "add geometry" rule mints Mesh nodes carrying a
+                // References→Material edge but NO Contains edge, so `lower()`'s
+                // transform DFS would not reach them. Wire every newly-created
+                // orphan Mesh into the hierarchy (transactional, all-or-nothing)
+                // so the post-state re-lowers to a VALID Scene with the added
+                // geometry visible (SPEC §5/§8.7). Adds only Contains edges, so
+                // `rec`'s created/deleted node ids are unchanged.
+                if (auto w = detail::attach_created_meshes(g, rec.created_nodes);
+                    !w.has_value()) {
+                    return std::unexpected(w.error());
+                }
+                return rec;
+
+            } else {
+                // Keep the visitor total: every Op alternative is handled above.
                 static_assert(std::is_same_v<T, SetTransform>
-                                  || std::is_same_v<T, SetMaterial>,
+                                  || std::is_same_v<T, SetMaterial>
+                                  || std::is_same_v<T, AddObject>
+                                  || std::is_same_v<T, AddLight>
+                                  || std::is_same_v<T, DeleteObject>
+                                  || std::is_same_v<T, ApplyRule>,
                               "apply_op: unhandled Op alternative");
                 return std::unexpected(OpError::KindMismatch);
             }
