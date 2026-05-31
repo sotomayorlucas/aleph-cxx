@@ -20,6 +20,8 @@ struct QuadSoA {
     std::vector<aleph::math::Vec3> w;
     std::vector<MaterialHandle>   mat;
     std::vector<aleph::math::Aabb> bbox;
+    // Per-primitive importance (SPEC §4.1, Phase 5.x-b); parallel array.
+    std::vector<aleph::math::f32> importance;
 };
 
 inline std::uint32_t quad_append(QuadSoA& q,
@@ -52,6 +54,7 @@ inline std::uint32_t quad_append(QuadSoA& q,
     q.w.push_back(w);
     q.mat.push_back(m);
     q.bbox.push_back(box);
+    q.importance.push_back(0.0f);
     return idx;
 }
 

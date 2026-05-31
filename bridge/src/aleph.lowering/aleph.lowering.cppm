@@ -5,3 +5,4 @@ export import :build;
 export import :ops;
 export import :grouping;
 export import :incremental;
+export import :importance;

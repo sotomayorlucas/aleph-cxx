@@ -16,6 +16,8 @@ struct TriSoA {
     std::vector<aleph::math::f32> v2x, v2y, v2z;
     std::vector<MaterialHandle>   mat;
     std::vector<aleph::math::Aabb> bbox;
+    // Per-primitive importance (SPEC §4.1, Phase 5.x-b); parallel array.
+    std::vector<aleph::math::f32> importance;
 };
 
 inline std::uint32_t tri_append(TriSoA& t,
@@ -36,6 +38,7 @@ inline std::uint32_t tri_append(TriSoA& t,
     t.v2x.push_back(v2.x); t.v2y.push_back(v2.y); t.v2z.push_back(v2.z);
     t.mat.push_back(m);
     t.bbox.push_back(box);
+    t.importance.push_back(0.0f);
     return idx;
 }
 

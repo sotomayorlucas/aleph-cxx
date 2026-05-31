@@ -19,6 +19,9 @@ struct HitRecord {
     aleph::math::f32  u, v;
     MaterialHandle    mat;
     bool              front_face;
+    // Per-primitive importance of the winning primitive (SPEC §4.1,
+    // Phase 5.x-b). Left 0 here; W2 wires hit() to set it from the store.
+    aleph::math::f32  importance{0};
 };
 
 namespace detail {

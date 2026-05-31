@@ -79,6 +79,7 @@ add_executable(aleph_tests
     render/test_sw_lightmap.cpp
     render/test_sw_rasterize_full.cpp
     render/test_grouped_nee.cpp
+    render/test_adaptive_spp.cpp
     lowering/test_lower_minimal.cpp
     lowering/test_transform_hierarchy.cpp
     lowering/test_build_render_scene.cpp
@@ -89,7 +90,8 @@ add_executable(aleph_tests
     lowering/test_determinism.cpp
     lowering/test_light_grouping.cpp
     lowering/test_groups_in_scene.cpp
-    lowering/test_incremental.cpp)
+    lowering/test_incremental.cpp
+    lowering/test_importance.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_compile_definitions(aleph_tests PRIVATE

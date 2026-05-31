@@ -112,6 +112,11 @@ struct LoweredScene {
     // group downstream (degenerate-but-valid).
     std::vector<std::vector<types::NodeId>> light_groups;
 
+    // Per-entity importance (SPEC §4.1, Phase 5.x-b), aligned to `entities`.
+    // Default empty ⇒ uniform sampling downstream. Populated by `lower()` /
+    // `lower_incremental()` from `aleph.flow` Ricci curvature.
+    std::vector<double> importance;
+
     LoweredScene() = default;
 
     LoweredScene(const LoweredScene&)            = delete;

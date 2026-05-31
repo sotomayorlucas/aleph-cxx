@@ -21,6 +21,10 @@ struct RenderOpts {
     // Opt-in group-stratified NEE (SPEC §4.3). Default false preserves the
     // existing all-lights-sum path byte-for-byte.
     bool grouped_nee{false};
+    // Opt-in adaptive spp (Phase 5.x-b SPEC §4.3). Default false ⇒ the existing
+    // uniform-spp loop, byte-identical. W3 fills the adaptive loop.
+    bool adaptive_spp{false};
+    int  max_spp_scale{4};
 };
 
 namespace detail {
