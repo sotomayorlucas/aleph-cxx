@@ -88,7 +88,8 @@ add_executable(aleph_tests
     lowering/test_dpo_edit.cpp
     lowering/test_determinism.cpp
     lowering/test_light_grouping.cpp
-    lowering/test_groups_in_scene.cpp)
+    lowering/test_groups_in_scene.cpp
+    lowering/test_incremental.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_compile_definitions(aleph_tests PRIVATE

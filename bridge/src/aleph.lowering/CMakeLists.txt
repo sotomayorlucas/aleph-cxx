@@ -6,7 +6,8 @@ target_sources(aleph_lowering
         aleph.lowering-lower.cppm
         aleph.lowering-build.cppm
         aleph.lowering-ops.cppm
-        aleph.lowering-grouping.cppm)
+        aleph.lowering-grouping.cppm
+        aleph.lowering-incremental.cppm)
 target_link_libraries(aleph_lowering
     PUBLIC  aleph_graph aleph_types aleph_scene aleph_dpo aleph_math aleph_sheaf
     PRIVATE aleph_flags_isa)
