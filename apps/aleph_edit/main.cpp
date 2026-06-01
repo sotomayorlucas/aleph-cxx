@@ -172,26 +172,6 @@ void clear_sky(aleph::render::common::Film& film) noexcept {
     }
 }
 
-// `build_sw_scene` emits one PLACEHOLDER `Lightmap{}` per face (its `texels`
-// pointer is null) and points every face's `lightmap_id` at it — the bridge
-// leaves lightmap baking to the shell (aleph_sw bakes a real lightmap pool).
-// The editor's raster view wants FLAT albedo shading (the color the bridge
-// already encoded into each face's UVs), so rather than bake a lightmap we hand
-// the rasterizer a SceneRT whose faces carry NO lightmap: set every face's
-// `lightmap_id = 0xFFFFFFFF`, which `rasterize` reads as "no modulation" (it
-// draws the face's `tex(u,v)` directly). Without this, the rasterizer would
-// dereference the placeholder lightmap's null `texels` and crash. We work on a
-// COPY because `controller.raster_scene()` is const (the controller owns the
-// truth-derived SceneRT); the copy is cheap (a few hundred small faces).
-aleph::render::sw::SceneRT
-flat_raster(const aleph::render::sw::SceneRT& src) {
-    aleph::render::sw::SceneRT out = src;
-    for (auto& f : out.faces) {
-        f.lightmap_id = 0xFFFFFFFFu;  // sentinel: no lightmap (flat albedo)
-    }
-    return out;
-}
-
 // The MVP for the controller's orbit camera at this image size. Mirrors the
 // rasterizer convention used by aleph_sw (perspective * look_at).
 Mat4 orbit_mvp(const aleph::edit::OrbitCamera& cam, int w, int h) noexcept {
@@ -260,11 +240,13 @@ int run_headless(const std::string& outdir) {
     // Render the controller's current state to two PPMs (raster + path-trace).
     int step_no = 0;
     auto dump = [&](const char* label) -> bool {
-        // (1) Raster composite.
+        // (1) Raster composite. `build_sw_scene` faces carry no lightmap
+        // (lightmap_id == 0xFFFFFFFF) and a baked flat-lit albedo, so the
+        // controller's SceneRT rasterizes directly (no per-face fixup needed).
         clear_sky(film);
         std::fill(depth.begin(), depth.end(), 1.0f);
-        const aleph::render::sw::SceneRT rsr = flat_raster(controller.raster_scene());
-        aleph::render::sw::rasterize(rsr, orbit_mvp(controller.camera(), W, H),
+        aleph::render::sw::rasterize(controller.raster_scene(),
+                                     orbit_mvp(controller.camera(), W, H),
                                      film, depth, pool);
         std::string rp = outdir + "/step" + std::to_string(step_no) + "_" + label
                        + "_raster.ppm";
@@ -396,6 +378,21 @@ int run_live() {
     int   pt_samples = 0;            // samples accumulated so far this idle burst
     bool  tracing    = false;
 
+    // ── Crossfade (T3) ───────────────────────────────────────────────────────
+    // Blend in LINEAR space across every raster<->path-trace mode switch so the
+    // hybrid view never hard-cuts. `presented` always holds the last shown frame
+    // (linear); on a mode change we snapshot it into `fade_from` and ramp alpha
+    // 0->1 over kFadeMs, presenting lerp(fade_from, src, alpha). Steady-state (no
+    // mode change) presents `src` verbatim — crisp + responsive while orbiting;
+    // the fade costs only a per-pixel lerp during the ~180ms ramp.
+    enum class Mode { Raster, Tracing };
+    constexpr u32 kFadeMs = 180;
+    std::vector<Vec3> fade_from(static_cast<std::size_t>(W) * H);
+    std::vector<Vec3> presented(static_cast<std::size_t>(W) * H);
+    Mode prev_mode       = Mode::Raster;
+    bool have_prev_frame = false;
+    u32  fade_start_ms   = 0;
+
     bool running   = true;
     bool left_down = false, prev_left = false;
     int  mouse_x = 0, mouse_y = 0;
@@ -491,117 +488,139 @@ int run_live() {
         }
 
         // ── Decide raster vs. progressive path-trace (idle). ──────────────────
+        // Whenever idle we show the path trace (accumulating until kMaxSpp, then
+        // holding the converged mean — it no longer flips back to raster on
+        // convergence); any input pulls us back to raster. Both modes leave a
+        // LINEAR image in `src`, which the crossfade block below presents.
         const u32 now = win.ticks_ms();
         const bool idle = (now - last_input_ms) >= kIdleMs;
 
-        if (idle && pt_samples < kMaxSpp) {
-            // Progressive: accumulate a small batch of spp per frame and blit the
-            // running mean. The first pass clears the accumulator + sky.
-            constexpr int kBatch = 8;
+        Mode        mode;
+        const Vec3* src = nullptr;
+
+        if (idle) {
+            mode = Mode::Tracing;
+            // Progressive: accumulate a small batch of spp per frame into the
+            // running mean. The first pass clears the accumulator.
             if (!tracing) {
                 std::fill(accum.begin(), accum.end(), Vec3{});
                 pt_samples = 0;
                 tracing    = true;
             }
-            const aleph::render::common::Camera pcam =
-                controller.camera().render_camera(W, H);
-            // Render one batch into `film`, then fold into the accumulator. The
-            // seed varies per batch so successive passes draw new samples.
-            clear_sky(film);
-            aleph::render::rt::RenderOpts opts{
-                kBatch, 8,
-                aleph::math::u64{42} + static_cast<aleph::math::u64>(pt_samples),
-                32};
-            aleph::render::rt::path_trace(controller.render_scene(), pcam, kSky,
-                                          film, pool, opts);
-            const f32 wbatch = static_cast<f32>(kBatch);
-            const f32 prev   = static_cast<f32>(pt_samples);
-            const f32 inv    = 1.0f / (prev + wbatch);
-            for (std::size_t i = 0; i < accum.size(); ++i) {
-                accum[i] = (accum[i] * prev + film.pixels[i] * wbatch) * inv;
-            }
-            pt_samples += kBatch;
-            // Blit the converged mean to the window (no UI overlay while tracing).
-            u32* wpx = win.pixels();
-            const int wp = win.pitch_pixels();
-            for (int y = 0; y < H; ++y) {
-                for (int x = 0; x < W; ++x) {
-                    wpx[y * wp + x] = aleph::render::common::tonemap_argb8888_gamma2(
-                        accum[static_cast<std::size_t>(y) * static_cast<std::size_t>(W)
-                              + static_cast<std::size_t>(x)]);
+            if (pt_samples < kMaxSpp) {
+                constexpr int kBatch = 8;
+                const aleph::render::common::Camera pcam =
+                    controller.camera().render_camera(W, H);
+                // Render one batch into `film`, then fold into the accumulator;
+                // the seed varies per batch so successive passes draw new samples.
+                clear_sky(film);
+                aleph::render::rt::RenderOpts opts{
+                    kBatch, 8,
+                    aleph::math::u64{42} + static_cast<aleph::math::u64>(pt_samples),
+                    32};
+                aleph::render::rt::path_trace(controller.render_scene(), pcam, kSky,
+                                              film, pool, opts);
+                const f32 wbatch = static_cast<f32>(kBatch);
+                const f32 prev   = static_cast<f32>(pt_samples);
+                const f32 inv    = 1.0f / (prev + wbatch);
+                for (std::size_t i = 0; i < accum.size(); ++i) {
+                    accum[i] = (accum[i] * prev + film.pixels[i] * wbatch) * inv;
                 }
+                pt_samples += kBatch;
             }
-            win.present();
-            prev_left = left_down;
-            continue;
-        }
-
-        // ── RASTER mode: rasterize the editor's view + UI overlay. ────────────
-        clear_sky(film);
-        std::fill(depth.begin(), depth.end(), 1.0f);
-        const aleph::render::sw::SceneRT rsr = flat_raster(controller.raster_scene());
-        aleph::render::sw::rasterize(rsr, orbit_mvp(controller.camera(), W, H),
-                                     film, depth, pool);
-
-        // UI panel: selection + a material color slider that emits SetMaterial.
-        const bool ui_mouse_pressed = left_down && !prev_left;
-        aleph::editor::ui_begin(ui, &film, mouse_x, mouse_y, left_down,
-                                ui_mouse_pressed);
-        aleph::editor::ui_panel(ui, W - 250, 50, 240, 210, "EDITOR");
-
-        char line[96];
-        if (controller.selected().has_value()) {
-            std::snprintf(line, sizeof(line), "SELECTED NODE %u",
-                          static_cast<unsigned>(controller.selected()->value));
+            src = accum.data();  // no UI overlay while tracing
         } else {
-            std::snprintf(line, sizeof(line), "NO SELECTION");
+            mode    = Mode::Raster;
+            tracing = false;
+
+            // ── RASTER: rasterize the editor's view + UI overlay into `film`. ──
+            clear_sky(film);
+            std::fill(depth.begin(), depth.end(), 1.0f);
+            aleph::render::sw::rasterize(controller.raster_scene(),
+                                         orbit_mvp(controller.camera(), W, H),
+                                         film, depth, pool);
+
+            // UI panel: selection + a material color slider that emits SetMaterial.
+            const bool ui_mouse_pressed = left_down && !prev_left;
+            aleph::editor::ui_begin(ui, &film, mouse_x, mouse_y, left_down,
+                                    ui_mouse_pressed);
+            aleph::editor::ui_panel(ui, W - 250, 50, 240, 210, "EDITOR");
+
+            char line[96];
+            if (controller.selected().has_value()) {
+                std::snprintf(line, sizeof(line), "SELECTED NODE %u",
+                              static_cast<unsigned>(controller.selected()->value));
+            } else {
+                std::snprintf(line, sizeof(line), "NO SELECTION");
+            }
+            aleph::editor::ui_label(ui, W - 242, 80, line, Vec3{1, 1, 1});
+
+            aleph::editor::ui_label(ui, W - 242, 100, "MATERIAL RGB", Vec3{1, 1, 1});
+            const Vec3 before = sel_albedo;
+            aleph::editor::ui_slider_f(ui, W - 242, 116, 224, 14, sel_albedo.x, 0.0f, 1.0f);
+            aleph::editor::ui_slider_f(ui, W - 242, 134, 224, 14, sel_albedo.y, 0.0f, 1.0f);
+            aleph::editor::ui_slider_f(ui, W - 242, 152, 224, 14, sel_albedo.z, 0.0f, 1.0f);
+            // A color swatch of the current albedo.
+            aleph::editor::draw_rect(film, W - 242, 174, 60, 30, sel_albedo);
+
+            aleph::editor::ui_label(ui, W - 242, 214, "A ADD  L LIGHT", Vec3{0.85f, 0.85f, 0.9f});
+            aleph::editor::ui_label(ui, W - 242, 230, "X DELETE  DRAG ORBIT",
+                                    Vec3{0.85f, 0.85f, 0.9f});
+            aleph::editor::ui_end(ui);
+
+            // If the slider moved a real selection's color, emit a SetMaterial Op.
+            if ((sel_albedo.x != before.x || sel_albedo.y != before.y ||
+                 sel_albedo.z != before.z)
+                && controller.selected().has_value()) {
+                aleph::lowering::SetMaterial set{};
+                set.target = *controller.selected();
+                set.params = lambertian(sel_albedo);
+                (void)controller.apply(aleph::lowering::Op{set});
+                invalidate();
+            }
+
+            // HUD.
+            char hud[128];
+            std::snprintf(hud, sizeof(hud), "ENTITIES %zu  LIGHTS %zu  FACES %zu",
+                          controller.lowered().entities.size(),
+                          controller.lowered().lights.size(),
+                          controller.raster_scene().faces.size());
+            aleph::editor::draw_rect(film, 8, 8, 420, 24, Vec3{0, 0, 0});
+            aleph::editor::draw_text_shadowed(film, 14, 14, hud, Vec3{1, 1, 1});
+
+            src = film.pixels;  // film stride == W (contiguous)
         }
-        aleph::editor::ui_label(ui, W - 242, 80, line, Vec3{1, 1, 1});
 
-        aleph::editor::ui_label(ui, W - 242, 100, "MATERIAL RGB", Vec3{1, 1, 1});
-        const Vec3 before = sel_albedo;
-        aleph::editor::ui_slider_f(ui, W - 242, 116, 224, 14, sel_albedo.x, 0.0f, 1.0f);
-        aleph::editor::ui_slider_f(ui, W - 242, 134, 224, 14, sel_albedo.y, 0.0f, 1.0f);
-        aleph::editor::ui_slider_f(ui, W - 242, 152, 224, 14, sel_albedo.z, 0.0f, 1.0f);
-        // A color swatch of the current albedo.
-        aleph::editor::draw_rect(film, W - 242, 174, 60, 30, sel_albedo);
-
-        aleph::editor::ui_label(ui, W - 242, 214, "A ADD  L LIGHT", Vec3{0.85f, 0.85f, 0.9f});
-        aleph::editor::ui_label(ui, W - 242, 230, "X DELETE  DRAG ORBIT",
-                                Vec3{0.85f, 0.85f, 0.9f});
-        aleph::editor::ui_end(ui);
-
-        // If the slider moved a real selection's color, emit a SetMaterial Op.
-        if ((sel_albedo.x != before.x || sel_albedo.y != before.y ||
-             sel_albedo.z != before.z)
-            && controller.selected().has_value()) {
-            aleph::lowering::SetMaterial set{};
-            set.target = *controller.selected();
-            set.params = lambertian(sel_albedo);
-            (void)controller.apply(aleph::lowering::Op{set});
-            invalidate();
+        // ── Crossfade present (T3): lerp(fade_from, src, alpha) in linear. ────
+        // A mode switch snapshots the last shown frame and restarts the ramp;
+        // steady-state (alpha>=1) presents `src` verbatim. `presented` records
+        // exactly what we show so the next transition fades from the real frame.
+        if (have_prev_frame && mode != prev_mode) {
+            std::copy(presented.begin(), presented.end(), fade_from.begin());
+            fade_start_ms = now;
         }
-
-        // HUD.
-        char hud[128];
-        std::snprintf(hud, sizeof(hud), "ENTITIES %zu  LIGHTS %zu  FACES %zu",
-                      controller.lowered().entities.size(),
-                      controller.lowered().lights.size(),
-                      controller.raster_scene().faces.size());
-        aleph::editor::draw_rect(film, 8, 8, 420, 24, Vec3{0, 0, 0});
-        aleph::editor::draw_text_shadowed(film, 14, 14, hud, Vec3{1, 1, 1});
-
-        // Tonemap into the window.
+        const u32 elapsed = now - fade_start_ms;
+        const f32 alpha = (!have_prev_frame || elapsed >= kFadeMs)
+            ? 1.0f
+            : static_cast<f32>(elapsed) / static_cast<f32>(kFadeMs);
         u32* wpx = win.pixels();
         const int wp = win.pitch_pixels();
         for (int y = 0; y < H; ++y) {
             for (int x = 0; x < W; ++x) {
-                const Vec3 lin = film.pixels[y * film.stride_pixels + x];
+                const std::size_t i =
+                    static_cast<std::size_t>(y) * static_cast<std::size_t>(W)
+                    + static_cast<std::size_t>(x);
+                const Vec3 lin = (alpha >= 1.0f)
+                    ? src[i]
+                    : aleph::math::lerp(fade_from[i], src[i], alpha);
+                presented[i] = lin;
                 wpx[y * wp + x] = aleph::render::common::tonemap_argb8888_gamma2(lin);
             }
         }
         win.present();
-        prev_left = left_down;
+        have_prev_frame = true;
+        prev_mode  = mode;
+        prev_left  = left_down;
     }
     return 0;
 }

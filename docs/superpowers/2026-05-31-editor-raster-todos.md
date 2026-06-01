@@ -11,13 +11,38 @@ FIX: give `render::sw::Face` a flat `albedo` Vec3 tint that the rasterizer modul
 Files changed: `render/.../aleph.render.sw-scene_rt.cppm` (Face += albedo), `aleph.render.sw-rast_scan.cppm` (rast_scan_textured += albedo param + modulation), `aleph.render.sw-rasterize.cppm` (pass face.albedo), `bridge/.../aleph.lowering-build_sw.cppm` (tex_white + flat albedo, drop UV codec + placeholder lightmaps), `tests/render/test_sw_rasterize.cpp` (call-site arg).
 NOTE: back-face culling (T4) was NOT needed — the existing `if (signed_area < 0) return;` in rast_scan already culls; the artifact was purely the UV codec.
 
-## T2 — [polish] Raster floor is flat/unlit
-The raster floor is flat gray (img2) vs the lit, soft-shadowed floor in path-trace (img1). `render.sw` does minimal shading (no light response on the floor here). Add at least N·L flat shading (or a lightmap pass) so the raster preview is recognizable as the same scene.
-Files: `render/src/aleph.render.sw/*` (shading), possibly `build_sw_scene` (emit normals/light info).
+## T2 — [polish] Raster floor is flat/unlit — ✅ FIXED (2026-05-31)
+The raster floor was flat gray (img2) vs the lit floor in path-trace (img1).
+FIX: bake a cheap FLAT LAMBERT shade into each `Face::albedo` in `build_sw`
+(the bridge is the one place graph lights + render.sw meet — render.sw stays
+graph-free). `shade_face` = `albedo·kAmbient + self_emit + Σ_lights albedo⊙emit·max(0,N·L)·atten·kLightScale`,
+`atten = 1/(1+kFall·dist²)`. Spheres use their exact outward normal (centroid−centre,
+one-sided → real light/dark terminator); quads/tris use the geometric cross-product
+normal two-sided (|N·L|) so a floor lit from either winding reads as lit. Lights are
+`LoweredScene::lights` (centre = geometry centre, radiance = `material.emit`). Tuned
+(kAmbient 0.20, kLightScale 0.28, kFall 0.08) so the floor reads ≈ the path-trace
+average (verified: raster floor (189,189,192) vs PT (187–207)) → exposure now matches,
+which also serves T3. NOTE: the floor is ONE quad = 2 triangles, so flat per-face
+shading makes it uniformly lit (no gradient); a gradient would need tessellation,
+which violates the SPEC `QuadLocal→2 faces` invariant (and `test_build_sw`), or
+per-vertex (Gouraud) normals in the rasterizer — deliberately out of scope. Spheres
+show visible facets (12×16 flat-shaded) — also inherent to flat shading. Pure f32 over
+lights-in-order → deterministic (pinned by extending `test_build_sw` same_face to also
+compare `Face::albedo`). Files: `bridge/src/aleph.lowering/aleph.lowering-build_sw.cppm`.
 
-## T3 — [polish] Hybrid switch is jarring
-The jump between the flat/broken raster (navigating) and the lit path-trace (idle) is abrupt. After T1+T2, reduce the discontinuity: match exposure, keep the last path-trace frame during a brief grace period, or crossfade raster→path-trace.
-Files: `apps/aleph_edit/main.cpp` (mode-switch loop).
+## T3 — [polish] Hybrid switch is jarring — ✅ FIXED (2026-05-31)
+The jump between raster (navigating) and path-trace (idle) was an abrupt hard cut.
+FIX (`apps/aleph_edit/main.cpp` run_live): a LINEAR-space crossfade on every
+raster↔path-trace mode switch. `presented` always holds the last shown frame; on a
+mode change we snapshot it into `fade_from` and ramp `alpha` 0→1 over `kFadeMs`=180,
+presenting `lerp(fade_from, src, alpha)` then tonemapping. Steady-state (no mode
+change) presents `src` verbatim → crisp + responsive while orbiting; the fade costs
+only a per-pixel lerp during the ~180ms ramp, in BOTH directions. T2 already brought
+the raster exposure close to the path trace, so the crossfade has little brightness gap
+to hide. Also fixed a latent bug: when idle && converged (`pt_samples>=kMaxSpp`) the old
+code flipped BACK to raster; now it holds the converged path-trace mean. And dropped the
+redundant `flat_raster()` copy (build_sw faces already carry `lightmap_id=0xFFFFFFFF`),
+rasterizing `controller.raster_scene()` directly in both run_headless and run_live.
 
 ## T4 — [note] render.sw lacks back-face culling
 `render/src/aleph.render.sw/aleph.render.sw-rasterize.cppm` sorts by `dist_sq` + uses a depth buffer but never culls back faces. Adding culling helps T1 and is a perf win on closed meshes (spheres/cubes). Keep an opt-out for double-sided faces (quads/floor) if needed.
