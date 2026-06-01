@@ -96,6 +96,8 @@ add_executable(aleph_tests
     edit/test_controller.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
+target_include_directories(aleph_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/lowering)  # shared lowering_freeze.hpp (used by edit/test_controller.cpp)
 target_compile_definitions(aleph_tests PRIVATE
     ALEPH_TLA_SCENE_GRAPH_PATH="${CMAKE_SOURCE_DIR}/formal/scene_graph.tla")
 target_link_libraries(aleph_tests PRIVATE
