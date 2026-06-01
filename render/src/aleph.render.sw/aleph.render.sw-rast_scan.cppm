@@ -32,6 +32,7 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
                                 ScreenVert v0, ScreenVert v1, ScreenVert v2,
                                 TexSampleFn tex,
                                 const Lightmap* lm,
+                                aleph::math::Vec3 albedo,
                                 int y_clip_min, int y_clip_max) noexcept {
     const aleph::math::f32 signed_area =
         (v1.x - v0.x) * (v2.y - v0.y) - (v1.y - v0.y) * (v2.x - v0.x);
@@ -138,6 +139,9 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
                         color = aleph::math::Vec3{
                             color.x * mod_color.x, color.y * mod_color.y, color.z * mod_color.z};
                     }
+                    color = aleph::math::Vec3{color.x * albedo.x,
+                                              color.y * albedo.y,
+                                              color.z * albedo.z};
                     fb.pixels[yy * fb.stride_pixels + x + i] = color;
                     tu += du; tv += dv;
                 }

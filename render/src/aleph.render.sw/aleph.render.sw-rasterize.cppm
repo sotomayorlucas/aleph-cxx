@@ -93,7 +93,7 @@ inline void rasterize(const SceneRT& sr, aleph::math::Mat4 mvp,
                     const ScreenVert s0 = detail::to_screen(clipped[k*3 + 0], fb.width, fb.height);
                     const ScreenVert s1 = detail::to_screen(clipped[k*3 + 1], fb.width, fb.height);
                     const ScreenVert s2 = detail::to_screen(clipped[k*3 + 2], fb.width, fb.height);
-                    rast_scan_textured(fb, depth, sb, s0, s1, s2, face.tex, lm,
+                    rast_scan_textured(fb, depth, sb, s0, s1, s2, face.tex, lm, face.albedo,
                                         y_start, y_end);
                 }
             }

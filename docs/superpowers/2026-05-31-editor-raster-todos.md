@@ -4,14 +4,12 @@ Found while running the live `aleph_edit` (interactive, SDL). **The path-trace (
 
 Initial scene: ENTITIES 8, LIGHTS 3, FACES 2690.
 
-## T1 — [BUG, high] Raster sphere shows red triangles through the surface
+## T1 — [BUG, high] Raster sphere shows red triangles through the surface — ✅ FIXED (2026-05-31)
 Symptom: in raster (navigation) mode the tessellated UV-sphere shows scattered **red triangles** over the blue surface (img2); path-trace (img1) is fully correct.
-Diagnosis so far:
-- Color in `render.sw` is a per-pixel `TexSampleFn`; `build_sw_scene` packs the entity **albedo into the face UVs** and decodes via a captureless `tex_albedo`. Suspected: a **subset of sphere faces get wrong/unset UVs** (e.g. the second triangle of each cell, or seam/pole cells, or the degenerate-quad `{0,2,3}` path) → `tex_albedo` decodes garbage → red. (Material is blue everywhere; red is not a material — it's a decode artifact.)
-- `render.sw` has a depth buffer + a `dist_sq` (z/w) face sort but **no back-face culling** — back faces of the sphere are rasterized (depth should hide them, but it may compound the artifact / z-fighting at the silhouette).
-Fix plan: (a) verify the UV-albedo packing is applied to **every** sphere face (both per-cell triangles, poles, seam) and decodes bit-exact; (b) add **back-face culling** in `render.sw` (signed screen-space area / normal·view) — also a perf win; (c) confirm consistent triangle **winding** in the sphere tessellation.
-Files: `bridge/src/aleph.lowering/aleph.lowering-build_sw.cppm` (sphere tessellation + UV packing), `render/src/aleph.render.sw/aleph.render.sw-rasterize.cppm` (+ `:rast_scan`, `tex_albedo`).
-Repro: `./build-release/apps/aleph_edit/aleph_edit`, orbit-drag. (Headless raster PPMs at `/tmp/edit_demo/*_raster.ppm` also show it.)
+ROOT CAUSE (confirmed): `build_sw_scene` packed the entity **albedo into the face UVs** as exact-integer floats up to 65535 and decoded them per pixel via a captureless `tex_albedo`. Although all four UVs of a face were identical (zero gradient in theory), the rasterizer's perspective-correct interpolation computes the UV per pixel as `u_w_acc / inv_w_acc` accumulated in 16-px subspans — tiny f32 rounding on sliver/grazing sphere triangles perturbed the interpolated value by a few units, which flipped high bits in the ARGB decode → stray colours (notably red, the high R byte). It was a decode artifact, not a material. (Not the placeholder-lightmap path: the editor's `flat_raster` already zeroed `lightmap_id`, so lightmap modulation was off; the codec was the sole colour source.)
+FIX: give `render::sw::Face` a flat `albedo` Vec3 tint that the rasterizer modulates onto the per-pixel texel; `build_sw` sets `Face::albedo = material.albedo` + pairs it with a constant-white texture `tex_white` (so colour = white·albedo = albedo) and emits NO lightmaps (`lightmap_id = 0xFFFFFFFF`). A flat per-face colour is interpolation-proof — no large UVs, no per-pixel decode. Verified: headless raster PPMs now show clean solid spheres (red + blue) that match the path-trace reference; ctest 19/19; release-strict 0 warnings.
+Files changed: `render/.../aleph.render.sw-scene_rt.cppm` (Face += albedo), `aleph.render.sw-rast_scan.cppm` (rast_scan_textured += albedo param + modulation), `aleph.render.sw-rasterize.cppm` (pass face.albedo), `bridge/.../aleph.lowering-build_sw.cppm` (tex_white + flat albedo, drop UV codec + placeholder lightmaps), `tests/render/test_sw_rasterize.cpp` (call-site arg).
+NOTE: back-face culling (T4) was NOT needed — the existing `if (signed_area < 0) return;` in rast_scan already culls; the artifact was purely the UV codec.
 
 ## T2 — [polish] Raster floor is flat/unlit
 The raster floor is flat gray (img2) vs the lit, soft-shadowed floor in path-trace (img1). `render.sw` does minimal shading (no light response on the floor here). Add at least N·L flat shading (or a lightmap pass) so the raster preview is recognizable as the same scene.

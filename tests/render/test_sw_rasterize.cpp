@@ -20,7 +20,7 @@ TEST_CASE("rast_scan_textured: writes some pixels for a centered triangle") {
     ScreenVert v2{8.0f, 14.0f, 0.0f, 0, 1, 1.0f};
 
     rast_scan_textured(color, depth, sb, v0, v1, v2,
-                        tex_floor, nullptr, 0, 16);
+                        tex_floor, nullptr, aleph::math::Vec3{1, 1, 1}, 0, 16);
 
     int touched = 0;
     for (int i = 0; i < 16 * 16; ++i)

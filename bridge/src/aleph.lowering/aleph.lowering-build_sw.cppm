@@ -26,15 +26,15 @@
 // `aleph_lowering` additionally links `aleph_render_sw`; `render.sw`/`render.rt`
 // still never import graph (this file is the one place the two meet).
 //
-// COLOR: a `render::sw::Face` carries no color field — it samples a captureless
-// `TexSampleFn(u,v)` per pixel (see :rast_scan). To paint a face with the
-// entity's runtime `albedo` WITHOUT touching the `Face`/SceneRT layout, we encode
-// the albedo into the face's (constant) UVs and decode it back in a single
-// captureless sampler `tex_albedo`. All four UVs of a face are identical, so the
-// rasterizer's perspective-correct interpolation yields exactly that (u,v) at
-// every covered pixel (the gradients are zero) and `tex_albedo` returns a flat
-// albedo color. The packing uses exact-integer floats (0..65535, all exactly
-// representable as f32), so the round-trip is bit-exact and deterministic.
+// COLOR: a `render::sw::Face` carries a flat `albedo` tint that the rasterizer
+// modulates onto the per-pixel `TexSampleFn(u,v)` sample (see :rast_scan). We
+// paint each face by setting `Face::albedo = entity.material.albedo` and pairing
+// it with a constant-white texture `tex_white`, so the rendered colour is exactly
+// `white * albedo == albedo` at every covered pixel. (An earlier scheme packed
+// the albedo into the face UVs as values up to 65535 and decoded per pixel; the
+// rasterizer's perspective interpolation of those large UVs lost precision on
+// sliver/grazing triangles and flipped high bits -> stray wrong colours. A flat
+// colour field is interpolation-proof and trivially deterministic.)
 //
 // DETERMINISM (SPEC §7): faces are emitted in `entities` order; the sphere
 // tessellation walks rings/sectors in fixed order with fixed counts and pure f32
@@ -81,66 +81,40 @@ namespace detail {
 inline constexpr int SPHERE_RINGS   = kSphereRings;
 inline constexpr int SPHERE_SECTORS = kSphereSectors;
 
-// --- albedo <-> UV codec -------------------------------------------------
+// --- flat colour ---------------------------------------------------------
 //
-// We carry the face's flat color through the (otherwise unused) UV channel.
-// Quantize each linear albedo channel to 8 bits, pack ARGB into a u32, then
-// split that u32 into two halves stored as exact-integer floats:
-//   u = high 16 bits (0..65535), v = low 16 bits (0..65535).
-// f32 represents every integer up to 2^24 exactly, so the pack/interpolate/
-// unpack round-trip is bit-exact and order-independent (the rasterizer
-// interpolates a constant -> zero gradient -> returns u,v verbatim).
+// COLOUR is carried by `Face::albedo` (a flat per-face tint the rasterizer
+// modulates onto the sampled texel). We pair it with a constant-white texture
+// `tex_white`, so the rendered colour is exactly `white * albedo == albedo`.
+// (The earlier scheme packed the albedo into the face UVs as values up to
+// 65535 and decoded them per pixel; the rasterizer's perspective interpolation
+// of those large UVs lost enough precision on grazing/sliver triangles to flip
+// the high bits -> wrong colour. A flat colour field is interpolation-proof.)
 
-[[nodiscard]] inline aleph::math::u8 quantize_channel(aleph::math::f32 c) noexcept {
-    const aleph::math::f32 clamped = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c);
-    // +0.5 round-to-nearest; deterministic for the clamped [0,1] range.
-    return static_cast<aleph::math::u8>(clamped * 255.0f + 0.5f);
-}
-
-[[nodiscard]] inline aleph::math::u32 albedo_to_argb(aleph::math::Vec3 albedo) noexcept {
-    const aleph::math::u32 r = quantize_channel(albedo.x);
-    const aleph::math::u32 g = quantize_channel(albedo.y);
-    const aleph::math::u32 b = quantize_channel(albedo.z);
-    return 0xFF000000u | (r << 16) | (g << 8) | b;
-}
-
-// The constant UV that encodes `albedo` for a whole face (all four verts share
-// it). `argb_to_uv` is the inverse of `tex_albedo`'s decode.
-[[nodiscard]] inline aleph::math::Vec2 albedo_to_uv(aleph::math::Vec3 albedo) noexcept {
-    const aleph::math::u32 argb = albedo_to_argb(albedo);
-    return aleph::math::Vec2{
-        static_cast<aleph::math::f32>((argb >> 16) & 0xFFFFu),  // ARGB hi 16 bits
-        static_cast<aleph::math::f32>( argb        & 0xFFFFu),  // ARGB lo 16 bits
-    };
-}
-
-// Captureless sampler: reconstruct the packed ARGB from the (constant) UV.
-// `+ 0.5f` then truncation makes the decode robust to any benign f32 wobble
-// from the rasterizer's interpolation even though the gradient is zero.
+// Captureless white texture: every texel is opaque white (0xFFFFFFFF).
 [[nodiscard]] inline aleph::math::u32
-tex_albedo(aleph::math::f32 u, aleph::math::f32 v) noexcept {
-    const aleph::math::u32 hi = static_cast<aleph::math::u32>(u + 0.5f) & 0xFFFFu;
-    const aleph::math::u32 lo = static_cast<aleph::math::u32>(v + 0.5f) & 0xFFFFu;
-    return (hi << 16) | lo;
+tex_white(aleph::math::f32 /*u*/, aleph::math::f32 /*v*/) noexcept {
+    return 0xFFFFFFFFu;
 }
 
 // Append one *triangle* as a render.sw Face (a degenerate quad: verts[3] ==
 // verts[2], so rast_scan's {0,2,3} split is zero-area and only the {0,1,2}
-// triangle rasterizes). All UVs = `uv` so the face is flat-shaded with the
-// encoded albedo. Mirrors render.sw add_floor/add_cube: push a Face + a
-// (placeholder) Lightmap and keep `lightmap_id` aligned to the lightmaps vector.
-// `face_source` grows in lockstep with faces (1 Face == 1 triangle == 1 source).
+// triangle rasterizes). The face is flat-shaded with `albedo` (white texture
+// modulated by the tint). `lightmap_id == 0xFFFFFFFF` => no lightmap (build_sw
+// emits no placeholder Lightmaps; the raster preview is flat). `face_source`
+// grows in lockstep with faces (1 Face == 1 triangle == 1 source).
 inline void push_tri(SwBuild& out,
                      aleph::math::Vec3 a, aleph::math::Vec3 b, aleph::math::Vec3 c,
-                     aleph::math::Vec2 uv,
+                     aleph::math::Vec3 albedo,
                      aleph::types::NodeId source) {
     aleph::render::sw::Face f{};
     f.verts = {a, b, c, c};
-    f.uvs = {uv, uv, uv, uv};
-    f.tex = &tex_albedo;
-    f.lightmap_id = static_cast<aleph::math::u32>(out.scene.lightmaps.size());
+    f.uvs = {aleph::math::Vec2{0.0f, 0.0f}, aleph::math::Vec2{0.0f, 0.0f},
+             aleph::math::Vec2{0.0f, 0.0f}, aleph::math::Vec2{0.0f, 0.0f}};
+    f.tex = &tex_white;
+    f.lightmap_id = 0xFFFFFFFFu;  // no lightmap
+    f.albedo = albedo;
     out.scene.faces.push_back(f);
-    out.scene.lightmaps.push_back(aleph::render::sw::Lightmap{});
     out.face_source.push_back(source);
 }
 
@@ -148,19 +122,19 @@ inline void push_tri(SwBuild& out,
 // q+v); we split those four corners into the two triangles {p0,p1,p2} and
 // {p0,p2,p3} (matching rast_scan's quad winding) and emit one Face each.
 inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
-                      aleph::math::Vec2 uv, aleph::types::NodeId source) {
+                      aleph::math::Vec3 albedo, aleph::types::NodeId source) {
     const aleph::math::Vec3 p0 = g.q;
     const aleph::math::Vec3 p1 = g.q + g.u;
     const aleph::math::Vec3 p2 = g.q + g.u + g.v;
     const aleph::math::Vec3 p3 = g.q + g.v;
-    push_tri(out, p0, p1, p2, uv, source);
-    push_tri(out, p0, p2, p3, uv, source);
+    push_tri(out, p0, p1, p2, albedo, source);
+    push_tri(out, p0, p2, p3, albedo, source);
 }
 
 // TriLocal -> 1 Face (the single triangle {a,b,c}).
 inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
-                     aleph::math::Vec2 uv, aleph::types::NodeId source) {
-    push_tri(out, g.a, g.b, g.c, uv, source);
+                     aleph::math::Vec3 albedo, aleph::types::NodeId source) {
+    push_tri(out, g.a, g.b, g.c, albedo, source);
 }
 
 // SphereLocal -> a deterministic UV sphere of RINGS x SECTORS quad cells, each
@@ -176,7 +150,7 @@ inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
 // — but it is still emitted as a Face, which keeps the per-sphere Face count
 // exactly RINGS*SECTORS*2 regardless of caps. All math is pure f32.
 inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
-                        aleph::math::Vec2 uv, aleph::types::NodeId source) {
+                        aleph::math::Vec3 albedo, aleph::types::NodeId source) {
     constexpr aleph::math::f32 kPi = 3.14159265358979323846f;
     auto on_sphere = [&](int ring, int sector) noexcept -> aleph::math::Vec3 {
         const aleph::math::f32 theta =
@@ -201,26 +175,26 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
             const aleph::math::Vec3 b = on_sphere(ring + 1, sector);
             const aleph::math::Vec3 c = on_sphere(ring + 1, sector + 1);
             const aleph::math::Vec3 d = on_sphere(ring,     sector + 1);
-            push_tri(out, a, b, c, uv, source);
-            push_tri(out, a, c, d, uv, source);
+            push_tri(out, a, b, c, albedo, source);
+            push_tri(out, a, c, d, albedo, source);
         }
     }
 }
 
 // Dispatch one resolved, world-space entity onto its geometry emitter. Pure
 // translation (no decisions): the variant was fixed by `lower()`. The face color
-// is the entity material's albedo, encoded into the face UVs (see codec above).
+// is the entity material's albedo, carried verbatim as the face's flat tint.
 inline void emit_entity(SwBuild& out, const LoweredEntity& e) {
-    const aleph::math::Vec2 uv = albedo_to_uv(e.material.albedo);
+    const aleph::math::Vec3 albedo = e.material.albedo;
     std::visit(
         [&](const auto& g) {
             using G = std::decay_t<decltype(g)>;
             if constexpr (std::is_same_v<G, aleph::types::SphereLocal>) {
-                emit_sphere(out, g, uv, e.source);
+                emit_sphere(out, g, albedo, e.source);
             } else if constexpr (std::is_same_v<G, aleph::types::QuadLocal>) {
-                emit_quad(out, g, uv, e.source);
+                emit_quad(out, g, albedo, e.source);
             } else {  // aleph::types::TriLocal
-                emit_tri(out, g, uv, e.source);
+                emit_tri(out, g, albedo, e.source);
             }
         },
         e.world_geometry);
