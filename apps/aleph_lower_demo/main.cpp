@@ -28,6 +28,18 @@
 // thin local translation (`build_render_scene_local`) verbatim so it stays
 // byte-stable. The grouped path needs `Scene::light_groups`, which only the
 // shipped `aleph.lowering:build` partition populates, so it calls that instead.
+//
+// ── Adaptive-spp mode (Phase 5.x-b, SPEC §5 test 7) ──────────────────────────
+// An optional flag — argv "adaptive" or "--adaptive" (in any position) —
+// switches the demo to a MULTI-mesh scene wired by `Adjacent` edges, so the
+// flow layer's Ollivier-Ricci curvature varies across meshes and the lowering
+// bakes a NON-uniform per-primitive importance onto the `Scene` (SPEC §4.1/§4.2).
+// That path uses the REAL `aleph::lowering::build_render_scene` (the only
+// surface that bakes `Scene::{sphere,quad,tri}_importance`), and rendering
+// enables `RenderOpts.adaptive_spp` so the integrator spends more samples where
+// high-importance primitives are visible (SPEC §4.3). render.rt and aleph.scene
+// never import `aleph.flow`: the importance reaches the renderer ONLY as the
+// plain f32 array the lowering baked onto the Scene (SPEC §1 boundary).
 
 #include <cstdint>
 #include <cstdio>
@@ -204,6 +216,102 @@ aleph::graph::Graph build_grouped_graph() {
     return g;
 }
 
+// ── Author a MULTI-mesh ADAPTIVE scene (Phase 5.x-b, SPEC §5 test 7 / §4.1) ──
+//
+// A fully lowerable scene whose mesh `Adjacent` 1-skeleton has VARYING
+// Ollivier-Ricci curvature, so the lowering bakes a NON-uniform per-primitive
+// importance onto the Scene (the precondition for the adaptive-spp path to
+// allocate samples differently across the image):
+//
+//   root Transform (identity)
+//     ├─Contains─▶ Camera
+//     ├─Contains─▶ Mesh m0 ─References─▶ Material (Lambertian grey)
+//     ├─Contains─▶ Mesh m1 ─References─▶ Material
+//     ├─Contains─▶ Mesh m2 ─References─▶ Material
+//     ├─Contains─▶ Mesh m3 ─References─▶ Material   (tail)
+//     ├─Contains─▶ Light (area, overhead)
+//     │
+//     ├─Adjacent─▶ m0–m1, m1–m2, m2–m0   (a 3-clique: high positive curvature)
+//     └─Adjacent─▶ m0–m3                  (a bridge to a pendant: low curvature)
+//
+// The triangle {m0,m1,m2} is a clique — its edges have high Ollivier-Ricci
+// curvature; the single bridge m0–m3 to the pendant m3 has markedly lower
+// (here negative) curvature. After the lowering's per-Mesh mean + min-max
+// normalize, the meshes land at distinct importances in [0,1] (m1/m2 high near
+// the clique, the pendant m3 low), so the baked `Scene` importance is non-trivial
+// and the adaptive sampler has something to act on. `aleph.flow` is never touched
+// here — only `aleph.lowering` (inside `lower()`/`build_render_scene`) links it.
+//
+// The spheres are spread across the frame so the high- and low-importance
+// primitives occupy different image regions, the way the §5 test-3 mechanism
+// expects: high-importance pixels draw `max_spp_scale×` the samples of the rest.
+aleph::graph::Graph build_adaptive_graph() {
+    using namespace aleph::types;
+    aleph::graph::Graph g;
+
+    const NodeId root = g.alloc_node_id();
+    g.insert_node(Transform{root, 0, LocalTransform{Mat4::identity()}});
+
+    const NodeId cam_id = g.alloc_node_id();
+    Camera cam{cam_id, std::string("sensor0")};
+    cam.look_from  = Vec3{0.0f, 1.0f, 7.0f};
+    cam.look_at    = Vec3{0.0f, 0.5f, 0.0f};
+    cam.up         = Vec3{0.0f, 1.0f, 0.0f};
+    cam.vfov_deg   = 55.0f;
+    cam.aperture   = 0.0f;
+    cam.focus_dist = 7.0f;
+    g.insert_node(std::move(cam));
+
+    // One shared Lambertian grey material (non-emissive ⇒ out of the light
+    // table). Every mesh references it.
+    const NodeId mat_id = g.alloc_node_id();
+    Material mat{mat_id, MaterialKind::Lambertian};
+    mat.albedo = Vec3{0.72f, 0.72f, 0.74f};
+    mat.emit   = Vec3{0.0f, 0.0f, 0.0f};
+    g.insert_node(std::move(mat));
+
+    // Four analytic-sphere meshes spread across the frame. The fourth (m3) is
+    // the pendant attached by a single Adjacent bridge.
+    auto add_mesh = [&](const char* name, Vec3 center) -> NodeId {
+        const NodeId id = g.alloc_node_id();
+        Mesh m{id, std::string(name), 0};
+        m.geometry = SphereLocal{center, 0.5f};
+        g.insert_node(std::move(m));
+        (void)g.add_edge(EdgeKind::References, id, mat_id);
+        return id;
+    };
+    const NodeId m0 = add_mesh("m0", Vec3{-1.8f, 0.5f, 0.0f});
+    const NodeId m1 = add_mesh("m1", Vec3{-0.6f, 0.5f, 0.0f});
+    const NodeId m2 = add_mesh("m2", Vec3{ 0.6f, 0.5f, 0.0f});
+    const NodeId m3 = add_mesh("m3", Vec3{ 1.8f, 0.5f, 0.0f});
+
+    // A single overhead area light so the meshes are lit (its own emissive quad).
+    const NodeId light_id = g.alloc_node_id();
+    Light light{light_id, LightKind::Area, std::string("emit0")};
+    light.emission = Vec3{6.0f, 6.0f, 6.0f};
+    light.geometry = QuadLocal{Vec3{-1.5f, 3.0f, -1.0f}, Vec3{3.0f, 0.0f, 0.0f},
+                               Vec3{0.0f, 0.0f, 2.0f}};
+    g.insert_node(std::move(light));
+
+    // Hierarchy: root Contains the camera, all meshes and the light.
+    (void)g.add_edge(EdgeKind::Contains, root, cam_id);
+    (void)g.add_edge(EdgeKind::Contains, root, m0);
+    (void)g.add_edge(EdgeKind::Contains, root, m1);
+    (void)g.add_edge(EdgeKind::Contains, root, m2);
+    (void)g.add_edge(EdgeKind::Contains, root, m3);
+    (void)g.add_edge(EdgeKind::Contains, root, light_id);
+
+    // Mesh `Adjacent` 1-skeleton (the ONLY input flow's Ricci sees): a 3-clique
+    // {m0,m1,m2} plus a bridge m0–m3 to the pendant m3. The clique edges carry
+    // high curvature, the bridge low — so per-mesh mean curvature, and hence the
+    // normalized importance, VARIES across meshes (SPEC §4.1).
+    (void)g.add_edge(EdgeKind::Adjacent, m0, m1);
+    (void)g.add_edge(EdgeKind::Adjacent, m1, m2);
+    (void)g.add_edge(EdgeKind::Adjacent, m2, m0);
+    (void)g.add_edge(EdgeKind::Adjacent, m0, m3);
+    return g;
+}
+
 // ── A scene material handle from normalized IR params (SPEC §4.3 dispatch) ───
 aleph::scene::MaterialHandle add_material(aleph::scene::Scene& s,
                                           const aleph::lowering::MaterialParams& m) {
@@ -263,28 +371,39 @@ aleph::scene::Scene build_render_scene_local(const aleph::lowering::LoweredScene
 }  // namespace
 
 int main(int argc, char** argv) {
-    // ── 0. Parse args: an optional grouping flag ("grouped" / "--grouped") in
-    // any position, plus an optional output path (the first non-flag arg). ─────
-    bool grouped = false;
+    // ── 0. Parse args: optional mode flags ("grouped"/"--grouped" or
+    // "adaptive"/"--adaptive") in any position, plus an optional output path (the
+    // first non-flag arg). The two modes are mutually exclusive; if both are
+    // given, "adaptive" wins (the multi-mesh Ricci path is the broader scene). ──
+    bool grouped  = false;
+    bool adaptive = false;
     std::string out_path;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
         if (arg == "grouped" || arg == "--grouped") {
             grouped = true;
+        } else if (arg == "adaptive" || arg == "--adaptive") {
+            adaptive = true;
         } else if (out_path.empty()) {
             out_path = std::string(arg);
         }
     }
+    if (adaptive) grouped = false;  // adaptive takes precedence over grouped
+    const char* mode = adaptive ? "adaptive" : (grouped ? "grouped" : "default");
     if (out_path.empty()) {
-        out_path = grouped ? std::string("/tmp/aleph_lower_demo_grouped.ppm")
-                           : std::string("/tmp/aleph_lower_demo.ppm");
+        out_path = std::string("/tmp/aleph_lower_demo_") + mode + ".ppm";
+        if (!adaptive && !grouped) out_path = "/tmp/aleph_lower_demo.ppm";
     }
 
     // ── 1. The graph is the truth. ───────────────────────────────────────────
     // Default: the single-light enriched scene. With --grouped: a multi-light
-    // scene whose H⁰ light grouping is non-trivial (SPEC §5 test 6).
-    const aleph::graph::Graph g =
-        grouped ? build_grouped_graph() : build_enriched_graph();
+    // scene whose H⁰ light grouping is non-trivial (SPEC §5 test 6). With
+    // --adaptive: a multi-mesh scene wired by `Adjacent` edges whose Ricci
+    // curvature — and thus the baked per-primitive importance — VARIES across
+    // meshes (SPEC §5 test 7 / §4.1).
+    const aleph::graph::Graph g = adaptive ? build_adaptive_graph()
+                                : grouped  ? build_grouped_graph()
+                                           : build_enriched_graph();
 
     // ── 2. Lower: GraphScene → LoweredScene (frozen semantic IR). ─────────────
     auto lowered = aleph::lowering::lower(g);
@@ -302,14 +421,17 @@ int main(int argc, char** argv) {
 
     // ── 3. Build the RenderScene (SoA + BVH). ─────────────────────────────────
     // Default path: the original thin local translation (byte-stable). Grouped
-    // path: the shipped `aleph.lowering:build`, which additionally bakes the
-    // IR's H⁰ light groups into `Scene::light_groups` (SPEC §4.2) — the only
-    // surface render.rt reads to drive group-stratified NEE.
+    // and adaptive paths: the shipped `aleph.lowering:build`, which additionally
+    // bakes the IR's data render.rt reads — the H⁰ light groups into
+    // `Scene::light_groups` (SPEC §4.2, grouped) and the per-entity Ricci
+    // importance into `Scene::{sphere,quad,tri}_importance` (SPEC §4.2, adaptive).
+    // `build_render_scene_local` does NOT bake importance, so the adaptive path
+    // MUST use the shipped builder for the sampler to see non-uniform importance.
     static unsigned char bvh_scratch[1 << 20];
     aleph::alloc::Arena bvh_arena{bvh_scratch, sizeof(bvh_scratch)};
     aleph::scene::Scene scene =
-        grouped ? aleph::lowering::build_render_scene(ls).scene
-                : build_render_scene_local(ls, bvh_arena);
+        (grouped || adaptive) ? aleph::lowering::build_render_scene(ls).scene
+                              : build_render_scene_local(ls, bvh_arena);
 
     // ── 4. Path-trace into a film. ────────────────────────────────────────────
     constexpr int W = 320, H = 240;
@@ -327,10 +449,14 @@ int main(int argc, char** argv) {
     int threads = static_cast<int>(std::thread::hardware_concurrency());
     if (threads <= 0) threads = 1;
     aleph::threads::Pool pool(threads);
-    // grouped_nee opts into group-stratified NEE off `scene.light_groups`; the
-    // default path leaves it false so the all-lights-sum render is unchanged.
+    // grouped_nee opts into group-stratified NEE off `scene.light_groups`;
+    // adaptive_spp opts into the importance-weighted sample loop off the baked
+    // `Scene` importance. Both default false so the default render is unchanged
+    // (SPEC §4.3 / §5 test 4).
     aleph::render::rt::RenderOpts opts{32, 8, 42ull, 32};
-    opts.grouped_nee = grouped;
+    opts.grouped_nee  = grouped;
+    opts.adaptive_spp = adaptive;
+    opts.max_spp_scale = 4;
     aleph::render::rt::path_trace(scene, cam, sky, film, pool, opts);
 
     // ── 5. Write the PPM (gamma 2.0 via byte_from_linear), like aleph_rt. ─────
@@ -356,10 +482,12 @@ int main(int argc, char** argv) {
 
     // ── 6. Report the loop's shape (entity / light / group counts). ───────────
     std::printf("aleph_lower_demo: mode=%s entities=%zu lights=%zu handles=%zu "
-                "light_groups=%zu scene_groups=%zu grouped_nee=%d -> %s (%dx%d)\n",
-                grouped ? "grouped" : "default",
+                "light_groups=%zu scene_groups=%zu grouped_nee=%d "
+                "adaptive_spp=%d max_spp_scale=%d -> %s (%dx%d)\n",
+                mode,
                 ls.entities.size(), ls.lights.size(), ls.handle_map.size(),
                 ls.light_groups.size(), scene.light_groups.size(),
-                opts.grouped_nee ? 1 : 0, out_path.c_str(), W, H);
+                opts.grouped_nee ? 1 : 0, opts.adaptive_spp ? 1 : 0,
+                opts.max_spp_scale, out_path.c_str(), W, H);
     return 0;
 }
