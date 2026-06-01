@@ -91,7 +91,9 @@ add_executable(aleph_tests
     lowering/test_light_grouping.cpp
     lowering/test_groups_in_scene.cpp
     lowering/test_incremental.cpp
-    lowering/test_importance.cpp)
+    lowering/test_importance.cpp
+    edit/test_build_sw.cpp
+    edit/test_controller.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_compile_definitions(aleph_tests PRIVATE
@@ -101,7 +103,7 @@ target_link_libraries(aleph_tests PRIVATE
     aleph_types aleph_graph aleph_dpo aleph_sheaf aleph_flow
     aleph_linalg_gf2 aleph_linalg_sparse
     aleph_scene aleph_render_common aleph_render_rt aleph_render_sw
-    aleph_lowering)
+    aleph_lowering aleph_edit)
 add_test(NAME aleph_tests COMMAND aleph_tests)
 
 if(ALEPH_HAVE_SDL2)

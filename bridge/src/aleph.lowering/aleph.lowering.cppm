@@ -6,3 +6,4 @@ export import :ops;
 export import :grouping;
 export import :incremental;
 export import :importance;
+export import :build_sw;
