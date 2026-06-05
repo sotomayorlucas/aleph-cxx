@@ -48,6 +48,58 @@ if [ "${1:-}" = "wave" ]; then
   exit 0
 fi
 
+# diff sub-mode: render headless, compute per-step |raster - path_trace| heatmaps,
+# print the mean abs diff per step, and tile [raster | path-trace | diff] per step.
+#   tools/visual_review.sh diff [out] [build]
+if [ "${1:-}" = "diff" ]; then
+  OUT="${2:-/tmp/aleph_diff}"; BUILD="${3:-build-release}"
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  APP="$ROOT/$BUILD/apps/aleph_edit/aleph_edit"
+  command -v magick >/dev/null 2>&1 || { echo "error: ImageMagick (magick) not found" >&2; exit 1; }
+  echo "==> building aleph_edit_app ($BUILD)"
+  cmake --build "$ROOT/$BUILD" --target aleph_edit_app >/dev/null
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "==> rendering headless -> $OUT"
+  "$APP" --headless "$OUT"
+  for f in "$OUT"/*.ppm; do magick "$f" "${f%.ppm}.png"; done
+  echo "==> computing |raster - path_trace| heatmaps (mean abs diff per step)"
+  python3 - "$OUT" <<'PY'
+import sys, os
+from PIL import Image
+OUT = sys.argv[1]
+steps = ["step0_init","step1_add_object","step2_add_light","step3_set_material","step4_delete_object"]
+def hot(d):                      # mean-abs-diff 0..255 -> black->blue->red->white
+    t = min(1.0, d / 96.0)       # saturate at diff=96
+    if t < 0.33: return (0, 0, int(255 * t / 0.33))
+    if t < 0.66:
+        f = (t - 0.33) / 0.33;  return (int(255 * f), 0, 255 - int(255 * f))
+    f = (t - 0.66) / 0.34;      return (255, int(255 * f), int(255 * f))
+for s in steps:
+    rp = os.path.join(OUT, s + "_raster.png"); pp = os.path.join(OUT, s + "_pt.png")
+    if not (os.path.exists(rp) and os.path.exists(pp)): continue
+    r = Image.open(rp).convert("RGB"); p = Image.open(pp).convert("RGB")
+    W, H = r.size; ra = r.load(); pa = p.load()
+    out = Image.new("RGB", (W, H)); oa = out.load(); tot = 0.0
+    for y in range(H):
+        for x in range(W):
+            a = ra[x, y]; b = pa[x, y]
+            d = (abs(a[0]-b[0]) + abs(a[1]-b[1]) + abs(a[2]-b[2])) / 3.0
+            tot += d; oa[x, y] = hot(d)
+    out.save(os.path.join(OUT, s + "_diff.png"))
+    print(f"  {s:22} mean|diff| = {tot/(W*H):5.1f} / 255")
+PY
+  echo "==> montage [raster | path-trace | diff] -> $OUT/_diff_contact.png"
+  ROWS=()
+  for s in step0_init step1_add_object step2_add_light step3_set_material step4_delete_object; do
+    ROWS+=("$OUT/${s}_raster.png" "$OUT/${s}_pt.png" "$OUT/${s}_diff.png")
+  done
+  magick montage "${ROWS[@]}" -tile 3x5 -geometry +3+3 -background '#222' \
+    -title 'raster | path-trace | |diff| heatmap (black=match, hot=differ)' \
+    "$OUT/_diff_contact.png"
+  echo "done: $OUT/_diff_contact.png"
+  exit 0
+fi
+
 OUT="${1:-/tmp/aleph_review}"
 BUILD="${2:-build-release}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

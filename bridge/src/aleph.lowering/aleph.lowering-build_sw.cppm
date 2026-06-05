@@ -145,6 +145,13 @@ inline constexpr aleph::math::f32 kAmbient = 0.45f;
 // with it directly over-brightens, so scale it to a sane preview intensity.
 inline constexpr aleph::math::f32 kLightScale = 0.50f;
 
+// Exposure alignment: a single uniform scale on the baked shade so the raster
+// preview's brightness matches the path-trace truth (measured ~12% too bright
+// post-SSAA/shadows). Scales geometry only — NOT the shared sky gradient (already
+// matched) nor the wave φ-colormap (which overrides shade). Tuned so the raster
+// mean luminance ≈ the PT mean on the reference scene.
+inline constexpr aleph::math::f32 kRasterExposure = 0.85f;
+
 // Fixed normalisation scale for the field colormap (build_sw_scene's optional
 // per-entity φ overrides the Lambert vcol with colormap_diverging(φ, kPhiScale)).
 // Tuned to the wave demo's amplitude (peak |φ| ≈ 0.75): at 0.4 the propagating
@@ -353,7 +360,7 @@ shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
         lit = lit + aleph::math::hadamard(base_albedo, L.material.emit)
                         * (ndl * atten * kLightScale * vis);
     }
-    return lit;
+    return lit * kRasterExposure;   // exposure-align the preview to the path trace
 }
 
 // Append one *triangle* as a render.sw Face (a degenerate quad: verts[3] ==
