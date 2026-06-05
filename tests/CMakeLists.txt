@@ -96,8 +96,9 @@ add_executable(aleph_tests
     edit/test_build_sw.cpp
     edit/test_controller.cpp
     edit/test_sim_controller.cpp
-    sim/test_field.cpp
-    sim/test_wave.cpp)
+    sim/test_section.cpp
+    sim/test_wave.cpp
+    sim/test_diffuse.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_include_directories(aleph_tests PRIVATE

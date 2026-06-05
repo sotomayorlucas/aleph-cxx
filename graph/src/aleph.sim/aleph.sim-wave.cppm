@@ -9,7 +9,7 @@ export module aleph.sim:wave;
 
 import aleph.math;            // f64
 import aleph.linalg.sparse;   // DMatrix
-import :field;
+import :section;
 
 export namespace aleph::sim {
 
@@ -44,31 +44,32 @@ struct WaveStepper {
         return p.c * p.c * dt * dt * g < 4.0;
     }
 
-    // One explicit symplectic-Euler ("Verlet") sub-step of φ̈ = −c²Δφ.
+    // One explicit symplectic-Euler ("Verlet") sub-step of φ̈ = −c²Δφ, on two
+    // sections: u (displacement φ) and v (velocity φ̇).
     //
-    // CONTRACT: on a StepError::NonFinite return the field is left PARTIALLY
+    // CONTRACT: on a StepError::NonFinite return the sections are left PARTIALLY
     // updated (the diverging entry and everything before it stepped, the rest
-    // stale) — discard it; do not re-step. The editor controller honours this by
+    // stale) — discard them; do not re-step. The editor controller honours this by
     // bailing before it re-bakes/render and by re-zeroing on the next enable_sim.
     [[nodiscard]] std::expected<void, StepError>
-    step(ScalarField& field, const DMatrix& delta, f64 dt) const noexcept {
-        const std::size_t n = field.size();
+    step(Section<f64>& u, Section<f64>& v, const DMatrix& delta, f64 dt) const noexcept {
+        const std::size_t n = u.size();
         if (n == 0) return std::unexpected(StepError::EmptyField);
-        if (delta.rows() != n || delta.cols() != n)
+        if (delta.rows() != n || delta.cols() != n || v.size() != n)
             return std::unexpected(StepError::DimMismatch);
 
-        // lap = Δ·φ  (the SHARED operator application; matvec only)
+        // lap = Δ·u  (the SHARED operator application; matvec only)
         const std::vector<f64> lap =
-            delta.matvec(std::span<const f64>(field.phi.data(), n));
+            delta.matvec(std::span<const f64>(u.data.data(), n));
         const f64 c2 = params.c * params.c;
         for (std::size_t i = 0; i < n; ++i) {
             // Damp-then-force ordering is a faithful port of the Rust reference
             // (aleph-playground wave.rs: `phi_dot = phi_dot*damp + dt*c²*lap`);
             // it is intentional. (Force-then-damp is an equally valid convention
             // differing only by scaling the force term by `damping` ≈ 0.1%/step.)
-            field.phi_dot[i] = params.damping * field.phi_dot[i] - dt * c2 * lap[i];
-            field.phi[i]    += dt * field.phi_dot[i];
-            if (!std::isfinite(field.phi[i]) || !std::isfinite(field.phi_dot[i]))
+            v.data[i] = params.damping * v.data[i] - dt * c2 * lap[i];
+            u.data[i] += dt * v.data[i];
+            if (!std::isfinite(u.data[i]) || !std::isfinite(v.data[i]))
                 return std::unexpected(StepError::NonFinite);
         }
         return {};
