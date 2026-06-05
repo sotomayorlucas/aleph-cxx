@@ -3,6 +3,7 @@ module;
 #include <span>
 #include <array>
 #include <cstdint>
+#include <cassert>
 #include <algorithm>
 
 export module aleph.render.sw:rasterize;
@@ -47,6 +48,15 @@ inline void rasterize(const SceneRT& sr, aleph::math::Mat4 mvp,
                        aleph::threads::Pool& pool) noexcept {
     const std::size_t N = sr.faces.size();
     if (N == 0) return;
+
+    // INVARIANT: the z-buffer is one compact entry per pixel, indexed
+    // `y*width + x` in rast_scan, while the colour film is indexed
+    // `y*stride_pixels + x`. They coincide only when the film is unpadded
+    // (stride == width) and `depth` holds width*height entries — which every
+    // caller satisfies. A padded film would desync the two strides, so pin it.
+    assert(fb.stride_pixels == fb.width);
+    assert(depth.size() >= static_cast<std::size_t>(fb.width)
+                           * static_cast<std::size_t>(fb.height));
 
     std::vector<int> order(N);
     for (std::size_t i = 0; i < N; ++i) order[i] = static_cast<int>(i);
