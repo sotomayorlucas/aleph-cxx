@@ -5,5 +5,5 @@ target_sources(aleph_sim
         aleph.sim-field.cppm
         aleph.sim-wave.cppm)
 target_link_libraries(aleph_sim
-    PUBLIC  aleph_types aleph_math aleph_linalg_sparse
-    PRIVATE aleph_flags_isa)
+    PUBLIC  aleph_types aleph_math
+    PRIVATE aleph_linalg_sparse aleph_flags_isa)

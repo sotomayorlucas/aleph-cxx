@@ -40,6 +40,8 @@ struct ScalarField {
     // Re-project onto a NEW node order after an edit: surviving NodeIds carry their
     // (phi, phi_dot) forward; new NodeIds start at 0; deleted ones drop. O(n·m) but
     // n,m are small here; deterministic (iterates new_order in order).
+    // Precondition: new_order contains no duplicate NodeIds (guaranteed by
+    // WeightedLaplacian::node_order; duplicates would produce aliased state).
     void reproject(const std::vector<NodeId>& new_order) {
         std::vector<f64> np(new_order.size(), 0.0);
         std::vector<f64> nv(new_order.size(), 0.0);
