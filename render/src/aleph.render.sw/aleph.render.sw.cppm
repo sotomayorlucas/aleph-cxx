@@ -6,3 +6,4 @@ export import :rast_scan;
 export import :lightmap;
 export import :primitives;
 export import :rasterize;
+export import :downsample;

@@ -78,6 +78,7 @@ add_executable(aleph_tests
     render/test_sw_rasterize.cpp
     render/test_sw_lightmap.cpp
     render/test_sw_rasterize_full.cpp
+    render/test_sw_downsample.cpp
     render/test_grouped_nee.cpp
     render/test_adaptive_spp.cpp
     lowering/test_lower_minimal.cpp

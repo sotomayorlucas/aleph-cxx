@@ -8,7 +8,8 @@ target_sources(aleph_render_sw
         aleph.render.sw-rast_scan.cppm
         aleph.render.sw-lightmap.cppm
         aleph.render.sw-primitives.cppm
-        aleph.render.sw-rasterize.cppm)
+        aleph.render.sw-rasterize.cppm
+        aleph.render.sw-downsample.cppm)
 target_link_libraries(aleph_render_sw
     PUBLIC  aleph_render_common aleph_math aleph_threads
     PRIVATE aleph_flags_isa)
