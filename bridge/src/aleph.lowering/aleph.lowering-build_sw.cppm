@@ -142,6 +142,10 @@ inline constexpr aleph::math::f32 kAmbient = 0.45f;
 // with it directly over-brightens, so scale it to a sane preview intensity.
 inline constexpr aleph::math::f32 kLightScale = 0.50f;
 
+// Fixed normalisation scale for the field colormap (build_sw_scene's optional
+// per-entity φ overrides the Lambert vcol with colormap_diverging(φ, kPhiScale)).
+inline constexpr double kPhiScale = 1.0;
+
 // Smooth inverse-square-ish falloff `1/(1 + kFall·dist²)`: behaves like 1/dist²
 // far away but is bounded near a light (never blows up) and, with a small kFall,
 // stays gentle across the editor's ~5-unit scene so a far floor is not crushed
@@ -229,7 +233,7 @@ inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
                       aleph::types::NodeId source, const double* phi) {
     // When a physics field φ is supplied, every face of this entity is tinted
     // with the single colormap colour `fc` instead of the baked Lambert shade.
-    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, 1.0)
+    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, kPhiScale)
                                      : aleph::math::Vec3{};
     const aleph::math::Vec3 p0 = g.q;
     const aleph::math::Vec3 p1 = g.q + g.u;
@@ -237,14 +241,15 @@ inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
     const aleph::math::Vec3 p3 = g.q + g.v;
     // Both triangles are coplanar -> one shared (two-sided) normal. Shade PER
     // VERTEX so a large quad (the floor) gets a smooth distance-falloff gradient
-    // across it instead of one flat tone.
+    // across it instead of one flat tone. Skip the Lambert shade entirely when φ
+    // overrides the colour (the `phi ?` short-circuits the shade_face calls).
     const aleph::math::Vec3 n = aleph::math::cross(p1 - p0, p2 - p0);
-    const aleph::math::Vec3 s0 = shade_face(p0, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 s1 = shade_face(p1, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 s2 = shade_face(p2, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 s3 = shade_face(p3, n, albedo, emit, lights, true);
-    push_tri(out, p0, p1, p2, phi ? fc : s0, phi ? fc : s1, phi ? fc : s2, source);
-    push_tri(out, p0, p2, p3, phi ? fc : s0, phi ? fc : s2, phi ? fc : s3, source);
+    const aleph::math::Vec3 s0 = phi ? fc : shade_face(p0, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 s1 = phi ? fc : shade_face(p1, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 s2 = phi ? fc : shade_face(p2, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 s3 = phi ? fc : shade_face(p3, n, albedo, emit, lights, true);
+    push_tri(out, p0, p1, p2, s0, s1, s2, source);
+    push_tri(out, p0, p2, p3, s0, s2, s3, source);
 }
 
 // TriLocal -> 1 Face (the single triangle {a,b,c}).
@@ -252,14 +257,13 @@ inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
                      aleph::math::Vec3 albedo, aleph::math::Vec3 emit,
                      const std::vector<LoweredEntity>& lights,
                      aleph::types::NodeId source, const double* phi) {
-    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, 1.0)
+    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, kPhiScale)
                                      : aleph::math::Vec3{};
     const aleph::math::Vec3 n = aleph::math::cross(g.b - g.a, g.c - g.a);
-    const aleph::math::Vec3 sa = shade_face(g.a, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 sb = shade_face(g.b, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 sc = shade_face(g.c, n, albedo, emit, lights, true);
-    push_tri(out, g.a, g.b, g.c,
-             phi ? fc : sa, phi ? fc : sb, phi ? fc : sc, source);
+    const aleph::math::Vec3 sa = phi ? fc : shade_face(g.a, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 sb = phi ? fc : shade_face(g.b, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 sc = phi ? fc : shade_face(g.c, n, albedo, emit, lights, true);
+    push_tri(out, g.a, g.b, g.c, sa, sb, sc, source);
 }
 
 // SphereLocal -> a deterministic UV sphere of RINGS x SECTORS quad cells, each
@@ -278,7 +282,7 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
                         aleph::math::Vec3 albedo, aleph::math::Vec3 emit,
                         const std::vector<LoweredEntity>& lights,
                         aleph::types::NodeId source, const double* phi) {
-    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, 1.0)
+    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, kPhiScale)
                                      : aleph::math::Vec3{};
     constexpr aleph::math::f32 kPi = 3.14159265358979323846f;
     auto on_sphere = [&](int ring, int sector) noexcept -> aleph::math::Vec3 {
@@ -307,12 +311,12 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
             // SMOOTH (Gouraud) shading: shade each vertex with its EXACT outward
             // normal (vertex - centre); the rasterizer interpolates the per-vertex
             // colours across the cell so the sphere reads round, not faceted.
-            const aleph::math::Vec3 sa = shade_face(a, a - g.center, albedo, emit, lights, false);
-            const aleph::math::Vec3 sb = shade_face(b, b - g.center, albedo, emit, lights, false);
-            const aleph::math::Vec3 sc = shade_face(c, c - g.center, albedo, emit, lights, false);
-            const aleph::math::Vec3 sd = shade_face(d, d - g.center, albedo, emit, lights, false);
-            push_tri(out, a, b, c, phi ? fc : sa, phi ? fc : sb, phi ? fc : sc, source);
-            push_tri(out, a, c, d, phi ? fc : sa, phi ? fc : sc, phi ? fc : sd, source);
+            const aleph::math::Vec3 sa = phi ? fc : shade_face(a, a - g.center, albedo, emit, lights, false);
+            const aleph::math::Vec3 sb = phi ? fc : shade_face(b, b - g.center, albedo, emit, lights, false);
+            const aleph::math::Vec3 sc = phi ? fc : shade_face(c, c - g.center, albedo, emit, lights, false);
+            const aleph::math::Vec3 sd = phi ? fc : shade_face(d, d - g.center, albedo, emit, lights, false);
+            push_tri(out, a, b, c, sa, sb, sc, source);
+            push_tri(out, a, c, d, sa, sc, sd, source);
         }
     }
 }
