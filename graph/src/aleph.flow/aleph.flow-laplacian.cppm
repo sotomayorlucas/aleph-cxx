@@ -154,6 +154,130 @@ export namespace aleph::flow {
     return detail::assemble(skel, std::move(curvatures), weight_fn);
 }
 
+// 2-hop closure: every skeleton edge incident to a vertex within 2 hops of any
+// `seed` node. The sound invalidation rule for Ollivier-Ricci kappa(a,b): its
+// transport cost is the graph hop-distance among N(a) u N(b), a 2-hop quantity
+// (spec sec 0). Returns the dirty edges in skel.edges (canonical, sorted)
+// order. Deterministic.
+[[nodiscard]] inline std::vector<std::pair<NodeId, NodeId>>
+two_hop_touched_edges(const OneSkeleton&          skel,
+                      const std::vector<NodeId>& seed) {
+    const std::size_t n = skel.vertices.size();
+
+    // node id -> dense index (skeleton vertex order).
+    aleph::containers::OrderedMap<NodeId, std::size_t> node_to_idx;
+    for (std::size_t i = 0; i < n; ++i) {
+        node_to_idx.insert(skel.vertices[i], i);
+    }
+
+    // Symmetric adjacency over the skeleton edges.
+    std::vector<std::vector<std::size_t>> adj(n);
+    for (const auto& [a, b] : skel.edges) {
+        const std::size_t* ia = node_to_idx.get(a);
+        const std::size_t* ib = node_to_idx.get(b);
+        if (ia != nullptr && ib != nullptr) {
+            adj[*ia].push_back(*ib);
+            adj[*ib].push_back(*ia);
+        }
+    }
+
+    // BFS to radius 2 from every seed node; ball2 = visited (by dense index).
+    std::vector<bool>        ball2(n, false);
+    std::vector<std::size_t> frontier;
+    for (const NodeId s : seed) {
+        const std::size_t* is = node_to_idx.get(s);
+        if (is != nullptr && !ball2[*is]) {
+            ball2[*is] = true;
+            frontier.push_back(*is);
+        }
+    }
+    for (int hop = 0; hop < 2; ++hop) {
+        std::vector<std::size_t> next;
+        for (const std::size_t u : frontier) {
+            for (const std::size_t v : adj[u]) {
+                if (!ball2[v]) {
+                    ball2[v] = true;
+                    next.push_back(v);
+                }
+            }
+        }
+        frontier = std::move(next);
+    }
+
+    // Dirty edges: any edge with an endpoint in ball2, in skel.edges order.
+    std::vector<std::pair<NodeId, NodeId>> dirty;
+    for (const auto& [a, b] : skel.edges) {
+        const std::size_t* ia = node_to_idx.get(a);
+        const std::size_t* ib = node_to_idx.get(b);
+        const bool ina = (ia != nullptr) && ball2[*ia];
+        const bool inb = (ib != nullptr) && ball2[*ib];
+        if (ina || inb) {
+            dirty.emplace_back(a, b);
+        }
+    }
+    return dirty;
+}
+
+// Localized weighted Laplacian: reuse cached curvatures from `prev` for
+// non-dirty edges and recompute only the 2-hop-dirty edges, then reassemble
+// Delta in canonical skel.edges order. Byte-IDENTICAL to build_laplacian(
+// g_after, weight_fn): the fresh curvature map is built by inserting in the
+// SAME skel.edges order the full build uses, so assemble's diagonal += fp
+// summation order is identical, and a recomputed kappa reuses the identical
+// math (ricci_curvature_edge) so it is bit-exact to the full build's kappa.
+//
+// `dirty_edges` are the canonical-keyed edges to recompute (from
+// two_hop_touched_edges). On a cache miss for a non-dirty edge (a never-before-
+// seen survivor) we recompute as a safe fallback. `recompute_count` (if
+// non-null) is incremented once per recomputed edge -> the demonstrable win
+// (O(touched) << |E|).
+[[nodiscard]] inline WeightedLaplacian build_laplacian_local(
+    const aleph::graph::Graph& g_after, const WeightedLaplacian& prev,
+    const std::vector<std::pair<NodeId, NodeId>>& dirty_edges,
+    WeightFn weight_fn, int* recompute_count = nullptr) {
+    const OneSkeleton           skel = OneSkeleton::from_graph(g_after);
+    const detail::SkeletonState st   = detail::build_state(skel);
+    const std::size_t           n    = skel.vertices.size();
+
+    // Dirty set for O(1) membership (canonical edge key).
+    aleph::containers::OrderedMap<std::pair<NodeId, NodeId>, bool> dirty_set;
+    for (const auto& e : dirty_edges) {
+        dirty_set.insert(e, true);
+    }
+
+    // FRESH curvature map, inserted in canonical skel.edges order (the SAME
+    // order ricci_curvature_from_skeleton uses) -> byte-identical assembly.
+    RicciMap curv;
+    for (const auto& [a, b] : skel.edges) {
+        // Mirror the full build: omit edges whose endpoints are absent.
+        if (detail::node_index_of(st, a) == n ||
+            detail::node_index_of(st, b) == n) {
+            continue;
+        }
+        const std::pair<NodeId, NodeId> key{a, b};
+        f64                             kappa;
+        if (dirty_set.contains(key)) {
+            kappa = detail::ricci_curvature_edge(st, a, b);
+            if (recompute_count != nullptr) {
+                ++*recompute_count;
+            }
+        } else {
+            const f64* cached = prev.curvatures.get(key);
+            if (cached != nullptr) {
+                kappa = *cached;
+            } else {
+                // Cache miss (survivor edge never seen) -> safe recompute.
+                kappa = detail::ricci_curvature_edge(st, a, b);
+                if (recompute_count != nullptr) {
+                    ++*recompute_count;
+                }
+            }
+        }
+        curv.insert(key, kappa);
+    }
+    return detail::assemble(skel, std::move(curv), weight_fn);
+}
+
 // Same as build_laplacian but uses the smooth W_2^eps curvature
 // (ricci_curvature_w2) instead of the W_1 simplex (port build_laplacian_w2).
 // `epsilon` is the entropic regularisation strength (typical: 0.05).

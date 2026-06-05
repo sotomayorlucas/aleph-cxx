@@ -97,6 +97,65 @@ struct SkeletonState {
     DMatrix                               dist;
 };
 
+// Resolve a node id to its index in the stable node order (st.nodes), or
+// st.nodes.size() when absent. Linear scan matches the original loop body.
+inline std::size_t node_index_of(const SkeletonState& st, NodeId id) {
+    const std::size_t n = st.nodes.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        if (st.nodes[i] == id) return i;
+    }
+    return n;
+}
+
+// Single-edge Ollivier-Ricci W_1 curvature, factored verbatim out of the
+// per-edge body of ricci_curvature_from_skeleton. Given a prebuilt
+// SkeletonState `st` (over g_after's skeleton) and an edge (a, b), compute
+// kappa(a, b) = 1 - W_1(mu_a, mu_b) / d(a, b) via the IDENTICAL uniform measure
+// + connected-component support slice + wasserstein_1 path. Reusing the
+// identical math makes a recomputed kappa bit-exact to the full build's kappa
+// for that edge (the Tier-1 byte-equality contract). Returns 0.0 if either
+// endpoint is absent from the skeleton (mirrors the loop's `continue`, which
+// simply omitted the edge — callers building a fresh map must not insert it).
+[[nodiscard]] inline f64 ricci_curvature_edge(const SkeletonState& st, NodeId a,
+                                              NodeId b) {
+    const std::size_t n  = st.nodes.size();
+    const std::size_t ia = node_index_of(st, a);
+    const std::size_t ib = node_index_of(st, b);
+    if (ia == n || ib == n) {
+        return 0.0;
+    }
+    // Restrict to the connected component containing ia, ib (all finite
+    // distances). Avoids NaN from cross-component INF distances.
+    std::vector<std::size_t> support;
+    for (std::size_t k = 0; k < n; ++k) {
+        if (std::isfinite(st.dist.at(ia, k)) &&
+            std::isfinite(st.dist.at(ib, k))) {
+            support.push_back(k);
+        }
+    }
+    const std::size_t m = support.size();
+    aleph::linalg::sparse::DMatrix sub_dist =
+        aleph::linalg::sparse::DMatrix::zeros(m, m);
+    for (std::size_t si = 0; si < m; ++si) {
+        for (std::size_t sj = 0; sj < m; ++sj) {
+            sub_dist.at(si, sj) = st.dist.at(support[si], support[sj]);
+        }
+    }
+    const std::vector<f64> global_mu = uniform_on_neighbors(ia, st.neighbors, n);
+    const std::vector<f64> global_nu = uniform_on_neighbors(ib, st.neighbors, n);
+    std::vector<f64> mu(m);
+    std::vector<f64> nu(m);
+    for (std::size_t k = 0; k < m; ++k) {
+        mu[k] = global_mu[support[k]];
+        nu[k] = global_nu[support[k]];
+    }
+    const auto w1_res = wasserstein_1(std::span<const f64>(mu),
+                                      std::span<const f64>(nu), sub_dist);
+    const f64 w1   = w1_res.value_or(0.0);
+    const f64 d_ab = st.dist.at(ia, ib);
+    return (d_ab > 0.0) ? (1.0 - w1 / d_ab) : 0.0;
+}
+
 inline SkeletonState build_state(const OneSkeleton& skel) {
     SkeletonState st;
     st.nodes.assign(skel.vertices.begin(), skel.vertices.end());
@@ -166,48 +225,14 @@ using RicciMap =
     const detail::SkeletonState st = detail::build_state(skel);
 
     for (const auto& [a, b] : skel.edges) {
-        // node -> index lookups: skeleton vertices are the node order.
-        std::size_t ia = n;
-        std::size_t ib = n;
-        for (std::size_t i = 0; i < n; ++i) {
-            if (st.nodes[i] == a) ia = i;
-            if (st.nodes[i] == b) ib = i;
-        }
-        if (ia == n || ib == n) {
+        // Skip edges whose endpoints are absent from the node order (mirrors
+        // the original `continue`); otherwise compute the single-edge kappa via
+        // the factored primitive (identical math, byte-exact).
+        if (detail::node_index_of(st, a) == n ||
+            detail::node_index_of(st, b) == n) {
             continue;
         }
-        // Restrict to the connected component containing ia, ib (all finite
-        // distances). Avoids NaN from cross-component INF distances.
-        std::vector<std::size_t> support;
-        for (std::size_t k = 0; k < n; ++k) {
-            if (std::isfinite(st.dist.at(ia, k)) &&
-                std::isfinite(st.dist.at(ib, k))) {
-                support.push_back(k);
-            }
-        }
-        const std::size_t m = support.size();
-        aleph::linalg::sparse::DMatrix sub_dist =
-            aleph::linalg::sparse::DMatrix::zeros(m, m);
-        for (std::size_t si = 0; si < m; ++si) {
-            for (std::size_t sj = 0; sj < m; ++sj) {
-                sub_dist.at(si, sj) = st.dist.at(support[si], support[sj]);
-            }
-        }
-        const std::vector<f64> global_mu =
-            detail::uniform_on_neighbors(ia, st.neighbors, n);
-        const std::vector<f64> global_nu =
-            detail::uniform_on_neighbors(ib, st.neighbors, n);
-        std::vector<f64> mu(m);
-        std::vector<f64> nu(m);
-        for (std::size_t k = 0; k < m; ++k) {
-            mu[k] = global_mu[support[k]];
-            nu[k] = global_nu[support[k]];
-        }
-        const auto w1_res = wasserstein_1(std::span<const f64>(mu),
-                                          std::span<const f64>(nu), sub_dist);
-        const f64 w1 = w1_res.value_or(0.0);
-        const f64 d_ab = st.dist.at(ia, ib);
-        const f64 kappa = (d_ab > 0.0) ? (1.0 - w1 / d_ab) : 0.0;
+        const f64 kappa = detail::ricci_curvature_edge(st, a, b);
         out.insert(std::pair<NodeId, NodeId>{a, b}, kappa);
     }
     return out;
