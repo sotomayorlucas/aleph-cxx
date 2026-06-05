@@ -9,8 +9,7 @@ export module aleph.sim:diffuse;
 
 import aleph.math;            // f64
 import aleph.linalg.sparse;   // DMatrix
-import :section;
-import :wave;                 // StepError (reused — :wave does not import :diffuse, no cycle)
+import :section;             // Section, StepError
 
 export namespace aleph::sim {
 

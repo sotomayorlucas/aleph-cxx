@@ -12,6 +12,13 @@ export namespace aleph::sim {
 using aleph::math::f64;
 using aleph::types::NodeId;
 
+// Shared stepper error taxonomy (lives here so wave/diffuse — peers, both built on
+// :section — reuse it without depending on each other). NOTE: `CflViolation` is NOT
+// emitted by a stepper's `step` (that would need an O(n²) Gershgorin scan per
+// frame); it is the code a caller returns when its own `cfl_ok` pre-check fails.
+// `step` instead catches a blow-up post-hoc via `NonFinite`.
+enum class StepError { EmptyField, DimMismatch, CflViolation, NonFinite };
+
 // A section of the cell complex: one value of type T per node, dense + ordered to
 // match a WeightedLaplacian::node_order. `order` is a *copy* of the operator's
 // node_order so the section owns its index layout independently of the operator

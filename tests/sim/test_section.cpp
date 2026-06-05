@@ -25,8 +25,12 @@ TEST_CASE("Section<f64>: reproject survivor/new/deleted") {
 }
 TEST_CASE("Section<Vec3>: T-genericity (storage/add/reproject)") {
     Section<Vec3> g = Section<Vec3>::zeros(std::vector<NodeId>{NodeId{1},NodeId{2}});
-    CHECK(g.add(NodeId{1}, Vec3{1,0,0})); CHECK(g.add(NodeId{1}, Vec3{1,0,0}));
-    CHECK(g.data[0].x==doctest::Approx(2.0));
+    CHECK(g.add(NodeId{1}, Vec3{1,2,3})); CHECK(g.add(NodeId{1}, Vec3{1,2,3}));
+    CHECK(g.data[0].x==doctest::Approx(2.0)); CHECK(g.data[0].y==doctest::Approx(4.0));
+    CHECK(g.data[0].z==doctest::Approx(6.0));
+    CHECK(g.data[1].x==doctest::Approx(0.0)); CHECK(g.data[1].y==doctest::Approx(0.0));  // node 2 stays zero
     g.reproject(std::vector<NodeId>{NodeId{1}});
-    REQUIRE(g.size()==1); CHECK(g.data[0].x==doctest::Approx(2.0));
+    REQUIRE(g.size()==1);
+    CHECK(g.data[0].x==doctest::Approx(2.0)); CHECK(g.data[0].y==doctest::Approx(4.0));
+    CHECK(g.data[0].z==doctest::Approx(6.0));
 }

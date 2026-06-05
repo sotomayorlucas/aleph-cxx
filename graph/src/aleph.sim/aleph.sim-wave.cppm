@@ -21,11 +21,7 @@ struct WaveParams {
     f64 damping = 0.999;   // per-step multiplicative velocity damp
 };
 
-// Error taxonomy for the stepper. NOTE: `CflViolation` is NOT emitted by `step`
-// (which would need an O(n²) Gershgorin scan every frame); it is the code a caller
-// returns when its own `cfl_ok` pre-check fails. `step` instead catches a blow-up
-// post-hoc via `NonFinite`.
-enum class StepError { EmptyField, DimMismatch, CflViolation, NonFinite };
+// StepError lives in :section (shared by wave + diffuse).
 
 struct WaveStepper {
     WaveParams params{};

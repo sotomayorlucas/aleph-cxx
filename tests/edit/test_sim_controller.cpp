@@ -15,8 +15,9 @@ import aleph.lowering; // AddObject, Op, MaterialParams
 
 // Phase 6 wave-field — `EditorController` physics seam (this task).
 //
-// The controller owns the shared graph Laplacian Δ, a `ScalarField` φ/φ̇ over its
-// node_order, and a `WaveStepper`. `enable_sim(true)` (re)builds Δ + zeroes φ;
+// The controller owns the shared graph Laplacian Δ, two `Section<f64>` (u=φ
+// displacement, v=φ̇ velocity) over its node_order, and a `WaveStepper`.
+// `enable_sim(true)` (re)builds Δ + zeroes u/v;
 // `kick` injects a velocity impulse; `step` advances the wave on Δ and re-bakes
 // φ→vcol into the SW scene WITHOUT mutating the graph; an edit re-projects φ onto
 // the new node_order (survivors keep φ, new nodes start at 0). These two cases
