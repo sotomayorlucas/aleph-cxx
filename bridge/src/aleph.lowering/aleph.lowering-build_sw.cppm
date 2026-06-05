@@ -160,14 +160,28 @@ inline constexpr aleph::math::f32 kFall = 0.08f;
 // A QuadLocal no longer lowers to 2 faces: it is subdivided into an Nu×Nv grid
 // of sub-quads (each 2 faces) so the floor carries INTERIOR vertices. Two wins:
 // (1) per-vertex Lambert at those interior points gives a real distance-falloff
-// gradient (fixes the flat-floor TODO), and (2) the interior vertices can later
-// RECEIVE per-vertex contact shadows — without them the sphere's shadow falls
+// gradient (fixes the flat-floor TODO), and (2) the interior vertices can RECEIVE
+// per-vertex contact shadows (Task 2) — without them the sphere's shadow falls
 // where no vertex exists and interpolation from the far corners darkens nothing.
 // `Nu = clamp(ceil(|u|/kCell), 1, kMaxCells)`, likewise Nv. Pure f32 of u,v =>
 // deterministic; `source` stays the quad's NodeId for every sub-face (picking
 // unaffected). SPEC invariant: QuadLocal -> 2·Nu·Nv faces.
 inline constexpr aleph::math::f32 kCell     = 0.5f;  // target quad cell size (world units)
 inline constexpr int              kMaxCells = 24;    // per-axis tessellation cap
+
+// --- analytic contact shadows ----------------------------------------------
+//
+// Per-vertex light-occlusion shadows baked into `Face::vcol`. A shaded point's
+// segment to each light sample is tested against the OTHER scene entities; the
+// fraction unoccluded scales that light's diffuse term (ambient is NOT shadowed,
+// so shadows read dim-not-black, matching the tracer's GI-filled shadows).
+//   * kShadowEps    — hit window margin (t ∈ (eps, len−eps)) + degeneracy guard.
+//   * kShadowBias   — normal offset of the segment start so the surface doesn't
+//                     self-hit at the contact (avoids acne / peter-panning).
+//   * kShadowSamples— 2×2 grid across an area (QuadLocal) light => soft penumbra.
+inline constexpr aleph::math::f32 kShadowEps     = 1.0e-3f;
+inline constexpr aleph::math::f32 kShadowBias    = 2.0e-3f;
+inline constexpr int              kShadowSamples = 2;  // 2x2 on area lights
 
 // Centre of a light's geometry — its effective point-light position for the
 // preview. Quad centre = q + (u+v)/2; tri centre = centroid; sphere = centre.
@@ -187,6 +201,118 @@ light_center(const aleph::types::GeometryPayload& g) noexcept {
         g);
 }
 
+// --- occlusion primitives --------------------------------------------------
+//
+// Each tests whether the OPEN segment from `p` along unit `dir` for length `len`
+// strikes the primitive at t ∈ (kShadowEps, len − kShadowEps). Degeneracies
+// (grazing dot≈0, zero-area primitive) return NO hit (a light grazing the
+// surface must not self-shadow it to black — SPEC §4).
+
+[[nodiscard]] inline bool seg_hits_sphere(aleph::math::Vec3 p, aleph::math::Vec3 dir,
+        aleph::math::f32 len, const aleph::types::SphereLocal& s) noexcept {
+    const aleph::math::Vec3 oc = p - s.center;
+    const aleph::math::f32 b = aleph::math::dot(oc, dir);
+    const aleph::math::f32 c = aleph::math::dot(oc, oc) - s.radius * s.radius;
+    const aleph::math::f32 disc = b * b - c;
+    if (disc < 0.0f) return false;
+    const aleph::math::f32 sq = std::sqrt(disc);
+    const aleph::math::f32 t1 = -b - sq, t2 = -b + sq;
+    return (t1 > kShadowEps && t1 < len - kShadowEps)
+        || (t2 > kShadowEps && t2 < len - kShadowEps);
+}
+
+[[nodiscard]] inline bool seg_hits_quad(aleph::math::Vec3 p, aleph::math::Vec3 dir,
+        aleph::math::f32 len, const aleph::types::QuadLocal& g) noexcept {
+    const aleph::math::Vec3 n = aleph::math::cross(g.u, g.v);
+    const aleph::math::f32 dn = aleph::math::dot(dir, n);
+    if (std::fabs(dn) < 1.0e-8f) return false;
+    const aleph::math::f32 t = aleph::math::dot(g.q - p, n) / dn;
+    if (!(t > kShadowEps && t < len - kShadowEps)) return false;
+    const aleph::math::Vec3 w = (p + dir * t) - g.q;
+    const aleph::math::f32 uu = aleph::math::dot(g.u, g.u), vv = aleph::math::dot(g.v, g.v),
+                           uv = aleph::math::dot(g.u, g.v),
+                           wu = aleph::math::dot(w, g.u), wv = aleph::math::dot(w, g.v);
+    const aleph::math::f32 den = uu * vv - uv * uv;
+    if (std::fabs(den) < 1.0e-12f) return false;
+    const aleph::math::f32 s = (wu * vv - wv * uv) / den;
+    const aleph::math::f32 r = (wv * uu - wu * uv) / den;
+    return s >= 0.0f && s <= 1.0f && r >= 0.0f && r <= 1.0f;
+}
+
+[[nodiscard]] inline bool seg_hits_tri(aleph::math::Vec3 p, aleph::math::Vec3 dir,
+        aleph::math::f32 len, const aleph::types::TriLocal& g) noexcept {
+    const aleph::math::Vec3 e1 = g.b - g.a, e2 = g.c - g.a;
+    const aleph::math::Vec3 pv = aleph::math::cross(dir, e2);
+    const aleph::math::f32 det = aleph::math::dot(e1, pv);
+    if (std::fabs(det) < 1.0e-8f) return false;
+    const aleph::math::f32 inv = 1.0f / det;
+    const aleph::math::Vec3 tv = p - g.a;
+    const aleph::math::f32 u = aleph::math::dot(tv, pv) * inv;
+    if (u < 0.0f || u > 1.0f) return false;
+    const aleph::math::Vec3 qv = aleph::math::cross(tv, e1);
+    const aleph::math::f32 w = aleph::math::dot(dir, qv) * inv;
+    if (w < 0.0f || u + w > 1.0f) return false;
+    const aleph::math::f32 t = aleph::math::dot(e2, qv) * inv;
+    return t > kShadowEps && t < len - kShadowEps;
+}
+
+// --- light visibility ------------------------------------------------------
+//
+// Fraction V ∈ [0,1] of `light`'s samples whose segment from `point` (offset
+// along the unit shading normal `n_unit` by kShadowBias) reaches the light
+// unoccluded by the OTHER scene entities. Area (QuadLocal) lights are sampled on
+// a kShadowSamples×kShadowSamples grid of cell centres (soft penumbra); other
+// geometry uses its centre (1 sample). An occluder is skipped when its source is
+// `self` (no self-shadow) or the light itself. Dispatch mirrors `emit_entity`.
+[[nodiscard]] inline aleph::math::f32
+light_visibility(aleph::math::Vec3 point, aleph::math::Vec3 n_unit,
+                 const LoweredEntity& light,
+                 const std::vector<LoweredEntity>& occluders,
+                 aleph::types::NodeId self) noexcept {
+    const aleph::math::Vec3 p0 = point + n_unit * kShadowBias;
+    std::array<aleph::math::Vec3, static_cast<std::size_t>(kShadowSamples * kShadowSamples)> samp{};
+    int ns = 0;
+    if (const auto* q = std::get_if<aleph::types::QuadLocal>(&light.world_geometry)) {
+        for (int j = 0; j < kShadowSamples; ++j) {
+            for (int i = 0; i < kShadowSamples; ++i) {
+                const aleph::math::f32 su = (static_cast<aleph::math::f32>(i) + 0.5f)
+                                            / static_cast<aleph::math::f32>(kShadowSamples);
+                const aleph::math::f32 sv = (static_cast<aleph::math::f32>(j) + 0.5f)
+                                            / static_cast<aleph::math::f32>(kShadowSamples);
+                samp[static_cast<std::size_t>(ns++)] = q->q + q->u * su + q->v * sv;
+            }
+        }
+    } else {
+        samp[static_cast<std::size_t>(ns++)] = light_center(light.world_geometry);
+    }
+    int vis = 0;
+    for (int k = 0; k < ns; ++k) {
+        const aleph::math::Vec3 d = samp[static_cast<std::size_t>(k)] - p0;
+        const aleph::math::f32 len = aleph::math::length(d);
+        if (len < 2.0f * kShadowEps) { ++vis; continue; }
+        const aleph::math::Vec3 dir = d * (1.0f / len);
+        bool occ = false;
+        for (const LoweredEntity& o : occluders) {
+            if (o.source == self || o.source == light.source) continue;
+            const bool hit = std::visit(
+                [&](const auto& gg) noexcept -> bool {
+                    using G = std::decay_t<decltype(gg)>;
+                    if constexpr (std::is_same_v<G, aleph::types::SphereLocal>) {
+                        return seg_hits_sphere(p0, dir, len, gg);
+                    } else if constexpr (std::is_same_v<G, aleph::types::QuadLocal>) {
+                        return seg_hits_quad(p0, dir, len, gg);
+                    } else {  // aleph::types::TriLocal
+                        return seg_hits_tri(p0, dir, len, gg);
+                    }
+                },
+                o.world_geometry);
+            if (hit) { occ = true; break; }
+        }
+        if (!occ) ++vis;
+    }
+    return static_cast<aleph::math::f32>(vis) / static_cast<aleph::math::f32>(ns);
+}
+
 // Lambert shade of a surface `point` with `normal` (need not be unit).
 // `two_sided` (quads/tris, whose winding-derived normal sign is arbitrary)
 // shades by |N·L| so a floor lit from either side reads as lit; spheres pass
@@ -194,10 +320,16 @@ light_center(const aleph::types::GeometryPayload& g) noexcept {
 // light/dark terminator. Called per VERTEX (Gouraud); the rasterizer interpolates. `self_emit` makes emissive surfaces glow in
 // the preview. Returns linear HDR (the Film's gamma tonemap applies, same as
 // the path-trace path); only negatives are excluded.
+//
+// CONTACT SHADOWS: each light's DIFFUSE term is scaled by `light_visibility`
+// against `occluders` (the scene entities, skipping `self` and the light). The
+// ambient + self-emit terms are NOT shadowed (shadows read dim, not black).
 [[nodiscard]] inline aleph::math::Vec3
 shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
            aleph::math::Vec3 base_albedo, aleph::math::Vec3 self_emit,
-           const std::vector<LoweredEntity>& lights, bool two_sided) noexcept {
+           const std::vector<LoweredEntity>& lights, bool two_sided,
+           const std::vector<LoweredEntity>& occluders,
+           aleph::types::NodeId self) noexcept {
     const aleph::math::f32 nlen = aleph::math::length(normal);
     const aleph::math::Vec3 N = (nlen > 1e-8f)
         ? normal * (1.0f / nlen)
@@ -214,8 +346,9 @@ shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
             : (ndl0 > 0.0f ? ndl0 : 0.0f);
         if (ndl <= 0.0f) continue;
         const aleph::math::f32 atten = 1.0f / (1.0f + kFall * dist_sq);
+        const aleph::math::f32 vis = light_visibility(point, N, L, occluders, self);
         lit = lit + aleph::math::hadamard(base_albedo, L.material.emit)
-                        * (ndl * atten * kLightScale);
+                        * (ndl * atten * kLightScale * vis);
     }
     return lit;
 }
@@ -246,11 +379,12 @@ inline void push_tri(SwBuild& out,
 // likewise); each cell's 4 corners are points on the parallelogram, split into
 // the two triangles {c00,c10,c11} and {c00,c11,c01} (matching rast_scan's quad
 // winding). The interior vertices give the floor a smooth distance-falloff
-// gradient (and a substrate for per-vertex contact shadows). `source` (the
-// quad's NodeId) tags every sub-face, so picking is unaffected.
+// gradient AND let it RECEIVE per-vertex contact shadows. `source` (the quad's
+// NodeId) tags every sub-face, so picking is unaffected.
 inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
                       aleph::math::Vec3 albedo, aleph::math::Vec3 emit,
                       const std::vector<LoweredEntity>& lights,
+                      const std::vector<LoweredEntity>& occluders,
                       aleph::types::NodeId source, const double* phi) {
     using aleph::math::Vec3;
     using aleph::math::f32;
@@ -266,16 +400,16 @@ inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
         return g.q + g.u * (static_cast<f32>(i) / static_cast<f32>(Nu))
                    + g.v * (static_cast<f32>(j) / static_cast<f32>(Nv));
     };
-    // Shade PER VERTEX (skip the Lambert path when φ overrides the colour — the
-    // `phi ?` short-circuits the shade_face calls).
+    // Shade PER VERTEX (skip the Lambert+shadow path entirely when φ overrides
+    // the colour — the `phi ?` short-circuits shade_face/light_visibility).
     for (int j = 0; j < Nv; ++j) {
         for (int i = 0; i < Nu; ++i) {
             const Vec3 c00 = P(i, j),     c10 = P(i + 1, j);
             const Vec3 c11 = P(i + 1, j + 1), c01 = P(i, j + 1);
-            const Vec3 s00 = phi ? fc : shade_face(c00, n, albedo, emit, lights, true);
-            const Vec3 s10 = phi ? fc : shade_face(c10, n, albedo, emit, lights, true);
-            const Vec3 s11 = phi ? fc : shade_face(c11, n, albedo, emit, lights, true);
-            const Vec3 s01 = phi ? fc : shade_face(c01, n, albedo, emit, lights, true);
+            const Vec3 s00 = phi ? fc : shade_face(c00, n, albedo, emit, lights, true, occluders, source);
+            const Vec3 s10 = phi ? fc : shade_face(c10, n, albedo, emit, lights, true, occluders, source);
+            const Vec3 s11 = phi ? fc : shade_face(c11, n, albedo, emit, lights, true, occluders, source);
+            const Vec3 s01 = phi ? fc : shade_face(c01, n, albedo, emit, lights, true, occluders, source);
             push_tri(out, c00, c10, c11, s00, s10, s11, source);
             push_tri(out, c00, c11, c01, s00, s11, s01, source);
         }
@@ -286,13 +420,14 @@ inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
 inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
                      aleph::math::Vec3 albedo, aleph::math::Vec3 emit,
                      const std::vector<LoweredEntity>& lights,
+                     const std::vector<LoweredEntity>& occluders,
                      aleph::types::NodeId source, const double* phi) {
     const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, kPhiScale)
                                      : aleph::math::Vec3{};
     const aleph::math::Vec3 n = aleph::math::cross(g.b - g.a, g.c - g.a);
-    const aleph::math::Vec3 sa = phi ? fc : shade_face(g.a, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 sb = phi ? fc : shade_face(g.b, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 sc = phi ? fc : shade_face(g.c, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 sa = phi ? fc : shade_face(g.a, n, albedo, emit, lights, true, occluders, source);
+    const aleph::math::Vec3 sb = phi ? fc : shade_face(g.b, n, albedo, emit, lights, true, occluders, source);
+    const aleph::math::Vec3 sc = phi ? fc : shade_face(g.c, n, albedo, emit, lights, true, occluders, source);
     push_tri(out, g.a, g.b, g.c, sa, sb, sc, source);
 }
 
@@ -311,6 +446,7 @@ inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
 inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
                         aleph::math::Vec3 albedo, aleph::math::Vec3 emit,
                         const std::vector<LoweredEntity>& lights,
+                        const std::vector<LoweredEntity>& occluders,
                         aleph::types::NodeId source, const double* phi) {
     const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, kPhiScale)
                                      : aleph::math::Vec3{};
@@ -341,10 +477,10 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
             // SMOOTH (Gouraud) shading: shade each vertex with its EXACT outward
             // normal (vertex - centre); the rasterizer interpolates the per-vertex
             // colours across the cell so the sphere reads round, not faceted.
-            const aleph::math::Vec3 sa = phi ? fc : shade_face(a, a - g.center, albedo, emit, lights, false);
-            const aleph::math::Vec3 sb = phi ? fc : shade_face(b, b - g.center, albedo, emit, lights, false);
-            const aleph::math::Vec3 sc = phi ? fc : shade_face(c, c - g.center, albedo, emit, lights, false);
-            const aleph::math::Vec3 sd = phi ? fc : shade_face(d, d - g.center, albedo, emit, lights, false);
+            const aleph::math::Vec3 sa = phi ? fc : shade_face(a, a - g.center, albedo, emit, lights, false, occluders, source);
+            const aleph::math::Vec3 sb = phi ? fc : shade_face(b, b - g.center, albedo, emit, lights, false, occluders, source);
+            const aleph::math::Vec3 sc = phi ? fc : shade_face(c, c - g.center, albedo, emit, lights, false, occluders, source);
+            const aleph::math::Vec3 sd = phi ? fc : shade_face(d, d - g.center, albedo, emit, lights, false, occluders, source);
             push_tri(out, a, b, c, sa, sb, sc, source);
             push_tri(out, a, c, d, sa, sc, sd, source);
         }
@@ -356,6 +492,7 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
 // bakes the entity's albedo + emission, lit by `lights`, into the face tints.
 inline void emit_entity(SwBuild& out, const LoweredEntity& e,
                         const std::vector<LoweredEntity>& lights,
+                        const std::vector<LoweredEntity>& occluders,
                         const double* phi = nullptr) {
     const aleph::math::Vec3 albedo = e.material.albedo;
     const aleph::math::Vec3 emit   = e.material.emit;
@@ -363,11 +500,11 @@ inline void emit_entity(SwBuild& out, const LoweredEntity& e,
         [&](const auto& g) {
             using G = std::decay_t<decltype(g)>;
             if constexpr (std::is_same_v<G, aleph::types::SphereLocal>) {
-                emit_sphere(out, g, albedo, emit, lights, e.source, phi);
+                emit_sphere(out, g, albedo, emit, lights, occluders, e.source, phi);
             } else if constexpr (std::is_same_v<G, aleph::types::QuadLocal>) {
-                emit_quad(out, g, albedo, emit, lights, e.source, phi);
+                emit_quad(out, g, albedo, emit, lights, occluders, e.source, phi);
             } else {  // aleph::types::TriLocal
-                emit_tri(out, g, albedo, emit, lights, e.source, phi);
+                emit_tri(out, g, albedo, emit, lights, occluders, e.source, phi);
             }
         },
         e.world_geometry);
@@ -393,7 +530,9 @@ build_sw_scene(const LoweredScene& ls,
     for (std::size_t i = 0; i < ls.entities.size(); ++i) {
         const double* phi =
             (phi_entity && i < phi_entity->size()) ? &(*phi_entity)[i] : nullptr;
-        detail::emit_entity(out, ls.entities[i], ls.lights, phi);
+        // `ls.entities` are the occluders (each shade_face skips `self` + the
+        // light by NodeId). Ambient stays unshadowed; the φ path skips shadows.
+        detail::emit_entity(out, ls.entities[i], ls.lights, ls.entities, phi);
     }
     return out;
 }

@@ -1,6 +1,7 @@
 #include "doctest.h"
 
 #include <algorithm>  // std::count
+#include <cmath>      // std::sqrt
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -227,4 +228,140 @@ TEST_CASE("build_sw: phi_entity==nullptr is byte-identical; non-null recolors vc
     CHECK(f0.x >= f0.z);                                   // red >= blue at φ=+1
     const auto& fl = lit.scene.faces.back().vcol[0];
     CHECK(fl.z >= fl.x);                                   // blue >= red at φ=-1
+}
+
+// ── Task 2: analytic contact shadows ────────────────────────────────────────
+//
+// build_sw bakes per-vertex light occlusion into `Face::vcol`: each light's
+// diffuse term is scaled by the fraction of light samples whose segment from the
+// shaded point reaches the light unoccluded by the OTHER entities (ambient is
+// NOT shadowed). These tests construct a LoweredScene directly (overhead area
+// light + a floating sphere + a tessellated floor) so the geometry is exact.
+
+namespace {
+
+// Rec.709-ish luminance of a baked vcol (any vert; a cell is near-flat).
+[[nodiscard]] aleph::math::f32 lum(const aleph::math::Vec3& c) {
+    return c.x + c.y + c.z;
+}
+
+// Centroid of a face's first-three (real) vertices — verts[3]==verts[2].
+[[nodiscard]] Vec3 face_centroid(const aleph::render::sw::Face& f) {
+    return (f.verts[0] + f.verts[1] + f.verts[2]) * (1.0f / 3.0f);
+}
+
+// A direct LoweredScene: overhead area-light quad at y=3, a sphere FLOATING at
+// (0,0.8,0) r=0.5, and a big floor quad at y=0 (tessellated by build_sw). The
+// floor's grid has a vertex at (0,0,0) directly under the sphere whose segment
+// up to the light passes through the sphere => shadowed; a far corner is lit.
+aleph::lowering::LoweredScene make_shadow_scene() {
+    using aleph::lowering::LoweredEntity;
+    using aleph::lowering::MaterialParams;
+    aleph::lowering::LoweredScene ls;
+
+    // Overhead area light (id 100): 1x1 quad centred above origin at y=3.
+    LoweredEntity light;
+    light.source = NodeId{100};
+    light.world_geometry = QuadLocal{Vec3{-0.5f, 3.0f, -0.5f}, Vec3{1, 0, 0}, Vec3{0, 0, 1}};
+    light.material.emit = Vec3{3.0f, 3.0f, 3.0f};
+    ls.lights.push_back(light);
+
+    // Floating sphere occluder (id 1).
+    LoweredEntity sphere;
+    sphere.source = NodeId{1};
+    sphere.world_geometry = SphereLocal{Vec3{0.0f, 0.8f, 0.0f}, 0.5f};
+    sphere.material.albedo = Vec3{0.8f, 0.2f, 0.2f};
+    ls.entities.push_back(sphere);
+
+    // Floor (id 2): x,z ∈ [-4,4] at y=0, normal up. |u|=|v|=8 => 16x16 cells.
+    LoweredEntity floor;
+    floor.source = NodeId{2};
+    floor.world_geometry = QuadLocal{Vec3{-4.0f, 0.0f, -4.0f}, Vec3{8, 0, 0}, Vec3{0, 0, 8}};
+    floor.material.albedo = Vec3{0.7f, 0.7f, 0.7f};
+    ls.entities.push_back(floor);
+
+    return ls;
+}
+
+}  // namespace
+
+TEST_CASE("build_sw: contact shadow darkens the floor under a sphere") {
+    const aleph::lowering::LoweredScene ls = make_shadow_scene();
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls);
+
+    // Find a floor face nearest the origin (under the sphere) and one far away.
+    aleph::math::f32 best_under = 1e30f, lum_under = 0.0f;
+    aleph::math::f32 best_far = -1.0f,  lum_far  = 0.0f;
+    bool found_under = false, found_far = false;
+    for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
+        if (!(sw.face_source[i] == NodeId{2})) continue;  // floor faces only
+        const Vec3 ctr = face_centroid(sw.scene.faces[i]);
+        const aleph::math::f32 r = std::sqrt(ctr.x * ctr.x + ctr.z * ctr.z);
+        // closest-to-origin floor face -> directly under the sphere
+        if (r < best_under) {
+            best_under = r;
+            lum_under = lum(sw.scene.faces[i].vcol[0]);
+            found_under = true;
+        }
+        // a far floor face (corner region) -> clear path to the light
+        if (r > best_far && r > 4.0f) {
+            best_far = r;
+            lum_far = lum(sw.scene.faces[i].vcol[0]);
+            found_far = true;
+        }
+    }
+    REQUIRE(found_under);
+    REQUIRE(found_far);
+    // The shadowed face under the sphere is measurably darker than the far one.
+    CHECK(lum_under < lum_far);
+}
+
+TEST_CASE("build_sw: sphere front face stays lit (no false self-shadow)") {
+    const aleph::lowering::LoweredScene ls = make_shadow_scene();
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls);
+
+    // The sphere's topmost vertex faces the overhead light; it must not be
+    // wrongly self-shadowed (occluders skip self by NodeId) -> stays bright,
+    // brighter than pure ambient (which would be the fully-shadowed floor low).
+    aleph::math::f32 top_lum = 0.0f;
+    aleph::math::f32 best_y = -1e30f;
+    for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
+        if (!(sw.face_source[i] == NodeId{1})) continue;  // sphere faces only
+        const Vec3 ctr = face_centroid(sw.scene.faces[i]);
+        if (ctr.y > best_y) { best_y = ctr.y; top_lum = lum(sw.scene.faces[i].vcol[0]); }
+    }
+    // ambient-only luminance for the sphere's albedo (no diffuse) = 3·0.45·albedo
+    const aleph::math::f32 ambient_lum =
+        (0.8f + 0.2f + 0.2f) * 0.45f;  // base_albedo·kAmbient summed over channels
+    CHECK(top_lum > ambient_lum);  // diffuse survives -> the top is genuinely lit
+}
+
+TEST_CASE("build_sw: phi override still bypasses shadows/shade") {
+    const aleph::lowering::LoweredScene ls = make_shadow_scene();
+    // φ for entity 0 (sphere)=+1 (red), entity 1 (floor)=-1 (blue). With φ the
+    // vcol must equal the pure colormap colour — proving the φ path skips
+    // shade_face/light_visibility entirely (no shadow/Lambert mixed in).
+    std::vector<double> phi{ +1.0, -1.0 };
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls, &phi);
+
+    // colormap_diverging(+1, kPhiScale): t=clamp(1/0.4)=1 -> red side {1,0,0}.
+    // colormap_diverging(-1, kPhiScale): t=-1 -> blue side {0,0,1}.
+    bool checked_sphere = false, checked_floor = false;
+    for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
+        const auto& v = sw.scene.faces[i].vcol[0];
+        if (sw.face_source[i] == NodeId{1} && !checked_sphere) {
+            CHECK(v.x == doctest::Approx(1.0f));   // red, exactly the colormap
+            CHECK(v.y == doctest::Approx(0.0f));
+            CHECK(v.z == doctest::Approx(0.0f));
+            checked_sphere = true;
+        }
+        if (sw.face_source[i] == NodeId{2} && !checked_floor) {
+            CHECK(v.x == doctest::Approx(0.0f));   // blue, exactly the colormap
+            CHECK(v.y == doctest::Approx(0.0f));
+            CHECK(v.z == doctest::Approx(1.0f));
+            checked_floor = true;
+        }
+    }
+    CHECK(checked_sphere);
+    CHECK(checked_floor);
 }
