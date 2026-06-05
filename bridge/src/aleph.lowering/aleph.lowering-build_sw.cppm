@@ -155,6 +155,20 @@ inline constexpr double kPhiScale = 0.4;
 // black relative to a near sphere.
 inline constexpr aleph::math::f32 kFall = 0.08f;
 
+// --- quad tessellation -----------------------------------------------------
+//
+// A QuadLocal no longer lowers to 2 faces: it is subdivided into an Nu×Nv grid
+// of sub-quads (each 2 faces) so the floor carries INTERIOR vertices. Two wins:
+// (1) per-vertex Lambert at those interior points gives a real distance-falloff
+// gradient (fixes the flat-floor TODO), and (2) the interior vertices can later
+// RECEIVE per-vertex contact shadows — without them the sphere's shadow falls
+// where no vertex exists and interpolation from the far corners darkens nothing.
+// `Nu = clamp(ceil(|u|/kCell), 1, kMaxCells)`, likewise Nv. Pure f32 of u,v =>
+// deterministic; `source` stays the quad's NodeId for every sub-face (picking
+// unaffected). SPEC invariant: QuadLocal -> 2·Nu·Nv faces.
+inline constexpr aleph::math::f32 kCell     = 0.5f;  // target quad cell size (world units)
+inline constexpr int              kMaxCells = 24;    // per-axis tessellation cap
+
 // Centre of a light's geometry — its effective point-light position for the
 // preview. Quad centre = q + (u+v)/2; tri centre = centroid; sphere = centre.
 [[nodiscard]] inline aleph::math::Vec3
@@ -227,32 +241,45 @@ inline void push_tri(SwBuild& out,
     out.face_source.push_back(source);
 }
 
-// QuadLocal -> 2 Faces. The render.rt quad is the parallelogram (q, q+u, q+u+v,
-// q+v); we split those four corners into the two triangles {p0,p1,p2} and
-// {p0,p2,p3} (matching rast_scan's quad winding) and emit one Face each.
+// QuadLocal -> 2·Nu·Nv Faces. The parallelogram (q, q+u, q+u+v, q+v) is
+// subdivided into an Nu×Nv grid (Nu = clamp(ceil(|u|/kCell),1,kMaxCells), Nv
+// likewise); each cell's 4 corners are points on the parallelogram, split into
+// the two triangles {c00,c10,c11} and {c00,c11,c01} (matching rast_scan's quad
+// winding). The interior vertices give the floor a smooth distance-falloff
+// gradient (and a substrate for per-vertex contact shadows). `source` (the
+// quad's NodeId) tags every sub-face, so picking is unaffected.
 inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
                       aleph::math::Vec3 albedo, aleph::math::Vec3 emit,
                       const std::vector<LoweredEntity>& lights,
                       aleph::types::NodeId source, const double* phi) {
+    using aleph::math::Vec3;
+    using aleph::math::f32;
     // When a physics field φ is supplied, every face of this entity is tinted
     // with the single colormap colour `fc` instead of the baked Lambert shade.
-    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, kPhiScale)
-                                     : aleph::math::Vec3{};
-    const aleph::math::Vec3 p0 = g.q;
-    const aleph::math::Vec3 p1 = g.q + g.u;
-    const aleph::math::Vec3 p2 = g.q + g.u + g.v;
-    const aleph::math::Vec3 p3 = g.q + g.v;
-    // Both triangles are coplanar -> one shared (two-sided) normal. Shade PER
-    // VERTEX so a large quad (the floor) gets a smooth distance-falloff gradient
-    // across it instead of one flat tone. Skip the Lambert shade entirely when φ
-    // overrides the colour (the `phi ?` short-circuits the shade_face calls).
-    const aleph::math::Vec3 n = aleph::math::cross(p1 - p0, p2 - p0);
-    const aleph::math::Vec3 s0 = phi ? fc : shade_face(p0, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 s1 = phi ? fc : shade_face(p1, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 s2 = phi ? fc : shade_face(p2, n, albedo, emit, lights, true);
-    const aleph::math::Vec3 s3 = phi ? fc : shade_face(p3, n, albedo, emit, lights, true);
-    push_tri(out, p0, p1, p2, s0, s1, s2, source);
-    push_tri(out, p0, p2, p3, s0, s2, s3, source);
+    const Vec3 fc = phi ? detail::colormap_diverging(*phi, kPhiScale) : Vec3{};
+    // Both triangles of every cell are coplanar -> one shared (two-sided) normal.
+    const Vec3 n = aleph::math::cross(g.u, g.v);
+    auto clampc = [](int v) noexcept { return v < 1 ? 1 : (v > kMaxCells ? kMaxCells : v); };
+    const int Nu = clampc(static_cast<int>(std::ceil(aleph::math::length(g.u) / kCell)));
+    const int Nv = clampc(static_cast<int>(std::ceil(aleph::math::length(g.v) / kCell)));
+    auto P = [&](int i, int j) noexcept -> Vec3 {
+        return g.q + g.u * (static_cast<f32>(i) / static_cast<f32>(Nu))
+                   + g.v * (static_cast<f32>(j) / static_cast<f32>(Nv));
+    };
+    // Shade PER VERTEX (skip the Lambert path when φ overrides the colour — the
+    // `phi ?` short-circuits the shade_face calls).
+    for (int j = 0; j < Nv; ++j) {
+        for (int i = 0; i < Nu; ++i) {
+            const Vec3 c00 = P(i, j),     c10 = P(i + 1, j);
+            const Vec3 c11 = P(i + 1, j + 1), c01 = P(i, j + 1);
+            const Vec3 s00 = phi ? fc : shade_face(c00, n, albedo, emit, lights, true);
+            const Vec3 s10 = phi ? fc : shade_face(c10, n, albedo, emit, lights, true);
+            const Vec3 s11 = phi ? fc : shade_face(c11, n, albedo, emit, lights, true);
+            const Vec3 s01 = phi ? fc : shade_face(c01, n, albedo, emit, lights, true);
+            push_tri(out, c00, c10, c11, s00, s10, s11, source);
+            push_tri(out, c00, c11, c01, s00, s11, s01, source);
+        }
+    }
 }
 
 // TriLocal -> 1 Face (the single triangle {a,b,c}).

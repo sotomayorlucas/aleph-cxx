@@ -147,7 +147,11 @@ TEST_CASE("build_sw: 1 sphere + 1 quad -> SPEC face counts + face_source map") {
     const std::size_t sphere_faces =
         static_cast<std::size_t>(aleph::lowering::kSphereRings)
         * static_cast<std::size_t>(aleph::lowering::kSphereSectors) * 2u;
-    const std::size_t quad_faces = 2u;
+    // QuadLocal now tessellates into an Nu×Nv grid (2 faces/cell). The test quad
+    // has |u|=|v|=2, so with kCell=0.5/kMaxCells=24: Nu=Nv=clamp(ceil(2/0.5))=4
+    // => 2·4·4 = 32 faces (mirrors emit_quad's formula).
+    const int qNu = 4, qNv = 4;
+    const std::size_t quad_faces = static_cast<std::size_t>(2 * qNu * qNv);  // = 32
 
     CHECK(sphere_faces > 0u);
     CHECK(sw.scene.faces.size() == sphere_faces + quad_faces);
