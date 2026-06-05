@@ -10,7 +10,7 @@ import aleph.edit;     // EditorController (headless core under test)
 import aleph.graph;    // Graph
 import aleph.types;    // NodeId, Mesh/Material/Camera/Transform, geometry payloads
 import aleph.math;     // Vec3, Mat4
-import aleph.sim;      // ScalarField, StepError
+import aleph.sim;      // Section<f64>, StepError
 import aleph.lowering; // AddObject, Op, MaterialParams
 
 // Phase 6 wave-field — `EditorController` physics seam (this task).
@@ -98,14 +98,14 @@ TEST_CASE("EditorController sim: enable + step evolves φ deterministically") {
     ctl.set_viewport(64, 48);
 
     ctl.enable_sim(true);
-    REQUIRE(ctl.field().size() >= 2);          // both spheres are Δ vertices
+    REQUIRE(ctl.displacement().size() >= 2);   // both spheres are Δ vertices
 
     REQUIRE(ctl.kick(a, 1.0));                  // velocity impulse at sphere A
     for (int i = 0; i < 50; ++i)
         REQUIRE(ctl.step(0.01f).has_value());   // the graph is never mutated
 
     bool any_nonzero = false;
-    for (double v : ctl.field().phi)
+    for (double v : ctl.displacement().data)
         if (v != 0.0) any_nonzero = true;
     CHECK(any_nonzero);                         // the wave propagated into φ
 }
@@ -122,9 +122,9 @@ TEST_CASE("EditorController sim: edit re-projection keeps survivors, zeros new")
         REQUIRE(ctl.step(0.01f).has_value());
 
     auto phi_of = [&](NodeId id) -> double {
-        const auto& f = ctl.field();
+        const auto& f = ctl.displacement();
         for (std::size_t i = 0; i < f.order.size(); ++i)
-            if (f.order[i] == id) return f.phi[i];
+            if (f.order[i] == id) return f.data[i];
         return 0.0;
     };
     const double phiA_before = phi_of(a);

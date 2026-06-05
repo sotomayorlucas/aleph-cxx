@@ -49,7 +49,7 @@ import aleph.render.common;   // Camera, make_camera
 import aleph.scene;           // Scene
 import aleph.dpo;             // RewriteRecord
 import aleph.flow;            // WeightedLaplacian, build_laplacian, default_weight (Δ)
-import aleph.sim;             // ScalarField, WaveStepper, StepError (φ wave field)
+import aleph.sim;             // Section<f64>, WaveStepper, StepError (φ wave field)
 
 export namespace aleph::edit {
 
@@ -280,19 +280,22 @@ public:
         sim_enabled_ = on;
         if (on) {
             operator_ = aleph::flow::build_laplacian(graph_, aleph::flow::default_weight);
-            field_    = aleph::sim::ScalarField::zeros(operator_.node_order);
+            u_ = aleph::sim::Section<double>::zeros(operator_.node_order);
+            v_ = aleph::sim::Section<double>::zeros(operator_.node_order);
         }
     }
 
     // Velocity impulse at node `n`; false (no-op) if `n` is not in the field's
-    // node_order (e.g. a node that produced no Δ vertex).
+    // node_order (e.g. a node that produced no Δ vertex). Routes to the VELOCITY
+    // section v_ (matches the old ScalarField::kick: phi_dot[i] += amp).
     [[nodiscard]] bool kick(aleph::types::NodeId n, double amp) noexcept {
-        return field_.kick(n, amp);
+        return v_.add(n, amp);
     }
 
-    // The current wave field (φ/φ̇ over the Laplacian's node_order), read-only.
-    [[nodiscard]] const aleph::sim::ScalarField& field() const noexcept {
-        return field_;
+    // The current displacement field φ (u_) over the Laplacian's node_order,
+    // read-only. (The render φ→vcol path reads the displacement, not velocity.)
+    [[nodiscard]] const aleph::sim::Section<double>& displacement() const noexcept {
+        return u_;
     }
 
     // Advance the wave one symplectic-Euler sub-step (φ̈ = −c²Δφ) on the shared Δ
@@ -302,7 +305,7 @@ public:
     // SW scene is left as-is (do not re-bake a partially-updated/diverged field).
     std::expected<void, aleph::sim::StepError> step(aleph::math::f32 dt) {
         if (!sim_enabled_) return {};
-        auto r = stepper_.step(field_, operator_.matrix,
+        auto r = stepper_.step(u_, v_, operator_.matrix,
                                static_cast<aleph::math::f64>(dt));
         if (!r) return r;
         rebuild_backends_from_prev();  // re-bake vcol from the evolved φ
@@ -360,7 +363,8 @@ private:
     // node. The graph is the truth — this only rebuilds derived state.
     void rebuild_operator_and_reproject() {
         operator_ = aleph::flow::build_laplacian(graph_, aleph::flow::default_weight);
-        field_.reproject(operator_.node_order);  // survivors keep φ, new nodes 0
+        u_.reproject(operator_.node_order);  // survivors keep φ,  new nodes 0
+        v_.reproject(operator_.node_order);  // survivors keep φ̇, new nodes 0
     }
 
     // Rebuild the rasterizer SceneRT (+ face_source), the path-trace Scene, and
@@ -379,8 +383,8 @@ private:
             std::vector<double> phi_entity(prev_.entities.size(), 0.0);
             for (std::size_t i = 0; i < prev_.entities.size(); ++i) {
                 const aleph::types::NodeId src = prev_.entities[i].source;
-                for (std::size_t j = 0; j < field_.order.size(); ++j)
-                    if (field_.order[j] == src) { phi_entity[i] = field_.phi[j]; break; }
+                for (std::size_t j = 0; j < u_.order.size(); ++j)
+                    if (u_.order[j] == src) { phi_entity[i] = u_.data[j]; break; }
             }
             sw_ = aleph::lowering::build_sw_scene(prev_, &phi_entity);
         } else {
@@ -440,7 +444,8 @@ private:
     aleph::lowering::RenderScene   render_{};    // path-trace Scene + camera pose
     std::vector<aleph::types::NodeId> prim_source_{};  // per-entity source (entity↔primitive)
     aleph::flow::WeightedLaplacian operator_{};   // Δ, rebuilt from graph_
-    aleph::sim::ScalarField        field_{};      // φ/φ̇ over operator_.node_order
+    aleph::sim::Section<double>    u_{};         // φ  (displacement) over operator_.node_order
+    aleph::sim::Section<double>    v_{};         // φ̇ (velocity)     over operator_.node_order
     aleph::sim::WaveStepper        stepper_{};    // symplectic-Euler wave integrator
     bool                           sim_enabled_ = false;
     OrbitCamera                    cam_{};       // OWN orbit camera (headless)
