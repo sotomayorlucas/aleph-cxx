@@ -143,6 +143,97 @@ InitialScene build_initial_graph() {
     return s;
 }
 
+// ── A lattice demo scene (the wave-field stage, SPEC §3.2 physics seam) ──────
+//
+//   root Transform (identity)
+//     ├─Contains─▶ Camera (overhead, framing the grid)
+//     ├─Contains─▶ R×R Mesh (SphereLocal) ─References─▶ Material (Lambertian grey)
+//     │            joined by Adjacent edges (4-neighbourhood) — the 1-skeleton the
+//     │            wave Laplacian Δ is built over.
+//     └─Contains─▶ Light (Area, overhead quad)
+//
+// `nodes` is the FLAT row-major Mesh id list (`nodes[z*R + x]`); `root` is the
+// AddObject/AddLight/DeleteObject parent. The Adjacent edges are what couple the
+// spheres into a single Δ vertex set so a kick at one node ripples to the rest.
+struct LatticeScene {
+    aleph::graph::Graph g;
+    std::vector<NodeId> nodes;  // row-major Mesh ids: nodes[z*R + x]
+    NodeId root{};
+};
+
+LatticeScene build_lattice_graph(int R) {
+    using namespace aleph::types;
+    LatticeScene s;
+    aleph::graph::Graph& g = s.g;
+
+    s.root = g.alloc_node_id();
+    g.insert_node(Transform{s.root, 0, LocalTransform{Mat4::identity()}});
+
+    const NodeId cam_id = g.alloc_node_id();
+    Camera cam{cam_id, std::string("sensor0")};
+    cam.look_from  = Vec3{(static_cast<f32>(R) - 1.0f) * 0.5f,
+                          static_cast<f32>(R) * 0.9f,
+                          static_cast<f32>(R) * 1.4f};
+    cam.look_at    = Vec3{(static_cast<f32>(R) - 1.0f) * 0.5f, 0.0f,
+                          (static_cast<f32>(R) - 1.0f) * 0.5f};
+    cam.up         = Vec3{0.0f, 1.0f, 0.0f};
+    cam.vfov_deg   = 45.0f;
+    cam.aperture   = 0.0f;
+    cam.focus_dist = 5.0f;
+    g.insert_node(std::move(cam));
+
+    // The R×R grid of small spheres (each with its own Lambertian Material).
+    std::vector<std::vector<NodeId>> grid(
+        static_cast<std::size_t>(R), std::vector<NodeId>(static_cast<std::size_t>(R)));
+    for (int z = 0; z < R; ++z) {
+        for (int x = 0; x < R; ++x) {
+            const NodeId m = g.alloc_node_id();
+            Mesh mesh{m, std::string("n") + std::to_string(z * R + x), 0};
+            mesh.geometry = SphereLocal{Vec3{static_cast<f32>(x), 0.0f,
+                                             static_cast<f32>(z)},
+                                        0.35f};
+            g.insert_node(std::move(mesh));
+
+            const NodeId mat = g.alloc_node_id();
+            Material mt{mat, MaterialKind::Lambertian};
+            mt.albedo = Vec3{0.8f, 0.8f, 0.8f};
+            mt.emit   = Vec3{0.0f, 0.0f, 0.0f};
+            g.insert_node(std::move(mt));
+
+            (void)g.add_edge(EdgeKind::Contains,   s.root, m);
+            (void)g.add_edge(EdgeKind::References, m,      mat);
+            grid[static_cast<std::size_t>(z)][static_cast<std::size_t>(x)] = m;
+            s.nodes.push_back(m);
+        }
+    }
+
+    // 4-neighbourhood Adjacent edges (the wave's coupling skeleton).
+    for (int z = 0; z < R; ++z) {
+        for (int x = 0; x < R; ++x) {
+            const NodeId here = grid[static_cast<std::size_t>(z)][static_cast<std::size_t>(x)];
+            if (x + 1 < R) {
+                (void)g.add_edge(EdgeKind::Adjacent, here,
+                                 grid[static_cast<std::size_t>(z)][static_cast<std::size_t>(x + 1)]);
+            }
+            if (z + 1 < R) {
+                (void)g.add_edge(EdgeKind::Adjacent, here,
+                                 grid[static_cast<std::size_t>(z + 1)][static_cast<std::size_t>(x)]);
+            }
+        }
+    }
+
+    // An overhead area light covering the whole grid.
+    const NodeId light_id = g.alloc_node_id();
+    Light light{light_id, LightKind::Area, std::string("emit0")};
+    light.emission = Vec3{6.0f, 6.0f, 6.0f};
+    light.geometry = QuadLocal{Vec3{-1.0f, static_cast<f32>(R) * 1.5f, -1.0f},
+                               Vec3{2.0f, 0.0f, 0.0f},
+                               Vec3{0.0f, 0.0f, 2.0f}};
+    g.insert_node(std::move(light));
+    (void)g.add_edge(EdgeKind::Contains, s.root, light_id);
+    return s;
+}
+
 // A Lambertian MaterialParams of a given albedo (the recolor payload).
 aleph::lowering::MaterialParams lambertian(Vec3 albedo) {
     aleph::lowering::MaterialParams m{};
@@ -350,6 +441,85 @@ int run_headless(const std::string& outdir) {
                 step_no,
                 controller.lowered().entities.size(),
                 controller.lowered().lights.size());
+    return 0;
+}
+
+// ── Headless wave capture (SPEC §3.2 physics seam) ───────────────────────────
+// The thesis demo: kick a node at the centre of a lattice, capture the φ-wave as
+// it ripples outward (N frames), then DELETE a node in the wavefront's path — the
+// topology edit re-derives Δ and re-projects φ (survivors keep their value, the
+// gap zeroes), so the ripple genuinely RE-ROUTES around the hole while the rest
+// of the wave persists (N more frames). All frames are deterministic PPMs.
+int run_wave(const std::string& outdir) {
+    constexpr int R = 7, N = 24;
+    constexpr aleph::math::f32 kDt = 0.02f;
+
+    LatticeScene init = build_lattice_graph(R);
+    // The kick site (grid centre) and a blocker the rightward wavefront reaches.
+    const NodeId center  = init.nodes[static_cast<std::size_t>((R / 2) * R + (R / 2))];
+    const NodeId blocker = init.nodes[static_cast<std::size_t>((R / 2) * R + (R / 2 + 2))];
+
+    aleph::edit::EditorController controller{std::move(init.g)};
+    constexpr int W = 320, H = 240;
+    controller.set_viewport(W, H);
+    auto& cam = controller.camera();
+    cam.target   = Vec3{(static_cast<f32>(R) - 1.0f) * 0.5f, 0.0f,
+                        (static_cast<f32>(R) - 1.0f) * 0.5f};
+    cam.yaw      = 0.5f;
+    cam.pitch    = 0.6f;
+    cam.radius   = static_cast<f32>(R) * 1.7f;
+    cam.vfov_deg = 45.0f;
+
+    controller.enable_sim(true);
+    (void)controller.kick(center, 1.5);
+
+    aleph::threads::Pool pool(thread_count());
+    std::vector<Vec3> film_px(static_cast<std::size_t>(W) * H);
+    aleph::render::common::Film film{film_px.data(), W, H, W};
+    std::vector<f32> depth(static_cast<std::size_t>(W) * H, 0.0f);
+
+    int frame = 0;
+    auto dump = [&]() -> bool {
+        clear_sky(film);
+        std::fill(depth.begin(), depth.end(), 0.0f);
+        aleph::render::sw::rasterize(controller.raster_scene(),
+                                     orbit_mvp(controller.camera(), W, H),
+                                     film, depth, pool);
+        const std::string p =
+            outdir + "/step" + std::to_string(frame) + "_wave_raster.ppm";
+        if (!write_ppm(p.c_str(), film)) {
+            std::fprintf(stderr, "aleph_edit: cannot write %s\n", p.c_str());
+            return false;
+        }
+        ++frame;
+        return true;
+    };
+
+    // Phase 1: the ripple expands from the kicked centre node.
+    for (int i = 0; i < N; ++i) {
+        (void)controller.step(kDt);
+        if (!dump()) return 1;
+    }
+
+    // Topology change: delete a node in the wavefront's path. apply() re-derives
+    // Δ and reprojects φ (survivors keep φ, the gap zeroes) — the ripple re-routes
+    // around the hole.
+    auto r = controller.apply(
+        aleph::lowering::Op{aleph::lowering::DeleteObject{blocker}});
+    if (!r.has_value()) {
+        std::fprintf(stderr,
+                     "aleph_edit[wave]: DeleteObject failed (OpError %d)\n",
+                     static_cast<int>(r.error()));
+        return 1;
+    }
+
+    // Phase 2: the wave continues, now re-routing around the deleted node.
+    for (int i = 0; i < N; ++i) {
+        (void)controller.step(kDt);
+        if (!dump()) return 1;
+    }
+
+    std::printf("aleph_edit[wave]: wrote %d frames to %s\n", frame, outdir.c_str());
     return 0;
 }
 
@@ -648,6 +818,11 @@ int main(int argc, char** argv) {
             std::string outdir = (i + 1 < argc) ? std::string(argv[i + 1])
                                                 : std::string("/tmp/edit_out");
             return run_headless(outdir);
+        }
+        if (arg == "--wave") {
+            std::string outdir = (i + 1 < argc) ? std::string(argv[i + 1])
+                                                : std::string("/tmp/wave");
+            return run_wave(outdir);
         }
     }
 
