@@ -244,6 +244,9 @@ public:
             // Un-lowerable post-state: clear derived state to a coherent empty
             // view rather than leave stale geometry pointing at the old graph.
             prev_ = aleph::lowering::LoweredScene{};
+            // The graph WAS committed by apply_op above, so keep the wave
+            // operator/field consistent with it (not stale from the pre-op graph).
+            if (sim_enabled_) rebuild_operator_and_reproject();
             rebuild_backends_from_prev();
             return std::unexpected(aleph::lowering::OpError::InvariantViolation);
         }
