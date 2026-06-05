@@ -540,20 +540,48 @@ int run_wave(const std::string& outdir) {
 // Manual-smoke only (not auto-tested). Drives the headless controller from real
 // input: orbit drag -> raster; left-click -> pick/select; UI material slider ->
 // SetMaterial; keys a/l/x -> Add/Add/Delete; idle -> progressive path-trace.
-int run_live() {
+int run_live(bool wave_demo = false) {
     constexpr int W = 800, H = 600;
-    aleph::window::Window win(W, H, "aleph_edit — structural editor");
+    constexpr int R = 7;             // lattice resolution (wave demo)
+    constexpr f32 kWaveDt = 0.02f;   // fixed physics sub-step per frame
+    aleph::window::Window win(W, H, wave_demo
+        ? "aleph_edit — wave on the shared Laplacian (click=select, K=kick, X=delete, drag=orbit)"
+        : "aleph_edit — structural editor");
 
-    InitialScene init = build_initial_graph();
-    const NodeId root = init.root;
-    aleph::edit::EditorController controller{std::move(init.g)};
+    // Scene: the wave demo seeds an R×R Adjacent lattice (so Δ couples the nodes);
+    // the plain editor keeps the sphere+floor scene. Both yield a graph + root.
+    NodeId root{};
+    NodeId kick_seed{};
+    aleph::graph::Graph scene_graph = [&] {
+        if (wave_demo) {
+            LatticeScene ls = build_lattice_graph(R);
+            root      = ls.root;
+            kick_seed = ls.nodes[static_cast<std::size_t>((R / 2) * R + (R / 2))];
+            return std::move(ls.g);
+        }
+        InitialScene is = build_initial_graph();
+        root = is.root;
+        return std::move(is.g);
+    }();
+    aleph::edit::EditorController controller{std::move(scene_graph)};
     controller.set_viewport(W, H);
     auto& cam = controller.camera();
-    cam.target   = Vec3{0.0f, 0.5f, 0.0f};
-    cam.yaw      = 0.4f;
-    cam.pitch    = 0.25f;
-    cam.radius   = 5.0f;
-    cam.vfov_deg = 45.0f;
+    if (wave_demo) {
+        cam.target   = Vec3{(static_cast<f32>(R) - 1.0f) * 0.5f, 0.0f,
+                            (static_cast<f32>(R) - 1.0f) * 0.5f};
+        cam.yaw      = 0.5f;
+        cam.pitch    = 0.6f;
+        cam.radius   = static_cast<f32>(R) * 1.7f;
+        cam.vfov_deg = 45.0f;
+        controller.enable_sim(true);
+        (void)controller.kick(kick_seed, 1.5);   // an initial ping to watch
+    } else {
+        cam.target   = Vec3{0.0f, 0.5f, 0.0f};
+        cam.yaw      = 0.4f;
+        cam.pitch    = 0.25f;
+        cam.radius   = 5.0f;
+        cam.vfov_deg = 45.0f;
+    }
 
     aleph::threads::Pool pool(thread_count());
     aleph::editor::UiCtx ui{};
@@ -606,6 +634,7 @@ int run_live() {
         const int nev = win.poll_events(std::span<aleph::window::Event>{evbuf});
         bool clicked_pick = false;
         bool key_add_obj = false, key_add_light = false, key_delete = false;
+        bool key_kick = false;
 
         for (std::size_t i = 0; i < static_cast<std::size_t>(nev); ++i) {
             const auto& e = evbuf[i];
@@ -618,6 +647,7 @@ int run_live() {
                     else if (e.key == 'a') key_add_obj = true;
                     else if (e.key == 'l') key_add_light = true;
                     else if (e.key == 'x') key_delete = true;
+                    else if (e.key == 'k') key_kick = true;
                     break;
                 case aleph::window::Event::Kind::MouseDown:
                     if (e.button == 1) { left_down = true; clicked_pick = true; }
@@ -664,6 +694,10 @@ int run_live() {
                 aleph::lowering::Op{aleph::lowering::DeleteObject{victim}});
             if (r.has_value()) controller.select(std::nullopt);
         }
+        // Wave: ping the selected node (or the seed if nothing is selected).
+        if (wave_demo && key_kick) {
+            (void)controller.kick(controller.selected().value_or(kick_seed), 1.5);
+        }
 
         // ── Pick on a fresh left-click. ───────────────────────────────────────
         if (clicked_pick && !prev_left) {
@@ -685,7 +719,9 @@ int run_live() {
         // convergence); any input pulls us back to raster. Both modes leave a
         // LINEAR image in `src`, which the crossfade block below presents.
         const u32 now = win.ticks_ms();
-        const bool idle = (now - last_input_ms) >= kIdleMs;
+        // The wave demo stays in raster (φ is colormapped into vcol, which only the
+        // rasterizer reads) and steps every frame, so it never goes idle/path-trace.
+        const bool idle = !wave_demo && (now - last_input_ms) >= kIdleMs;
 
         Mode        mode;
         const Vec3* src = nullptr;
@@ -725,6 +761,9 @@ int run_live() {
             mode    = Mode::Raster;
             tracing = false;
 
+            // Advance the wave one fixed sub-step (re-bakes φ→vcol) before drawing.
+            if (wave_demo) (void)controller.step(kWaveDt);
+
             // ── RASTER: rasterize the editor's view + UI overlay into `film`. ──
             clear_sky(film);
             std::fill(depth.begin(), depth.end(), 0.0f);
@@ -756,7 +795,9 @@ int run_live() {
             aleph::editor::draw_rect(film, W - 242, 174, 60, 30, sel_albedo);
 
             aleph::editor::ui_label(ui, W - 242, 214, "A ADD  L LIGHT", Vec3{0.85f, 0.85f, 0.9f});
-            aleph::editor::ui_label(ui, W - 242, 230, "X DELETE  DRAG ORBIT",
+            aleph::editor::ui_label(ui, W - 242, 230,
+                                    wave_demo ? "K KICK  X DELETE  DRAG ORBIT"
+                                              : "X DELETE  DRAG ORBIT",
                                     Vec3{0.85f, 0.85f, 0.9f});
             aleph::editor::ui_end(ui);
 
@@ -822,7 +863,12 @@ int run_live() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    // ── Arg parse: --headless <outdir> runs the scripted, windowless mode. ────
+    // ── Arg parse ─────────────────────────────────────────────────────────────
+    //   --headless <outdir>  scripted windowless edit demo (PPM pairs)
+    //   --wave <outdir>      headless wave-field capture (deterministic frames)
+    //   --wave-live          interactive wave on the lattice (needs SDL2)
+    //   (no args)            interactive structural editor (needs SDL2)
+    bool wave_live = false;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
         if (arg == "--headless") {
@@ -835,13 +881,15 @@ int main(int argc, char** argv) {
                                                 : std::string("/tmp/wave");
             return run_wave(outdir);
         }
+        if (arg == "--wave-live") wave_live = true;
     }
 
 #if defined(ALEPH_HAVE_SDL2)
-    return run_live();
+    return run_live(wave_live);
 #else
+    (void)wave_live;
     std::fprintf(stderr,
-                 "aleph_edit: built without SDL2 — only --headless is available\n");
+                 "aleph_edit: built without SDL2 — only --headless / --wave are available\n");
     return 0;
 #endif
 }
