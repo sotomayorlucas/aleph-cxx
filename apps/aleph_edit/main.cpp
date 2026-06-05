@@ -62,6 +62,12 @@ using aleph::math::f32;
 using aleph::math::u32;
 using aleph::types::NodeId;
 
+// Raster preview supersample factor (SSAA): render the 3D scene at kSSAA× in each
+// axis into a scratch film, then box-downsample (linear) into the 1× film. kSSAA=2
+// → 4 samples/px. Aspect is preserved (kSSAA·W/kSSAA·H == W/H) so the 1× MVP is
+// reused verbatim. UI overlays stay at 1× (drawn after the downsample).
+constexpr int kSSAA = 2;
+
 // ── The initial scene graph (the truth the controller takes ownership of) ────
 //
 //   root Transform (identity)
@@ -331,17 +337,24 @@ int run_headless(const std::string& outdir) {
     aleph::render::common::Film film{film_px.data(), W, H, W};
     std::vector<f32> depth(static_cast<std::size_t>(W) * H, 0.0f);
 
+    // SSAA scratch: render raster at kSSAA× then box-downsample into `film`.
+    std::vector<Vec3> ss_px(static_cast<std::size_t>(kSSAA) * kSSAA * W * H);
+    std::vector<f32> ss_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
+    aleph::render::common::Film ss_film{ss_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
+
     // Render the controller's current state to two PPMs (raster + path-trace).
     int step_no = 0;
     auto dump = [&](const char* label) -> bool {
         // (1) Raster composite. `build_sw_scene` faces carry no lightmap
         // (lightmap_id == 0xFFFFFFFF) and a baked flat-lit albedo, so the
         // controller's SceneRT rasterizes directly (no per-face fixup needed).
-        clear_sky(film);
-        std::fill(depth.begin(), depth.end(), 0.0f);
+        // Supersample at kSSAA× then box-downsample (linear) into the 1× film.
+        clear_sky(ss_film);
+        std::fill(ss_depth.begin(), ss_depth.end(), 0.0f);
         aleph::render::sw::rasterize(controller.raster_scene(),
-                                     orbit_mvp(controller.camera(), W, H),
-                                     film, depth, pool);
+                                     orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
+                                     ss_film, ss_depth, pool);
+        aleph::render::sw::downsample_box(ss_film, film, kSSAA);
         std::string rp = outdir + "/step" + std::to_string(step_no) + "_" + label
                        + "_raster.ppm";
         if (!write_ppm(rp.c_str(), film)) {
@@ -481,13 +494,19 @@ int run_wave(const std::string& outdir) {
     aleph::render::common::Film film{film_px.data(), W, H, W};
     std::vector<f32> depth(static_cast<std::size_t>(W) * H, 0.0f);
 
+    // SSAA scratch: render raster at kSSAA× then box-downsample into `film`.
+    std::vector<Vec3> ss_px(static_cast<std::size_t>(kSSAA) * kSSAA * W * H);
+    std::vector<f32> ss_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
+    aleph::render::common::Film ss_film{ss_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
+
     int frame = 0;
     auto dump = [&]() -> bool {
-        clear_sky(film);
-        std::fill(depth.begin(), depth.end(), 0.0f);
+        clear_sky(ss_film);
+        std::fill(ss_depth.begin(), ss_depth.end(), 0.0f);
         aleph::render::sw::rasterize(controller.raster_scene(),
-                                     orbit_mvp(controller.camera(), W, H),
-                                     film, depth, pool);
+                                     orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
+                                     ss_film, ss_depth, pool);
+        aleph::render::sw::downsample_box(ss_film, film, kSSAA);
         const std::string p =
             outdir + "/step" + std::to_string(frame) + "_wave_raster.ppm";
         if (!write_ppm(p.c_str(), film)) {
