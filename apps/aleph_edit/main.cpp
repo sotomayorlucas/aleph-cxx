@@ -332,10 +332,9 @@ int run_headless(const std::string& outdir) {
 
     aleph::threads::Pool pool(thread_count());
 
-    // Film + depth buffers (heap — W*H*sizeof(Vec3) is modest).
+    // Film (heap — W*H*sizeof(Vec3) is modest).
     std::vector<Vec3> film_px(static_cast<std::size_t>(W) * H);
     aleph::render::common::Film film{film_px.data(), W, H, W};
-    std::vector<f32> depth(static_cast<std::size_t>(W) * H, 0.0f);
 
     // SSAA scratch: render raster at kSSAA× then box-downsample into `film`.
     std::vector<Vec3> ss_px(static_cast<std::size_t>(kSSAA) * kSSAA * W * H);
@@ -362,10 +361,17 @@ int run_headless(const std::string& outdir) {
             return false;
         }
         if (std::getenv("ALEPH_DUMP_DEPTH") != nullptr) {
+            // Visualize the SS depth buffer (1/w, near=bright) — take each 2×2
+            // block's top-left sample as the 1× representative.
             std::vector<Vec3> dv(static_cast<std::size_t>(W) * H);
-            for (std::size_t i = 0; i < dv.size(); ++i) {
-                const f32 d = std::min(1.0f, depth[i] * 3.0f);  // 1/w, near=bright
-                dv[i] = Vec3{d, d, d};
+            const std::size_t ss   = static_cast<std::size_t>(kSSAA);
+            const std::size_t sstr = ss * static_cast<std::size_t>(W);  // SS film stride
+            for (std::size_t dy = 0; dy < static_cast<std::size_t>(H); ++dy) {
+                for (std::size_t dx = 0; dx < static_cast<std::size_t>(W); ++dx) {
+                    const std::size_t si = dy * ss * sstr + dx * ss;
+                    const f32 d = std::min(1.0f, ss_depth[si] * 3.0f);
+                    dv[dy * static_cast<std::size_t>(W) + dx] = Vec3{d, d, d};
+                }
             }
             aleph::render::common::Film df{dv.data(), W, H, W};
             std::string dp = outdir + "/step" + std::to_string(step_no) + "_" + label

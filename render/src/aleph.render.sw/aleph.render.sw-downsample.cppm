@@ -1,5 +1,4 @@
 module;
-#include <cstddef>
 export module aleph.render.sw:downsample;
 import aleph.math;
 import aleph.render.common;   // Film
