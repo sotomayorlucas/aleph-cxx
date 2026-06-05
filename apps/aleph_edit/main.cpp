@@ -181,6 +181,7 @@ LatticeScene build_lattice_graph(int R) {
     cam.aperture   = 0.0f;
     cam.focus_dist = 5.0f;
     g.insert_node(std::move(cam));
+    (void)g.add_edge(EdgeKind::Contains, s.root, cam_id);
 
     // The R×R grid of small spheres (each with its own Lambertian Material).
     std::vector<std::vector<NodeId>> grid(
@@ -222,13 +223,15 @@ LatticeScene build_lattice_graph(int R) {
         }
     }
 
-    // An overhead area light covering the whole grid.
+    // An overhead area light spanning the whole grid (x,z ∈ [-1, R]) so the far
+    // lattice is lit, not just the near corner.
     const NodeId light_id = g.alloc_node_id();
     Light light{light_id, LightKind::Area, std::string("emit0")};
     light.emission = Vec3{6.0f, 6.0f, 6.0f};
+    const f32 span = static_cast<f32>(R) + 1.0f;
     light.geometry = QuadLocal{Vec3{-1.0f, static_cast<f32>(R) * 1.5f, -1.0f},
-                               Vec3{2.0f, 0.0f, 0.0f},
-                               Vec3{0.0f, 0.0f, 2.0f}};
+                               Vec3{span, 0.0f, 0.0f},
+                               Vec3{0.0f, 0.0f, span}};
     g.insert_node(std::move(light));
     (void)g.add_edge(EdgeKind::Contains, s.root, light_id);
     return s;
@@ -497,7 +500,11 @@ int run_wave(const std::string& outdir) {
 
     // Phase 1: the ripple expands from the kicked centre node.
     for (int i = 0; i < N; ++i) {
-        (void)controller.step(kDt);
+        if (auto sr = controller.step(kDt); !sr.has_value()) {
+            std::fprintf(stderr, "aleph_edit[wave]: step failed (StepError %d)\n",
+                         static_cast<int>(sr.error()));
+            return 1;
+        }
         if (!dump()) return 1;
     }
 
@@ -515,7 +522,11 @@ int run_wave(const std::string& outdir) {
 
     // Phase 2: the wave continues, now re-routing around the deleted node.
     for (int i = 0; i < N; ++i) {
-        (void)controller.step(kDt);
+        if (auto sr = controller.step(kDt); !sr.has_value()) {
+            std::fprintf(stderr, "aleph_edit[wave]: step failed (StepError %d)\n",
+                         static_cast<int>(sr.error()));
+            return 1;
+        }
         if (!dump()) return 1;
     }
 
