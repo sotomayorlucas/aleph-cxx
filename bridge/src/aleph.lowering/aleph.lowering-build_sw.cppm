@@ -144,7 +144,10 @@ inline constexpr aleph::math::f32 kLightScale = 0.50f;
 
 // Fixed normalisation scale for the field colormap (build_sw_scene's optional
 // per-entity φ overrides the Lambert vcol with colormap_diverging(φ, kPhiScale)).
-inline constexpr double kPhiScale = 1.0;
+// Tuned to the wave demo's amplitude (peak |φ| ≈ 0.75): at 0.4 the propagating
+// crests saturate red and the troughs (negative φ) read blue, so the ripple is
+// vivid rather than near-white. Frame-independent (fixed) → deterministic.
+inline constexpr double kPhiScale = 0.4;
 
 // Smooth inverse-square-ish falloff `1/(1 + kFall·dist²)`: behaves like 1/dist²
 // far away but is bounded near a light (never blows up) and, with a small kFall,
