@@ -114,16 +114,16 @@ TwoPrims make_two_prims() {
 }
 
 // Bit-equal comparison of two faces' geometry/uv/shade payload (determinism
-// oracle). Includes `albedo` so the per-face FLAT-LIT shade build_sw bakes from
-// the scene lights is pinned deterministic too (same LoweredScene => byte-equal
-// baked colour), not just the geometry.
+// oracle). Includes the per-vertex `vcol` so the GOURAUD shade build_sw bakes
+// from the scene lights is pinned deterministic too (same LoweredScene =>
+// byte-equal baked colours), not just the geometry.
 [[nodiscard]] bool same_face(const aleph::render::sw::Face& a,
                              const aleph::render::sw::Face& b) {
     for (std::size_t k = 0; k < 4; ++k) {
         if (!(a.verts[k] == b.verts[k])) return false;
         if (!(a.uvs[k]   == b.uvs[k]))   return false;
+        if (!(a.vcol[k]  == b.vcol[k]))  return false;
     }
-    if (!(a.albedo == b.albedo)) return false;
     return true;
 }
 

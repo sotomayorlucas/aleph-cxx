@@ -23,10 +23,15 @@ struct Face {
     std::array<aleph::math::Vec2, 4> uvs;
     TexSampleFn  tex;
     aleph::math::u32 lightmap_id;
-    // Flat per-face tint, modulated onto the sampled texel in rast_scan. Defaults
-    // to white so existing textured faces are byte-unchanged; build_sw uses it to
-    // paint flat material colour (no fragile UV-packed colour, no placeholder lm).
-    aleph::math::Vec3 albedo{1.0f, 1.0f, 1.0f};
+    // Per-vertex tint (Gouraud), interpolated across the triangle and modulated
+    // onto the sampled texel in rast_scan. Defaults to white so existing textured
+    // faces are byte-unchanged. build_sw bakes a per-vertex flat-Lambert shade
+    // here: equal at all 4 verts => flat shading (floors/quads); distinct
+    // per-vertex outward normals => smooth shading (spheres, no facets). No
+    // fragile UV-packed colour and no placeholder lightmap.
+    std::array<aleph::math::Vec3, 4> vcol{
+        aleph::math::Vec3{1.0f, 1.0f, 1.0f}, aleph::math::Vec3{1.0f, 1.0f, 1.0f},
+        aleph::math::Vec3{1.0f, 1.0f, 1.0f}, aleph::math::Vec3{1.0f, 1.0f, 1.0f}};
 };
 
 struct SceneRT {

@@ -32,7 +32,6 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
                                 ScreenVert v0, ScreenVert v1, ScreenVert v2,
                                 TexSampleFn tex,
                                 const Lightmap* lm,
-                                aleph::math::Vec3 albedo,
                                 int y_clip_min, int y_clip_max) noexcept {
     const aleph::math::f32 signed_area =
         (v1.x - v0.x) * (v2.y - v0.y) - (v1.y - v0.y) * (v2.x - v0.x);
@@ -56,6 +55,9 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
         aleph::math::f32 inv_w_dx, inv_w_dy, inv_w_origin;
         aleph::math::f32 u_w_dx,   u_w_dy,   u_w_origin;
         aleph::math::f32 v_w_dx,   v_w_dy,   v_w_origin;
+        aleph::math::f32 r_dx, r_dy, r_org;   // per-vertex Gouraud colour (affine)
+        aleph::math::f32 g_dx, g_dy, g_org;
+        aleph::math::f32 b_dx, b_dy, b_org;
     } g{};
 
     auto compute_grad = [&](aleph::math::f32 a0, aleph::math::f32 a1, aleph::math::f32 a2,
@@ -69,6 +71,11 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
     compute_grad(iw0, iw1, iw2, g.inv_w_dx, g.inv_w_dy, g.inv_w_origin);
     compute_grad(uw0, uw1, uw2, g.u_w_dx,   g.u_w_dy,   g.u_w_origin);
     compute_grad(vw0, vw1, vw2, g.v_w_dx,   g.v_w_dy,   g.v_w_origin);
+    // Gouraud colour: interpolate the per-vertex tint affinely (screen-linear) in
+    // each channel. Equal verts => flat; distinct verts => smooth (no facets).
+    compute_grad(v0.col.x, v1.col.x, v2.col.x, g.r_dx, g.r_dy, g.r_org);
+    compute_grad(v0.col.y, v1.col.y, v2.col.y, g.g_dx, g.g_dy, g.g_org);
+    compute_grad(v0.col.z, v1.col.z, v2.col.z, g.b_dx, g.b_dy, g.b_org);
     // Depth = 1/w (view-linear), which is exactly affine in screen space and the
     // same quantity we interpolate for perspective correction. NEARER fragments
     // have LARGER 1/w. Per-pixel z-test resolves occlusion the face-center
@@ -140,6 +147,11 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
                         + static_cast<std::size_t>(px);
                     // 1/w depth: nearer fragment has the LARGER value.
                     if (zw_pix <= depth[di]) { zw_pix += g.inv_w_dx; tu += du; tv += dv; continue; }
+                    const aleph::math::f32 pxc = static_cast<aleph::math::f32>(px) + 0.5f;
+                    const aleph::math::Vec3 tint{
+                        g.r_org + pxc * g.r_dx + ys * g.r_dy,
+                        g.g_org + pxc * g.g_dx + ys * g.g_dy,
+                        g.b_org + pxc * g.b_dx + ys * g.b_dy};
                     const aleph::math::u32 base = tex(tu, tv);
                     aleph::math::Vec3 color = detail::argb_to_linear(base);
                     if (lm) {
@@ -154,9 +166,9 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
                         color = aleph::math::Vec3{
                             color.x * mod_color.x, color.y * mod_color.y, color.z * mod_color.z};
                     }
-                    color = aleph::math::Vec3{color.x * albedo.x,
-                                              color.y * albedo.y,
-                                              color.z * albedo.z};
+                    color = aleph::math::Vec3{color.x * tint.x,
+                                              color.y * tint.y,
+                                              color.z * tint.z};
                     depth[di] = zw_pix;
                     fb.pixels[yy * fb.stride_pixels + px] = color;
                     zw_pix += g.inv_w_dx; tu += du; tv += dv;

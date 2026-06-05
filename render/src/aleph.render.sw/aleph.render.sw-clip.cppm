@@ -11,11 +11,13 @@ export namespace aleph::render::sw {
 struct ClipVert {
     aleph::math::f32 x, y, z, w;
     aleph::math::f32 u, v;
+    aleph::math::Vec3 col{1.0f, 1.0f, 1.0f};  // per-vertex Gouraud colour
 };
 
 struct ScreenVert {
     aleph::math::f32 x, y, z;
     aleph::math::f32 u, v, inv_w;
+    aleph::math::Vec3 col{1.0f, 1.0f, 1.0f};  // per-vertex Gouraud colour
 };
 
 namespace detail {
@@ -28,6 +30,7 @@ inline ClipVert lerp_clip(ClipVert a, ClipVert b, aleph::math::f32 t) noexcept {
         a.w + (b.w - a.w) * t,
         a.u + (b.u - a.u) * t,
         a.v + (b.v - a.v) * t,
+        aleph::math::lerp(a.col, b.col, t),
     };
 }
 

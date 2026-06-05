@@ -46,6 +46,20 @@ rasterizing `controller.raster_scene()` directly in both run_headless and run_li
 
 ## T4 — [note] render.sw lacks back-face culling
 `render/src/aleph.render.sw/aleph.render.sw-rasterize.cppm` sorts by `dist_sq` + uses a depth buffer but never culls back faces. Adding culling helps T1 and is a perf win on closed meshes (spheres/cubes). Keep an opt-out for double-sided faces (quads/floor) if needed.
+NOTE (2026-06-05): there IS a screen-space cull (`if (signed_area < 0) return;` in rast_scan); the "depth buffer" was the bug — see T5.
+
+## T5 — [BUG, critical] Raster buried any object near the camera target — ✅ FIXED (2026-06-05)
+Symptom: a sphere resting on the floor showed only its TOP CAP in raster (nav) mode; the path-trace of the SAME scene+camera showed the full sphere grounded with a contact shadow. Off-centre objects (a second sphere) looked fine — only objects near the look-at target sank.
+DIAGNOSIS (headless render + depth dump + numeric reprojection): the raster MVP (`perspective*look_at`) and the PT camera (`make_camera`) project identically (sphere top matched to the pixel), so NOT a camera bug; the floor far edge projected ~50px too high, occluding the sphere.
+ROOT CAUSE: hidden-surface removal was a coverage / C-buffer (`SpanBuffer`) driven by a front-to-back painter sort on **face-centre depth**. The floor quad's near triangle (centroid in front of the sphere) drew first, marked the sphere's lower-half pixels covered, and the sphere's spans were then SKIPPED before any depth compare. Face-centre order is simply wrong per-pixel for a large triangle. The passed-in depth buffer was unused (`(void)depth`).
+FIX: real per-pixel z-test in `rast_scan` using **1/w** (view-linear) depth — the value already interpolated for perspective correction, exactly affine in screen space and free of the NDC-z near-plane precision crunch (which collapsed everything past a few units to ~1.0 and z-fought). Nearer = larger 1/w; buffers clear to 0 (far). `SpanBuffer` dropped its coverage HSR → thin span clamp. Callers (aleph_edit headless+live, aleph_sw) clear the z-buffer per frame. Files: `aleph.render.sw-rast_scan.cppm`, `-span_buffer.cppm`, `-rasterize.cppm`, `apps/aleph_{edit,sw}/main.cpp`, `tests/render/test_sw_{rasterize,rasterize_full,span_buffer}.cpp`.
+
+## T6 — [polish] Faceted spheres + flat floor → GOURAUD shading — ✅ FIXED (2026-06-05)
+The flat per-face shade made spheres visibly faceted (12×16) and the floor one flat tone.
+FIX: `Face` now carries a per-vertex `vcol[4]` (was a single flat `albedo`); `clip`/`ScreenVert` thread it through near-plane clipping, and `rast_scan` interpolates it (affine Gouraud, 3 channels) onto the white texel. `build_sw` bakes the Lambert shade PER VERTEX: spheres use each vertex's exact outward normal (smooth, no facets); quads/tris share the flat face normal but, shaded at each corner, pick up a smooth distance-falloff gradient across the floor. Tuned `kAmbient` 0.20→0.45 (stands in for the bright sky dome the tracer integrates) and `kLightScale` 0.28→0.50 so the raster floor (~174) approaches the PT floor (~204) without washing out the sphere terminators. Pinned deterministic by `test_build_sw` comparing `vcol`. File: `aleph.lowering-build_sw.cppm`.
+
+## Method — `tools/visual_review.sh`
+Render the headless Op script and tile RASTER (top) vs PATH-TRACE (bottom) into one labeled contact sheet (`_contact.png`) for eyeballing visual progress; `ALEPH_DUMP_DEPTH=1` adds a depth sheet (1/w, near=bright) for occlusion debugging.
 
 ---
 Note: all of the above are **raster-navigation-only**; the authoritative graph→lower→path-trace pipeline is correct and verified (ctest 19/19). These are visual-quality issues in the fast preview, not correctness of the engine.

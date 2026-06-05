@@ -35,6 +35,7 @@ inline ScreenVert to_screen(ClipVert cv, int W, int H) noexcept {
         cv.z * invw,
         cv.u, cv.v,
         invw,
+        cv.col,
     };
 }
 
@@ -65,7 +66,8 @@ inline void rasterize(const SceneRT& sr, aleph::math::Mat4 mvp,
             const auto& uv = sr.faces[i].uvs[k];
             const aleph::math::Vec4 v{vt.x, vt.y, vt.z, 1.0f};
             const aleph::math::Vec4 cp = mvp * v;
-            clip_verts[i][k] = ClipVert{cp.x, cp.y, cp.z, cp.w, uv.x, uv.y};
+            clip_verts[i][k] =
+                ClipVert{cp.x, cp.y, cp.z, cp.w, uv.x, uv.y, sr.faces[i].vcol[k]};
         }
     }
 
@@ -93,7 +95,7 @@ inline void rasterize(const SceneRT& sr, aleph::math::Mat4 mvp,
                     const ScreenVert s0 = detail::to_screen(clipped[k*3 + 0], fb.width, fb.height);
                     const ScreenVert s1 = detail::to_screen(clipped[k*3 + 1], fb.width, fb.height);
                     const ScreenVert s2 = detail::to_screen(clipped[k*3 + 2], fb.width, fb.height);
-                    rast_scan_textured(fb, depth, sb, s0, s1, s2, face.tex, lm, face.albedo,
+                    rast_scan_textured(fb, depth, sb, s0, s1, s2, face.tex, lm,
                                         y_start, y_end);
                 }
             }

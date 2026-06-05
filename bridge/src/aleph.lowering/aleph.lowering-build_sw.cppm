@@ -26,19 +26,22 @@
 // `aleph_lowering` additionally links `aleph_render_sw`; `render.sw`/`render.rt`
 // still never import graph (this file is the one place the two meet).
 //
-// COLOR + SHADING: a `render::sw::Face` carries a flat `albedo` tint that the
-// rasterizer modulates onto the per-pixel `TexSampleFn(u,v)` sample (see
-// :rast_scan). We paint each face by baking a cheap FLAT LAMBERT shade —
+// COLOR + SHADING: a `render::sw::Face` carries a PER-VERTEX `vcol[4]` tint the
+// rasterizer interpolates (Gouraud) and modulates onto the per-pixel
+// `TexSampleFn(u,v)` sample (see :rast_scan). We bake a cheap LAMBERT shade —
 // ambient + Σ_lights albedo·emit·max(0,N·L)·atten + self-emission (see
-// `shade_face`) — into `Face::albedo`, paired with a constant-white texture
-// `tex_white` so the rendered colour is exactly `white * lit == lit` at every
-// covered pixel. Lights come from `LoweredScene::lights`. This makes the fast
-// preview read as the same scene as the path tracer (a lit floor, a shaded
-// sphere) without shadows/GI (the tracer's job). (An earlier scheme packed the
-// albedo into the face UVs as values up to 65535 and decoded per pixel; the
-// rasterizer's perspective interpolation of those large UVs lost precision on
-// sliver/grazing triangles and flipped high bits -> stray wrong colours. A flat
-// colour field is interpolation-proof and trivially deterministic.)
+// `shade_face`) — at EACH VERTEX, paired with a constant-white texture
+// `tex_white` so the rendered colour is exactly `white * lit == lit`. Spheres
+// shade each vertex with its exact outward normal, so the interpolated result
+// reads round (no facets); quads/tris share a flat face normal but, shaded at
+// each corner, still pick up a smooth distance-falloff gradient across a big
+// floor. Lights come from `LoweredScene::lights`. This makes the fast preview
+// read as the same scene as the path tracer (a lit, graded floor, a smoothly
+// shaded sphere) without shadows/GI (the tracer's job). (An earlier scheme
+// packed the albedo into the face UVs as values up to 65535 and decoded per
+// pixel; the rasterizer's perspective interpolation of those large UVs lost
+// precision on sliver/grazing triangles and flipped high bits -> stray wrong
+// colours. A baked colour field is interpolation-safe and deterministic.)
 //
 // DETERMINISM (SPEC §7): faces are emitted in `entities` order; the sphere
 // tessellation walks rings/sectors in fixed order with fixed counts and pure f32
@@ -115,12 +118,12 @@ tex_white(aleph::math::f32 /*u*/, aleph::math::f32 /*v*/) noexcept {
 
 // Ambient floor so faces facing away from every light read dim, not pure black
 // (stands in for the sky/indirect light the path tracer integrates).
-inline constexpr aleph::math::f32 kAmbient = 0.20f;
+inline constexpr aleph::math::f32 kAmbient = 0.45f;
 
 // `material.emit` is an AREA-LIGHT radiance tuned for the path tracer (which
 // integrates it over solid angle + bounces). Driving a flat point-light model
 // with it directly over-brightens, so scale it to a sane preview intensity.
-inline constexpr aleph::math::f32 kLightScale = 0.28f;
+inline constexpr aleph::math::f32 kLightScale = 0.50f;
 
 // Smooth inverse-square-ish falloff `1/(1 + kFall·dist²)`: behaves like 1/dist²
 // far away but is bounded near a light (never blows up) and, with a small kFall,
@@ -146,15 +149,15 @@ light_center(const aleph::types::GeometryPayload& g) noexcept {
         g);
 }
 
-// Flat Lambert shade of one triangle face at `centroid` with face `normal`
-// (need not be unit). `two_sided` (quads/tris, whose winding-derived normal
-// sign is arbitrary) shades by |N·L| so a floor lit from either side reads as
-// lit; spheres pass their exact outward normal with two_sided=false for a
-// proper light/dark terminator. `self_emit` makes emissive surfaces glow in
+// Lambert shade of a surface `point` with `normal` (need not be unit).
+// `two_sided` (quads/tris, whose winding-derived normal sign is arbitrary)
+// shades by |N·L| so a floor lit from either side reads as lit; spheres pass
+// their exact per-vertex outward normal with two_sided=false for a proper
+// light/dark terminator. Called per VERTEX (Gouraud); the rasterizer interpolates. `self_emit` makes emissive surfaces glow in
 // the preview. Returns linear HDR (the Film's gamma tonemap applies, same as
 // the path-trace path); only negatives are excluded.
 [[nodiscard]] inline aleph::math::Vec3
-shade_face(aleph::math::Vec3 centroid, aleph::math::Vec3 normal,
+shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
            aleph::math::Vec3 base_albedo, aleph::math::Vec3 self_emit,
            const std::vector<LoweredEntity>& lights, bool two_sided) noexcept {
     const aleph::math::f32 nlen = aleph::math::length(normal);
@@ -164,7 +167,7 @@ shade_face(aleph::math::Vec3 centroid, aleph::math::Vec3 normal,
 
     aleph::math::Vec3 lit = base_albedo * kAmbient + self_emit;
     for (const LoweredEntity& L : lights) {
-        const aleph::math::Vec3 d = light_center(L.world_geometry) - centroid;
+        const aleph::math::Vec3 d = light_center(L.world_geometry) - point;
         const aleph::math::f32 dist_sq = aleph::math::dot(d, d);
         if (dist_sq < 1e-6f) continue;
         const aleph::math::f32 ndl0 = aleph::math::dot(N, d) / std::sqrt(dist_sq);
@@ -187,7 +190,7 @@ shade_face(aleph::math::Vec3 centroid, aleph::math::Vec3 normal,
 // grows in lockstep with faces (1 Face == 1 triangle == 1 source).
 inline void push_tri(SwBuild& out,
                      aleph::math::Vec3 a, aleph::math::Vec3 b, aleph::math::Vec3 c,
-                     aleph::math::Vec3 albedo,
+                     aleph::math::Vec3 ca, aleph::math::Vec3 cb, aleph::math::Vec3 cc,
                      aleph::types::NodeId source) {
     aleph::render::sw::Face f{};
     f.verts = {a, b, c, c};
@@ -195,7 +198,7 @@ inline void push_tri(SwBuild& out,
              aleph::math::Vec2{0.0f, 0.0f}, aleph::math::Vec2{0.0f, 0.0f}};
     f.tex = &tex_white;
     f.lightmap_id = 0xFFFFFFFFu;  // no lightmap
-    f.albedo = albedo;
+    f.vcol = {ca, cb, cc, cc};    // Gouraud: per-vertex lit colour (verts[3]==verts[2])
     out.scene.faces.push_back(f);
     out.face_source.push_back(source);
 }
@@ -211,12 +214,16 @@ inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
     const aleph::math::Vec3 p1 = g.q + g.u;
     const aleph::math::Vec3 p2 = g.q + g.u + g.v;
     const aleph::math::Vec3 p3 = g.q + g.v;
-    // Both triangles are coplanar -> one shared (two-sided) normal.
+    // Both triangles are coplanar -> one shared (two-sided) normal. Shade PER
+    // VERTEX so a large quad (the floor) gets a smooth distance-falloff gradient
+    // across it instead of one flat tone.
     const aleph::math::Vec3 n = aleph::math::cross(p1 - p0, p2 - p0);
-    const aleph::math::Vec3 c0 = (p0 + p1 + p2) * (1.0f / 3.0f);
-    const aleph::math::Vec3 c1 = (p0 + p2 + p3) * (1.0f / 3.0f);
-    push_tri(out, p0, p1, p2, shade_face(c0, n, albedo, emit, lights, true), source);
-    push_tri(out, p0, p2, p3, shade_face(c1, n, albedo, emit, lights, true), source);
+    const aleph::math::Vec3 s0 = shade_face(p0, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 s1 = shade_face(p1, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 s2 = shade_face(p2, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 s3 = shade_face(p3, n, albedo, emit, lights, true);
+    push_tri(out, p0, p1, p2, s0, s1, s2, source);
+    push_tri(out, p0, p2, p3, s0, s2, s3, source);
 }
 
 // TriLocal -> 1 Face (the single triangle {a,b,c}).
@@ -225,8 +232,10 @@ inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
                      const std::vector<LoweredEntity>& lights,
                      aleph::types::NodeId source) {
     const aleph::math::Vec3 n = aleph::math::cross(g.b - g.a, g.c - g.a);
-    const aleph::math::Vec3 c = (g.a + g.b + g.c) * (1.0f / 3.0f);
-    push_tri(out, g.a, g.b, g.c, shade_face(c, n, albedo, emit, lights, true), source);
+    push_tri(out, g.a, g.b, g.c,
+             shade_face(g.a, n, albedo, emit, lights, true),
+             shade_face(g.b, n, albedo, emit, lights, true),
+             shade_face(g.c, n, albedo, emit, lights, true), source);
 }
 
 // SphereLocal -> a deterministic UV sphere of RINGS x SECTORS quad cells, each
@@ -269,13 +278,15 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
             const aleph::math::Vec3 b = on_sphere(ring + 1, sector);
             const aleph::math::Vec3 c = on_sphere(ring + 1, sector + 1);
             const aleph::math::Vec3 d = on_sphere(ring,     sector + 1);
-            // Exact outward normals (centroid - centre) -> a real terminator.
-            const aleph::math::Vec3 c0 = (a + b + c) * (1.0f / 3.0f);
-            const aleph::math::Vec3 c1 = (a + c + d) * (1.0f / 3.0f);
-            push_tri(out, a, b, c,
-                     shade_face(c0, c0 - g.center, albedo, emit, lights, false), source);
-            push_tri(out, a, c, d,
-                     shade_face(c1, c1 - g.center, albedo, emit, lights, false), source);
+            // SMOOTH (Gouraud) shading: shade each vertex with its EXACT outward
+            // normal (vertex - centre); the rasterizer interpolates the per-vertex
+            // colours across the cell so the sphere reads round, not faceted.
+            const aleph::math::Vec3 sa = shade_face(a, a - g.center, albedo, emit, lights, false);
+            const aleph::math::Vec3 sb = shade_face(b, b - g.center, albedo, emit, lights, false);
+            const aleph::math::Vec3 sc = shade_face(c, c - g.center, albedo, emit, lights, false);
+            const aleph::math::Vec3 sd = shade_face(d, d - g.center, albedo, emit, lights, false);
+            push_tri(out, a, b, c, sa, sb, sc, source);
+            push_tri(out, a, c, d, sa, sc, sd, source);
         }
     }
 }
