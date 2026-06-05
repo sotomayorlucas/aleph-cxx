@@ -252,7 +252,18 @@ public:
         //     the committed graph (survivors keep φ, new nodes start at 0), then
         //     rebuild both backends + the maps (which re-bakes φ→vcol).
         prev_ = std::move(*lowered);
-        if (sim_enabled_) rebuild_operator_and_reproject();
+        if (sim_enabled_) {
+            // Δ depends only on the graph TOPOLOGY (Mesh nodes + Adjacent edges),
+            // so skip the O(n²)+Wasserstein `build_laplacian` for attribute-only
+            // ops (SetMaterial/SetTransform leave the skeleton — and thus φ's
+            // indexing — intact). The RewriteRecord's create/delete sets are the
+            // exact topology delta.
+            const bool topo_changed = !rec->created_nodes.empty()
+                                   || !rec->deleted_nodes.empty()
+                                   || !rec->created_edges.empty()
+                                   || !rec->deleted_edges.empty();
+            if (topo_changed) rebuild_operator_and_reproject();
+        }
         rebuild_backends_from_prev();
         return {};
     }
@@ -354,12 +365,14 @@ private:
     // the lowered IR materializes into both renderer backends.
     void rebuild_backends_from_prev() {
         // Software rasterizer faces + face→NodeId map (SPEC §3.1). When the wave
-        // sim is enabled AND the field's order is 1:1 with the lowered entities
-        // (mesh-only scene; no extra Δ nodes), gather a per-entity φ aligned to
-        // `prev_.entities` and feed it so build_sw_scene colormaps φ into `vcol`.
-        // Otherwise (sim off, or a scene whose node_order ≠ entities) we pass
-        // nullptr and the build is BYTE-IDENTICAL to the no-physics path.
-        if (sim_enabled_ && field_.size() == prev_.entities.size()) {
+        // sim is enabled, gather a per-entity φ aligned to `prev_.entities` (each
+        // entity looked up in the field by its `source` NodeId) and feed it so
+        // build_sw_scene colormaps φ into `vcol`. Entities with NO field entry —
+        // e.g. a mesh with no Adjacent edge, so it is not a Δ vertex — map to
+        // φ=0 (the colormap's neutral white), so the wave still colours the rest
+        // of the scene rather than vanishing for ALL entities. With sim OFF we
+        // pass nullptr and the build is BYTE-IDENTICAL to the no-physics path.
+        if (sim_enabled_) {
             std::vector<double> phi_entity(prev_.entities.size(), 0.0);
             for (std::size_t i = 0; i < prev_.entities.size(); ++i) {
                 const aleph::types::NodeId src = prev_.entities[i].source;
