@@ -492,7 +492,6 @@ int run_wave(const std::string& outdir) {
     aleph::threads::Pool pool(thread_count());
     std::vector<Vec3> film_px(static_cast<std::size_t>(W) * H);
     aleph::render::common::Film film{film_px.data(), W, H, W};
-    std::vector<f32> depth(static_cast<std::size_t>(W) * H, 0.0f);
 
     // SSAA scratch: render raster at kSSAA× then box-downsample into `film`.
     std::vector<Vec3> ss_px(static_cast<std::size_t>(kSSAA) * kSSAA * W * H);
@@ -607,7 +606,12 @@ int run_live(bool wave_demo = false) {
 
     std::vector<Vec3> film_px(static_cast<std::size_t>(W) * H);
     aleph::render::common::Film film{film_px.data(), W, H, W};
-    std::vector<f32> depth(static_cast<std::size_t>(W) * H, 0.0f);
+
+    // SSAA scratch: render the 3D scene at kSSAA× then box-downsample into `film`.
+    // The UI overlay is drawn on `film` at 1× AFTER the downsample (never SSAA'd).
+    std::vector<Vec3> ss_px(static_cast<std::size_t>(kSSAA) * kSSAA * W * H);
+    std::vector<f32> ss_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
+    aleph::render::common::Film ss_film{ss_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
 
     // Hybrid-mode state. We path-trace progressively (accumulate spp) only after
     // the input has been idle for kIdleMs; any event resets to raster.
@@ -784,11 +788,14 @@ int run_live(bool wave_demo = false) {
             if (wave_demo) (void)controller.step(kWaveDt);
 
             // ── RASTER: rasterize the editor's view + UI overlay into `film`. ──
-            clear_sky(film);
-            std::fill(depth.begin(), depth.end(), 0.0f);
+            // Supersample the 3D scene at kSSAA× then box-downsample (linear)
+            // into the 1× `film`; the UI overlay below stays at 1×.
+            clear_sky(ss_film);
+            std::fill(ss_depth.begin(), ss_depth.end(), 0.0f);
             aleph::render::sw::rasterize(controller.raster_scene(),
-                                         orbit_mvp(controller.camera(), W, H),
-                                         film, depth, pool);
+                                         orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
+                                         ss_film, ss_depth, pool);
+            aleph::render::sw::downsample_box(ss_film, film, kSSAA);
 
             // UI panel: selection + a material color slider that emits SetMaterial.
             const bool ui_mouse_pressed = left_down && !prev_left;
