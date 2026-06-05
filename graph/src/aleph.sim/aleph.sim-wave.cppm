@@ -21,6 +21,10 @@ struct WaveParams {
     f64 damping = 0.999;   // per-step multiplicative velocity damp
 };
 
+// Error taxonomy for the stepper. NOTE: `CflViolation` is NOT emitted by `step`
+// (which would need an O(n²) Gershgorin scan every frame); it is the code a caller
+// returns when its own `cfl_ok` pre-check fails. `step` instead catches a blow-up
+// post-hoc via `NonFinite`.
 enum class StepError { EmptyField, DimMismatch, CflViolation, NonFinite };
 
 struct WaveStepper {
@@ -41,6 +45,11 @@ struct WaveStepper {
     }
 
     // One explicit symplectic-Euler ("Verlet") sub-step of φ̈ = −c²Δφ.
+    //
+    // CONTRACT: on a StepError::NonFinite return the field is left PARTIALLY
+    // updated (the diverging entry and everything before it stepped, the rest
+    // stale) — discard it; do not re-step. The editor controller honours this by
+    // bailing before it re-bakes/render and by re-zeroing on the next enable_sim.
     [[nodiscard]] std::expected<void, StepError>
     step(ScalarField& field, const DMatrix& delta, f64 dt) const noexcept {
         const std::size_t n = field.size();
@@ -53,6 +62,10 @@ struct WaveStepper {
             delta.matvec(std::span<const f64>(field.phi.data(), n));
         const f64 c2 = params.c * params.c;
         for (std::size_t i = 0; i < n; ++i) {
+            // Damp-then-force ordering is a faithful port of the Rust reference
+            // (aleph-playground wave.rs: `phi_dot = phi_dot*damp + dt*c²*lap`);
+            // it is intentional. (Force-then-damp is an equally valid convention
+            // differing only by scaling the force term by `damping` ≈ 0.1%/step.)
             field.phi_dot[i] = params.damping * field.phi_dot[i] - dt * c2 * lap[i];
             field.phi[i]    += dt * field.phi_dot[i];
             if (!std::isfinite(field.phi[i]) || !std::isfinite(field.phi_dot[i]))
