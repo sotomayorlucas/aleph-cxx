@@ -21,7 +21,7 @@ TEST_CASE("rasterize: SceneRT with one floor → film has non-magenta pixels") {
     aleph::alloc::Arena arena{fbuf, sizeof(fbuf)};
     aleph::render::common::Film film = aleph::render::common::film_alloc(arena, 32, 32);
     for (int i = 0; i < 32 * 32; ++i) film.pixels[i] = aleph::math::Vec3{1, 0, 1};
-    std::vector<aleph::math::f32> depth(32 * 32, 1.0f);
+    std::vector<aleph::math::f32> depth(32 * 32, 0.0f);  // 1/w far = 0 (nearer = larger)
 
     const aleph::math::Mat4 view = aleph::math::Mat4::look_at(
         aleph::math::Vec3{0, 2, 5}, aleph::math::Vec3{0, 0, 0}, aleph::math::Vec3{0, 1, 0});

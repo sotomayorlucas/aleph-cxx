@@ -235,7 +235,7 @@ int run_headless(const std::string& outdir) {
     // Film + depth buffers (heap — W*H*sizeof(Vec3) is modest).
     std::vector<Vec3> film_px(static_cast<std::size_t>(W) * H);
     aleph::render::common::Film film{film_px.data(), W, H, W};
-    std::vector<f32> depth(static_cast<std::size_t>(W) * H, 1.0f);
+    std::vector<f32> depth(static_cast<std::size_t>(W) * H, 0.0f);
 
     // Render the controller's current state to two PPMs (raster + path-trace).
     int step_no = 0;
@@ -244,7 +244,7 @@ int run_headless(const std::string& outdir) {
         // (lightmap_id == 0xFFFFFFFF) and a baked flat-lit albedo, so the
         // controller's SceneRT rasterizes directly (no per-face fixup needed).
         clear_sky(film);
-        std::fill(depth.begin(), depth.end(), 1.0f);
+        std::fill(depth.begin(), depth.end(), 0.0f);
         aleph::render::sw::rasterize(controller.raster_scene(),
                                      orbit_mvp(controller.camera(), W, H),
                                      film, depth, pool);
@@ -253,6 +253,17 @@ int run_headless(const std::string& outdir) {
         if (!write_ppm(rp.c_str(), film)) {
             std::fprintf(stderr, "aleph_edit: cannot write %s\n", rp.c_str());
             return false;
+        }
+        if (std::getenv("ALEPH_DUMP_DEPTH") != nullptr) {
+            std::vector<Vec3> dv(static_cast<std::size_t>(W) * H);
+            for (std::size_t i = 0; i < dv.size(); ++i) {
+                const f32 d = std::min(1.0f, depth[i] * 3.0f);  // 1/w, near=bright
+                dv[i] = Vec3{d, d, d};
+            }
+            aleph::render::common::Film df{dv.data(), W, H, W};
+            std::string dp = outdir + "/step" + std::to_string(step_no) + "_" + label
+                           + "_depth.ppm";
+            (void)write_ppm(dp.c_str(), df);
         }
 
         // (2) Path-trace pass of the SAME lowered scene under the SAME pose.
@@ -368,7 +379,7 @@ int run_live() {
 
     std::vector<Vec3> film_px(static_cast<std::size_t>(W) * H);
     aleph::render::common::Film film{film_px.data(), W, H, W};
-    std::vector<f32> depth(static_cast<std::size_t>(W) * H, 1.0f);
+    std::vector<f32> depth(static_cast<std::size_t>(W) * H, 0.0f);
 
     // Hybrid-mode state. We path-trace progressively (accumulate spp) only after
     // the input has been idle for kIdleMs; any event resets to raster.
@@ -535,7 +546,7 @@ int run_live() {
 
             // ── RASTER: rasterize the editor's view + UI overlay into `film`. ──
             clear_sky(film);
-            std::fill(depth.begin(), depth.end(), 1.0f);
+            std::fill(depth.begin(), depth.end(), 0.0f);
             aleph::render::sw::rasterize(controller.raster_scene(),
                                          orbit_mvp(controller.camera(), W, H),
                                          film, depth, pool);

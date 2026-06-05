@@ -12,7 +12,7 @@ TEST_CASE("rast_scan_textured: writes some pixels for a centered triangle") {
     aleph::alloc::Arena arena{fbuf, sizeof(fbuf)};
     aleph::render::common::Film color = aleph::render::common::film_alloc(arena, 16, 16);
     for (int i = 0; i < 16 * 16; ++i) color.pixels[i] = aleph::math::Vec3{1, 0, 1};
-    std::vector<aleph::math::f32> depth(16 * 16, 1.0f);
+    std::vector<aleph::math::f32> depth(16 * 16, 0.0f);
     SpanBuffer sb(16, 16);
 
     ScreenVert v0{2.0f,  2.0f, 0.0f, 0, 0, 1.0f};

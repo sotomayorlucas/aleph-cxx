@@ -47,7 +47,7 @@ int main(int /*argc*/, char** /*argv*/) {
     alignas(64) static unsigned char film_scratch[W * H * sizeof(aleph::math::Vec3)];
     aleph::alloc::Arena film_arena{film_scratch, sizeof(film_scratch)};
     aleph::render::common::Film film = aleph::render::common::film_alloc(film_arena, W, H);
-    std::vector<aleph::math::f32> depth(W * H, 1.0f);
+    std::vector<aleph::math::f32> depth(W * H, 0.0f);
 
     bool running = true;
     int mouse_x = 0, mouse_y = 0;
@@ -95,6 +95,8 @@ int main(int /*argc*/, char** /*argv*/) {
             for (int x = 0; x < W; ++x)
                 film.pixels[y * film.stride_pixels + x] = c;
         }
+        // Clear the z-buffer (1/w depth; far = 0, nearer = larger) each frame.
+        std::fill(depth.begin(), depth.end(), 0.0f);
 
         const aleph::math::Vec3 eye = aleph::editor::orbit_eye(cam);
         const aleph::math::Mat4 view = aleph::math::Mat4::look_at(

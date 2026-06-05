@@ -69,6 +69,12 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
     compute_grad(iw0, iw1, iw2, g.inv_w_dx, g.inv_w_dy, g.inv_w_origin);
     compute_grad(uw0, uw1, uw2, g.u_w_dx,   g.u_w_dy,   g.u_w_origin);
     compute_grad(vw0, vw1, vw2, g.v_w_dx,   g.v_w_dy,   g.v_w_origin);
+    // Depth = 1/w (view-linear), which is exactly affine in screen space and the
+    // same quantity we interpolate for perspective correction. NEARER fragments
+    // have LARGER 1/w. Per-pixel z-test resolves occlusion the face-center
+    // painter sort cannot (e.g. a huge floor quad whose centroid ties the
+    // sphere's depth); 1/w avoids the near-plane precision crunch of NDC z, where
+    // everything past a few units collapses to ~1.0 and z-fights.
 
     const int y_top = static_cast<int>(std::ceil(v0.y));
     const int y_bot = static_cast<int>(std::ceil(v2.y));
@@ -124,7 +130,16 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
 
                 aleph::math::f32 tu = tu_left;
                 aleph::math::f32 tv = tv_left;
+                aleph::math::f32 zw_pix =
+                    g.inv_w_origin + (static_cast<aleph::math::f32>(x) + 0.5f) * g.inv_w_dx
+                    + ys * g.inv_w_dy;
                 for (int i = 0; i < len; ++i) {
+                    const int px = x + i;
+                    const std::size_t di =
+                        static_cast<std::size_t>(yy) * static_cast<std::size_t>(fb.width)
+                        + static_cast<std::size_t>(px);
+                    // 1/w depth: nearer fragment has the LARGER value.
+                    if (zw_pix <= depth[di]) { zw_pix += g.inv_w_dx; tu += du; tv += dv; continue; }
                     const aleph::math::u32 base = tex(tu, tv);
                     aleph::math::Vec3 color = detail::argb_to_linear(base);
                     if (lm) {
@@ -142,8 +157,9 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
                     color = aleph::math::Vec3{color.x * albedo.x,
                                               color.y * albedo.y,
                                               color.z * albedo.z};
-                    fb.pixels[yy * fb.stride_pixels + x + i] = color;
-                    tu += du; tv += dv;
+                    depth[di] = zw_pix;
+                    fb.pixels[yy * fb.stride_pixels + px] = color;
+                    zw_pix += g.inv_w_dx; tu += du; tv += dv;
                 }
                 tu_left = tu_right;
                 tv_left = tv_right;
@@ -151,7 +167,6 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
             }
         });
     }
-    (void)depth;
 }
 
 }  // namespace aleph::render::sw
