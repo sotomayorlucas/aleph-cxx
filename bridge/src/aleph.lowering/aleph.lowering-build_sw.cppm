@@ -13,7 +13,10 @@
 // face count equal to the SPEC triangle count and keeps `face_source` 1:1 with
 // `scene.faces`:
 //
-//   QuadLocal   -> 2 Faces (the quad's two triangles: {p0,p1,p2} and {p0,p2,p3})
+//   QuadLocal   -> 2*Nu*Nv Faces (tessellated into an Nu×Nv cell grid,
+//                  Nu=clamp(ceil(|u|/kCell),1,kMaxCells), each cell 2 triangles —
+//                  interior vertices give the floor a lighting gradient + receive
+//                  per-vertex contact shadows; was a flat 2-triangle quad)
 //   TriLocal    -> 1 Face  (the triangle {a,b,c})
 //   SphereLocal -> a deterministic low-res UV sphere: kSphereRings latitude bands
 //                  x kSphereSectors longitude divisions; each grid cell is one

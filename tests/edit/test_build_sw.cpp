@@ -24,7 +24,7 @@ import aleph.lowering;  // lower, build_sw_scene, SwBuild,
 // `face_source` vector giving the originating graph `NodeId` for each face —
 // the pick target the headless `EditorController` resolves against. Per SPEC
 // §3.1 each lowered primitive becomes faces:
-//   * QuadLocal   -> 2 faces
+//   * QuadLocal   -> 2*Nu*Nv faces (tessellated into an Nu×Nv cell grid)
 //   * TriLocal    -> 1 face
 //   * SphereLocal -> a low-res, fixed-resolution UV-sphere mesh of
 //                    `kSphereRings * kSphereSectors * 2` faces (each
@@ -34,7 +34,7 @@ import aleph.lowering;  // lower, build_sw_scene, SwBuild,
 // pins the SPEC §5.1 oracle:
 //   * `scene.faces.size() == face_source.size()` (the maps are parallel),
 //   * the sphere contributes `kSphereRings * kSphereSectors * 2` faces and the
-//     quad contributes 2,
+//     quad contributes `2 * Nu * Nv` (its tessellation),
 //   * every `face_source[i]` is the correct source entity NodeId (the sphere's
 //     faces all carry the sphere's NodeId, the quad's all carry the quad's),
 //   * the result is deterministic: a second `build_sw_scene` of the same IR
