@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <variant>
+#include <vector>
 
 import aleph.math;      // Vec3
 import aleph.types;     // NodeId, geometry/material/node payloads
@@ -193,4 +194,33 @@ TEST_CASE("build_sw: deterministic across two calls") {
         if (!same_face(a.scene.faces[i], b.scene.faces[i])) { all_equal = false; break; }
     }
     CHECK(all_equal);
+}
+
+// Task 3 — optional per-entity physics field φ -> colormap vcol.
+//
+// `build_sw_scene` gains an optional `const std::vector<double>* phi_entity`
+// (parallel to `LoweredScene::entities`). When it is null the build is
+// BYTE-IDENTICAL to the no-physics path (the determinism oracle `same_face`
+// proves vcol is untouched). When non-null, every face of an entity with a φ
+// value is tinted with the single diverging colormap colour `colormap(φ)`
+// (blue↔white↔red about 0) instead of the baked Lambert shade. Entity 0 is the
+// sphere (φ=+1 -> red, red>=blue) and entity 1 the quad (φ=-1 -> blue,
+// blue>=red); the sphere's faces lead `scene.faces` and the quad's trail it.
+TEST_CASE("build_sw: phi_entity==nullptr is byte-identical; non-null recolors vcol") {
+    TwoPrims s = make_two_prims();
+    auto lowered = aleph::lowering::lower(s.g);
+    REQUIRE(lowered.has_value());
+
+    const aleph::lowering::SwBuild base = aleph::lowering::build_sw_scene(*lowered);
+    const aleph::lowering::SwBuild same = aleph::lowering::build_sw_scene(*lowered, nullptr);
+    REQUIRE(base.scene.faces.size() == same.scene.faces.size());
+    for (std::size_t i = 0; i < base.scene.faces.size(); ++i)
+        CHECK(same_face(base.scene.faces[i], same.scene.faces[i]));   // unchanged
+
+    std::vector<double> phi{ +1.0, -1.0 };   // entity 0 red, entity 1 blue
+    const aleph::lowering::SwBuild lit = aleph::lowering::build_sw_scene(*lowered, &phi);
+    const auto& f0 = lit.scene.faces.front().vcol[0];
+    CHECK(f0.x >= f0.z);                                   // red >= blue at φ=+1
+    const auto& fl = lit.scene.faces.back().vcol[0];
+    CHECK(fl.z >= fl.x);                                   // blue >= red at φ=-1
 }

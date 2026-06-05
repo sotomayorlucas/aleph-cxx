@@ -50,8 +50,10 @@
 // over a valid IR and returns by value.
 
 module;
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <type_traits>
 #include <variant>
@@ -102,6 +104,21 @@ inline constexpr int SPHERE_SECTORS = kSphereSectors;
 [[nodiscard]] inline aleph::math::u32
 tex_white(aleph::math::f32 /*u*/, aleph::math::f32 /*v*/) noexcept {
     return 0xFFFFFFFFu;
+}
+
+// --- physics-field colormap ----------------------------------------------
+//
+// Diverging blue↔white↔red about 0, normalized by a FIXED scale (not a
+// per-frame max), so a node's colour depends only on its own φ. `v/scale`
+// clamped to [-1,1]. Used by Task 4 to colour the scene by a per-node physics
+// field φ: when a φ is supplied for an entity, its faces are tinted with this
+// single colour instead of the baked Lambert shade.
+[[nodiscard]] inline aleph::math::Vec3
+colormap_diverging(double v, double scale) noexcept {
+    const double t = std::clamp(v / (scale > 1e-12 ? scale : 1.0), -1.0, 1.0);
+    const auto f = static_cast<aleph::math::f32>(t);
+    if (f < 0.0f) return aleph::math::Vec3{1.0f + f, 1.0f + f, 1.0f};   // blue side
+    return aleph::math::Vec3{1.0f, 1.0f - f, 1.0f - f};                  // red side
 }
 
 // --- flat preview shading -------------------------------------------------
@@ -209,7 +226,11 @@ inline void push_tri(SwBuild& out,
 inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
                       aleph::math::Vec3 albedo, aleph::math::Vec3 emit,
                       const std::vector<LoweredEntity>& lights,
-                      aleph::types::NodeId source) {
+                      aleph::types::NodeId source, const double* phi) {
+    // When a physics field φ is supplied, every face of this entity is tinted
+    // with the single colormap colour `fc` instead of the baked Lambert shade.
+    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, 1.0)
+                                     : aleph::math::Vec3{};
     const aleph::math::Vec3 p0 = g.q;
     const aleph::math::Vec3 p1 = g.q + g.u;
     const aleph::math::Vec3 p2 = g.q + g.u + g.v;
@@ -222,20 +243,23 @@ inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
     const aleph::math::Vec3 s1 = shade_face(p1, n, albedo, emit, lights, true);
     const aleph::math::Vec3 s2 = shade_face(p2, n, albedo, emit, lights, true);
     const aleph::math::Vec3 s3 = shade_face(p3, n, albedo, emit, lights, true);
-    push_tri(out, p0, p1, p2, s0, s1, s2, source);
-    push_tri(out, p0, p2, p3, s0, s2, s3, source);
+    push_tri(out, p0, p1, p2, phi ? fc : s0, phi ? fc : s1, phi ? fc : s2, source);
+    push_tri(out, p0, p2, p3, phi ? fc : s0, phi ? fc : s2, phi ? fc : s3, source);
 }
 
 // TriLocal -> 1 Face (the single triangle {a,b,c}).
 inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
                      aleph::math::Vec3 albedo, aleph::math::Vec3 emit,
                      const std::vector<LoweredEntity>& lights,
-                     aleph::types::NodeId source) {
+                     aleph::types::NodeId source, const double* phi) {
+    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, 1.0)
+                                     : aleph::math::Vec3{};
     const aleph::math::Vec3 n = aleph::math::cross(g.b - g.a, g.c - g.a);
+    const aleph::math::Vec3 sa = shade_face(g.a, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 sb = shade_face(g.b, n, albedo, emit, lights, true);
+    const aleph::math::Vec3 sc = shade_face(g.c, n, albedo, emit, lights, true);
     push_tri(out, g.a, g.b, g.c,
-             shade_face(g.a, n, albedo, emit, lights, true),
-             shade_face(g.b, n, albedo, emit, lights, true),
-             shade_face(g.c, n, albedo, emit, lights, true), source);
+             phi ? fc : sa, phi ? fc : sb, phi ? fc : sc, source);
 }
 
 // SphereLocal -> a deterministic UV sphere of RINGS x SECTORS quad cells, each
@@ -253,19 +277,21 @@ inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
 inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
                         aleph::math::Vec3 albedo, aleph::math::Vec3 emit,
                         const std::vector<LoweredEntity>& lights,
-                        aleph::types::NodeId source) {
+                        aleph::types::NodeId source, const double* phi) {
+    const aleph::math::Vec3 fc = phi ? detail::colormap_diverging(*phi, 1.0)
+                                     : aleph::math::Vec3{};
     constexpr aleph::math::f32 kPi = 3.14159265358979323846f;
     auto on_sphere = [&](int ring, int sector) noexcept -> aleph::math::Vec3 {
         const aleph::math::f32 theta =
             kPi * static_cast<aleph::math::f32>(ring) /
             static_cast<aleph::math::f32>(SPHERE_RINGS);
-        const aleph::math::f32 phi =
+        const aleph::math::f32 phi_ang =
             2.0f * kPi * static_cast<aleph::math::f32>(sector) /
             static_cast<aleph::math::f32>(SPHERE_SECTORS);
         const aleph::math::f32 st = std::sin(theta);
         const aleph::math::f32 ct = std::cos(theta);
-        const aleph::math::f32 sp = std::sin(phi);
-        const aleph::math::f32 cp = std::cos(phi);
+        const aleph::math::f32 sp = std::sin(phi_ang);
+        const aleph::math::f32 cp = std::cos(phi_ang);
         return aleph::math::Vec3{
             g.center.x + g.radius * st * cp,
             g.center.y + g.radius * ct,
@@ -285,8 +311,8 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
             const aleph::math::Vec3 sb = shade_face(b, b - g.center, albedo, emit, lights, false);
             const aleph::math::Vec3 sc = shade_face(c, c - g.center, albedo, emit, lights, false);
             const aleph::math::Vec3 sd = shade_face(d, d - g.center, albedo, emit, lights, false);
-            push_tri(out, a, b, c, sa, sb, sc, source);
-            push_tri(out, a, c, d, sa, sc, sd, source);
+            push_tri(out, a, b, c, phi ? fc : sa, phi ? fc : sb, phi ? fc : sc, source);
+            push_tri(out, a, c, d, phi ? fc : sa, phi ? fc : sc, phi ? fc : sd, source);
         }
     }
 }
@@ -295,18 +321,19 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
 // translation (no decisions): the variant was fixed by `lower()`. Each emitter
 // bakes the entity's albedo + emission, lit by `lights`, into the face tints.
 inline void emit_entity(SwBuild& out, const LoweredEntity& e,
-                        const std::vector<LoweredEntity>& lights) {
+                        const std::vector<LoweredEntity>& lights,
+                        const double* phi = nullptr) {
     const aleph::math::Vec3 albedo = e.material.albedo;
     const aleph::math::Vec3 emit   = e.material.emit;
     std::visit(
         [&](const auto& g) {
             using G = std::decay_t<decltype(g)>;
             if constexpr (std::is_same_v<G, aleph::types::SphereLocal>) {
-                emit_sphere(out, g, albedo, emit, lights, e.source);
+                emit_sphere(out, g, albedo, emit, lights, e.source, phi);
             } else if constexpr (std::is_same_v<G, aleph::types::QuadLocal>) {
-                emit_quad(out, g, albedo, emit, lights, e.source);
+                emit_quad(out, g, albedo, emit, lights, e.source, phi);
             } else {  // aleph::types::TriLocal
-                emit_tri(out, g, albedo, emit, lights, e.source);
+                emit_tri(out, g, albedo, emit, lights, e.source, phi);
             }
         },
         e.world_geometry);
@@ -319,10 +346,20 @@ inline void emit_entity(SwBuild& out, const LoweredEntity& e,
 // and a parallel `face_source` map (face index -> source graph NodeId). Standalone
 // Light nodes (in `lights`, not in `entities`) are NOT rasterized: they carry no
 // pickable surface in the raster view; the raster pass only draws scene geometry.
-[[nodiscard]] inline SwBuild build_sw_scene(const LoweredScene& ls) {
+// `phi_entity`, when non-null, supplies a per-entity physics field φ (parallel
+// to `ls.entities` by index): an entity i with a φ value has ALL its faces
+// tinted with `colormap_diverging(φ_i)` instead of the baked Lambert shade.
+// When `phi_entity == nullptr` (or an entity index is out of range) that
+// entity keeps its Lambert vcol — so the φ==null path is byte-identical to the
+// no-physics build.
+[[nodiscard]] inline SwBuild
+build_sw_scene(const LoweredScene& ls,
+               const std::vector<double>* phi_entity = nullptr) {
     SwBuild out{};
-    for (const LoweredEntity& e : ls.entities) {
-        detail::emit_entity(out, e, ls.lights);
+    for (std::size_t i = 0; i < ls.entities.size(); ++i) {
+        const double* phi =
+            (phi_entity && i < phi_entity->size()) ? &(*phi_entity)[i] : nullptr;
+        detail::emit_entity(out, ls.entities[i], ls.lights, phi);
     }
     return out;
 }
