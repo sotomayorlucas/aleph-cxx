@@ -93,7 +93,9 @@ add_executable(aleph_tests
     lowering/test_incremental.cpp
     lowering/test_importance.cpp
     edit/test_build_sw.cpp
-    edit/test_controller.cpp)
+    edit/test_controller.cpp
+    sim/test_field.cpp
+    sim/test_wave.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_include_directories(aleph_tests PRIVATE
@@ -102,7 +104,7 @@ target_compile_definitions(aleph_tests PRIVATE
     ALEPH_TLA_SCENE_GRAPH_PATH="${CMAKE_SOURCE_DIR}/formal/scene_graph.tla")
 target_link_libraries(aleph_tests PRIVATE
     aleph_flags_test aleph_cpu aleph_math aleph_alloc aleph_containers aleph_threads aleph_io
-    aleph_types aleph_graph aleph_dpo aleph_sheaf aleph_flow
+    aleph_types aleph_graph aleph_dpo aleph_sheaf aleph_flow aleph_sim
     aleph_linalg_gf2 aleph_linalg_sparse
     aleph_scene aleph_render_common aleph_render_rt aleph_render_sw
     aleph_lowering aleph_edit)
