@@ -94,6 +94,7 @@ add_executable(aleph_tests
     lowering/test_importance.cpp
     edit/test_build_sw.cpp
     edit/test_controller.cpp
+    edit/test_sim_controller.cpp
     sim/test_field.cpp
     sim/test_wave.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE

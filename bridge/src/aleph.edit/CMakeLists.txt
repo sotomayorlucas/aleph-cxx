@@ -8,4 +8,5 @@ target_sources(aleph_edit
 target_link_libraries(aleph_edit
     PUBLIC  aleph_lowering aleph_scene aleph_render_sw aleph_render_rt aleph_render_common
             aleph_graph aleph_types aleph_dpo aleph_math aleph_threads
+            aleph_flow aleph_sim
     PRIVATE aleph_flags_isa)

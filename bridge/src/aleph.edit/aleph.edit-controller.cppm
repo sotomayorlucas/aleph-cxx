@@ -48,6 +48,8 @@ import aleph.render.sw;       // SceneRT, Face
 import aleph.render.common;   // Camera, make_camera
 import aleph.scene;           // Scene
 import aleph.dpo;             // RewriteRecord
+import aleph.flow;            // WeightedLaplacian, build_laplacian, default_weight (Δ)
+import aleph.sim;             // ScalarField, WaveStepper, StepError (φ wave field)
 
 export namespace aleph::edit {
 
@@ -246,10 +248,51 @@ public:
             return std::unexpected(aleph::lowering::OpError::InvariantViolation);
         }
 
-        // (3) Adopt the new IR as `prev` and rebuild both backends + the maps.
+        // (3) Adopt the new IR as `prev`, re-derive the wave operator+field from
+        //     the committed graph (survivors keep φ, new nodes start at 0), then
+        //     rebuild both backends + the maps (which re-bakes φ→vcol).
         prev_ = std::move(*lowered);
+        if (sim_enabled_) rebuild_operator_and_reproject();
         rebuild_backends_from_prev();
         return {};
+    }
+
+    // ── Wave field (SPEC §3.2 physics seam) ──────────────────────────────────
+    // Toggle the scalar-wave overlay. Enabling (re)builds the shared graph
+    // Laplacian Δ from the committed graph and resets φ/φ̇ to zero over its
+    // node_order. The graph stays the single source of truth — the field is a
+    // derived structure rebuilt from it, never mutating it.
+    void enable_sim(bool on) {
+        sim_enabled_ = on;
+        if (on) {
+            operator_ = aleph::flow::build_laplacian(graph_, aleph::flow::default_weight);
+            field_    = aleph::sim::ScalarField::zeros(operator_.node_order);
+        }
+    }
+
+    // Velocity impulse at node `n`; false (no-op) if `n` is not in the field's
+    // node_order (e.g. a node that produced no Δ vertex).
+    [[nodiscard]] bool kick(aleph::types::NodeId n, double amp) noexcept {
+        return field_.kick(n, amp);
+    }
+
+    // The current wave field (φ/φ̇ over the Laplacian's node_order), read-only.
+    [[nodiscard]] const aleph::sim::ScalarField& field() const noexcept {
+        return field_;
+    }
+
+    // Advance the wave one symplectic-Euler sub-step (φ̈ = −c²Δφ) on the shared Δ
+    // and re-bake φ→vcol into the SW scene. No-op (success) when the sim is off.
+    // The graph is NOT touched — `step` evolves only the derived field. A stepper
+    // error (EmptyField / DimMismatch / NonFinite) is surfaced unchanged and the
+    // SW scene is left as-is (do not re-bake a partially-updated/diverged field).
+    std::expected<void, aleph::sim::StepError> step(aleph::math::f32 dt) {
+        if (!sim_enabled_) return {};
+        auto r = stepper_.step(field_, operator_.matrix,
+                               static_cast<aleph::math::f64>(dt));
+        if (!r) return r;
+        rebuild_backends_from_prev();  // re-bake vcol from the evolved φ
+        return r;
     }
 
     // ── Accessors ────────────────────────────────────────────────────────────
@@ -297,12 +340,36 @@ private:
         rebuild_backends_from_prev();
     }
 
+    // Re-derive the wave operator and re-project the field after a graph edit.
+    // Δ is rebuilt from the (already-committed) graph; `reproject` carries every
+    // surviving NodeId's (φ, φ̇) forward onto the new node_order and zeros any new
+    // node. The graph is the truth — this only rebuilds derived state.
+    void rebuild_operator_and_reproject() {
+        operator_ = aleph::flow::build_laplacian(graph_, aleph::flow::default_weight);
+        field_.reproject(operator_.node_order);  // survivors keep φ, new nodes 0
+    }
+
     // Rebuild the rasterizer SceneRT (+ face_source), the path-trace Scene, and
     // the entity↔primitive map from the current `prev_` LoweredScene. Seam where
     // the lowered IR materializes into both renderer backends.
     void rebuild_backends_from_prev() {
-        // Software rasterizer faces + face→NodeId map (SPEC §3.1).
-        sw_ = aleph::lowering::build_sw_scene(prev_);
+        // Software rasterizer faces + face→NodeId map (SPEC §3.1). When the wave
+        // sim is enabled AND the field's order is 1:1 with the lowered entities
+        // (mesh-only scene; no extra Δ nodes), gather a per-entity φ aligned to
+        // `prev_.entities` and feed it so build_sw_scene colormaps φ into `vcol`.
+        // Otherwise (sim off, or a scene whose node_order ≠ entities) we pass
+        // nullptr and the build is BYTE-IDENTICAL to the no-physics path.
+        if (sim_enabled_ && field_.size() == prev_.entities.size()) {
+            std::vector<double> phi_entity(prev_.entities.size(), 0.0);
+            for (std::size_t i = 0; i < prev_.entities.size(); ++i) {
+                const aleph::types::NodeId src = prev_.entities[i].source;
+                for (std::size_t j = 0; j < field_.order.size(); ++j)
+                    if (field_.order[j] == src) { phi_entity[i] = field_.phi[j]; break; }
+            }
+            sw_ = aleph::lowering::build_sw_scene(prev_, &phi_entity);
+        } else {
+            sw_ = aleph::lowering::build_sw_scene(prev_);
+        }
         // Path-trace SoA/BVH scene + camera pose (camera pose is also mirrored by
         // the orbit camera, which the shell drives; we keep the IR camera for the
         // render bundle but pick/render use the orbit camera's pose).
@@ -356,6 +423,10 @@ private:
     aleph::lowering::SwBuild       sw_{};        // SceneRT + face_source (raster pick)
     aleph::lowering::RenderScene   render_{};    // path-trace Scene + camera pose
     std::vector<aleph::types::NodeId> prim_source_{};  // per-entity source (entity↔primitive)
+    aleph::flow::WeightedLaplacian operator_{};   // Δ, rebuilt from graph_
+    aleph::sim::ScalarField        field_{};      // φ/φ̇ over operator_.node_order
+    aleph::sim::WaveStepper        stepper_{};    // symplectic-Euler wave integrator
+    bool                           sim_enabled_ = false;
     OrbitCamera                    cam_{};       // OWN orbit camera (headless)
     std::optional<aleph::types::NodeId> selection_{};  // current selection
     int                            width_{800};  // viewport (px) for pick/projection
