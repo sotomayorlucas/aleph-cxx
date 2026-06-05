@@ -23,6 +23,31 @@
 # Requires: ImageMagick (`magick`).
 set -euo pipefail
 
+# wave sub-mode: render the 48-frame deterministic wave animation (--wave) and
+# montage it into one 8x6 contact sheet (ripple grows, node deleted @24, re-route).
+#   tools/visual_review.sh wave [out] [build]
+if [ "${1:-}" = "wave" ]; then
+  OUT="${2:-/tmp/aleph_wave}"; BUILD="${3:-build-release}"
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  APP="$ROOT/$BUILD/apps/aleph_edit/aleph_edit"
+  command -v magick >/dev/null 2>&1 || { echo "error: ImageMagick (magick) not found" >&2; exit 1; }
+  echo "==> building aleph_edit_app ($BUILD)"
+  cmake --build "$ROOT/$BUILD" --target aleph_edit_app >/dev/null
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "==> rendering wave frames -> $OUT"
+  "$APP" --wave "$OUT"
+  echo "==> converting PPM -> PNG"
+  for f in "$OUT"/*.ppm; do magick "$f" "${f%.ppm}.png"; done
+  # numeric-sorted frame list (step0..step47) so the montage is in time order
+  mapfile -t FR < <(ls "$OUT"/step*_wave_raster.png | sort -V)
+  echo "==> montage -> $OUT/_wave_contact.png"
+  magick montage "${FR[@]}" -tile 8x6 -geometry +2+2 -background '#222' \
+    -title 'aleph.sim: wave on the shared Laplacian — ripple (0-23), node deleted, re-route (24-47)' \
+    "$OUT/_wave_contact.png"
+  echo "done: $OUT/_wave_contact.png"
+  exit 0
+fi
+
 OUT="${1:-/tmp/aleph_review}"
 BUILD="${2:-build-release}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
