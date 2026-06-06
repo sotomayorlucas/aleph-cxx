@@ -1083,7 +1083,7 @@ int main(int argc, char** argv) {
 #else
     (void)wave_live;
     std::fprintf(stderr,
-                 "aleph_edit: built without SDL2 — only --headless / --wave are available\n");
+                 "aleph_edit: built without SDL2 — only --headless / --wave / --orbit-track are available\n");
     return 0;
 #endif
 }

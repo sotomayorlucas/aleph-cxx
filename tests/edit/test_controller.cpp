@@ -554,6 +554,29 @@ TEST_CASE("edit: has_view_dependent_material is true for Metal, false for all-La
         CHECK(c.has_view_dependent_material());           // has a Metal sphere
     }
     {
+        // Dielectric also triggers view-dependence (the OR's second arm).
+        Graph g;
+        const NodeId root = g.alloc_node_id();
+        g.insert_node(Transform{root, 0, LocalTransform{Mat4::identity()}});
+        const NodeId cam = g.alloc_node_id();
+        Camera c0{cam, std::string("sensor0")};
+        c0.look_from = Vec3{0, 0, 5};
+        g.insert_node(std::move(c0));
+        const NodeId mesh = g.alloc_node_id();
+        Mesh glass{mesh, std::string("glass"), 0};
+        glass.geometry = SphereLocal{Vec3{0, 0, 0}, 1.0f};
+        g.insert_node(std::move(glass));
+        const NodeId mat = g.alloc_node_id();
+        Material gmat{mat, MaterialKind::Dielectric};
+        gmat.ior = 1.5f;
+        g.insert_node(std::move(gmat));
+        (void)g.add_edge(EdgeKind::Contains,   root, cam);
+        (void)g.add_edge(EdgeKind::Contains,   root, mesh);
+        (void)g.add_edge(EdgeKind::References, mesh, mat);
+        aleph::edit::EditorController c{std::move(g)};
+        CHECK(c.has_view_dependent_material());           // Dielectric
+    }
+    {
         TwoMesh tm = make_two_mesh();                     // both Lambertian
         aleph::edit::EditorController c{std::move(tm.g)};
         CHECK_FALSE(c.has_view_dependent_material());
