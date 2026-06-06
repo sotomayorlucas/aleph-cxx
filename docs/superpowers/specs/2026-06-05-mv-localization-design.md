@@ -1,6 +1,14 @@
-# Design Spec — Mayer-Vietoris localization of Δ (physics slice 3)
+# Design Spec — Bounded-support curvature + exact MV localization of Δ (physics slice 3)
 
-**Goal:** after a DPO edit, recompute only the **touched region** of the shared Laplacian's Ollivier-Ricci curvature (instead of the unconditional full `build_laplacian(g_after)`), **certified byte-identical** to the full rebuild, and certified topologically by a Mayer-Vietoris cohomology check. The manifesto thesis: *DPO rewrites invalidate only the touched part — topologically-targeted, not brute-forced.* Date 2026-06-05 · Status: DRAFT (from the mapping+design workflow). **APIs that don't exist yet are `[NEW]`.**
+**Goal:** after a DPO edit, recompute only the **touched region** of the shared Laplacian's curvature, **byte-exact** vs the full rebuild + an MV cohomology certificate. The manifesto thesis: *DPO rewrites invalidate only the touched part.* Date 2026-06-05 · Status: REVISED. **APIs that don't exist yet are `[NEW]`.**
+
+## REVISION — why bounded-support curvature is the core (implementation finding)
+
+The first attempt (localize the EXISTING curvature) is **provably impossible byte-exact**: the current Ollivier-Ricci κ uses W₁ over the **global** connected-component support (`build_state` is all-pairs), and the transport simplex's Charnes perturbation (`eps·(i+1)`, `extra/n`) depends on `n` = support size. Adding a node grows `n` for EVERY edge in the component → κ drifts ~1e-10 on edges arbitrarily far from the edit. The manifesto thesis ("invalidate only the touched part") is **FALSE for a global operator** — it requires a **LOCAL** one.
+
+**Resolution:** redefine the editor/sim curvature to **bounded support**: `κ_R(a,b)` = the Ollivier-Ricci curvature computed with W₁ over the **radius-R ball** `B_R(a,b)` (bounded BFS for both the support and the hop-distances), R a small constant. Then `κ_R(e)` is a **pure function of `B_R(e)`**, so: (1) localization is **exact BY CONSTRUCTION** — a non-dirty edge's ball is unchanged ⇒ cached `κ_R` == full `κ_R` bit-for-bit (and `n`=ball size is constant ⇒ no perturbation drift); (2) the dirty set = edges within R hops of the edit; (3) each `κ_R` recompute is O(ball), giving the asymptotic win too. The global `ricci_curvature` stays for `lowering::importance` (unchanged); only the **editor's `operator_`** moves to bounded κ_R — so the wave's Δ takes a NEW deterministic baseline (`--wave` frames change ONCE, then deterministic). The Task-1 primitive (factored `ricci_curvature_edge`, `build_laplacian_local`, `two_hop_touched_edges`, committed `1a59ae0`) is reused; the per-edge κ becomes bounded and the dirty radius becomes R.
+
+Sections below describe the localization mechanics; read them with "κ" = the **bounded κ_R** and "full build" = `build_laplacian_bounded`.
 
 ## 0. The corrected premise (adversarial-map finding)
 
