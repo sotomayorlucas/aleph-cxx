@@ -156,6 +156,141 @@ inline std::size_t node_index_of(const SkeletonState& st, NodeId id) {
     return (d_ab > 0.0) ? (1.0 - w1 / d_ab) : 0.0;
 }
 
+// Radius for the bounded-support curvature ball B_R(a, b). R=2 is provably
+// sufficient: for an edge (a, b) the W_1 support is N(a) u N(b) (1-hop), and the
+// geodesics d(i, j) <= 3 between support nodes have all intermediate nodes
+// within 2 hops of {a, b} -> B_2 captures them exactly. Only the local `n` (ball
+// size) differs from the global support, which is exactly what makes kappa_R a
+// PURE FUNCTION of the local ball (no global-`n` perturbation drift).
+inline constexpr int kCurvRadius = 2;
+
+// build_local_state: a SkeletonState scoped to the radius-`radius` ball
+// B_R(a, b) of the skeleton, the bounded-support core. FULLY DETERMINISTIC and
+// depends ONLY on the induced subgraph of B_R(a, b): two graphs that agree on
+// B_R(a, b) yield byte-identical states. This is what makes the bounded
+// curvature kappa_R(a, b) = ricci_curvature_edge(build_local_state(...), a, b) a
+// pure function of the local ball -> exact localization by construction.
+//
+// Mechanics:
+//   1. BFS from {a, b} over skel's adjacency to `radius` hops -> the ball node
+//      set, then SORT it canonically (ascending NodeId) for a deterministic
+//      stable order independent of discovery order / graph layout.
+//   2. neighbors[i] = the in-ball neighbours of ball node i (induced subgraph).
+//      a's TRUE 1-hop neighbours are all in the ball (radius >= 1), so the
+//      uniform measure mu_a / mu_b over N(a) / N(b) is the full 1-hop star.
+//   3. dist = all-pairs hop-count BFS WITHIN the induced ball subgraph (NOT
+//      sliced from a global all-pairs matrix). For R=2 this equals the global
+//      geodesic among the support nodes (intermediates are in B_2), so kappa_R
+//      matches the global geometry; the only difference is the local `n`.
+//   4. nodes = the sorted ball ids; n = ball size.
+[[nodiscard]] inline SkeletonState build_local_state(const OneSkeleton& skel,
+                                                     NodeId a, NodeId b,
+                                                     int radius) {
+    const std::size_t gn = skel.vertices.size();
+
+    // Global node id -> dense index (skeleton vertex order, sorted).
+    aleph::containers::OrderedMap<NodeId, std::size_t> g_index;
+    for (std::size_t i = 0; i < gn; ++i) {
+        g_index.insert(skel.vertices[i], i);
+    }
+
+    // Symmetric adjacency over the full skeleton (dense global indices).
+    std::vector<std::vector<std::size_t>> g_adj(gn);
+    for (const auto& [ea, eb] : skel.edges) {
+        const std::size_t* ia = g_index.get(ea);
+        const std::size_t* ib = g_index.get(eb);
+        if (ia != nullptr && ib != nullptr) {
+            g_adj[*ia].push_back(*ib);
+            g_adj[*ib].push_back(*ia);
+        }
+    }
+
+    // BFS from {a, b} to `radius` hops -> ball (dense global indices). Both
+    // endpoints seed at distance 0.
+    std::vector<bool>        in_ball(gn, false);
+    std::vector<std::size_t> frontier;
+    for (const NodeId seed : {a, b}) {
+        const std::size_t* is = g_index.get(seed);
+        if (is != nullptr && !in_ball[*is]) {
+            in_ball[*is] = true;
+            frontier.push_back(*is);
+        }
+    }
+    for (int hop = 0; hop < radius; ++hop) {
+        std::vector<std::size_t> next;
+        for (const std::size_t u : frontier) {
+            for (const std::size_t v : g_adj[u]) {
+                if (!in_ball[v]) {
+                    in_ball[v] = true;
+                    next.push_back(v);
+                }
+            }
+        }
+        frontier = std::move(next);
+    }
+
+    // Collect ball node ids and SORT canonically (deterministic, layout-
+    // independent). Iterating skel.vertices (already sorted) preserves order.
+    SkeletonState st;
+    for (std::size_t i = 0; i < gn; ++i) {
+        if (in_ball[i]) {
+            st.nodes.push_back(skel.vertices[i]);
+        }
+    }
+    const std::size_t n = st.nodes.size();
+
+    // Local id -> local index (sorted ball order).
+    aleph::containers::OrderedMap<NodeId, std::size_t> l_index;
+    for (std::size_t i = 0; i < n; ++i) {
+        l_index.insert(st.nodes[i], i);
+    }
+
+    // Induced-subgraph neighbours: each ball node's neighbours that are also in
+    // the ball (insertion order mirrors build_state via neighbour_insert).
+    st.neighbors.assign(n, std::vector<std::size_t>{});
+    for (const auto& [ea, eb] : skel.edges) {
+        const std::size_t* la = l_index.get(ea);
+        const std::size_t* lb = l_index.get(eb);
+        if (la != nullptr && lb != nullptr) {
+            neighbour_insert(st.neighbors[*la], *lb);
+            neighbour_insert(st.neighbors[*lb], *la);
+        }
+    }
+
+    // All-pairs hop-count distance via BFS WITHIN the induced ball subgraph.
+    st.dist = DMatrix::zeros(n, n);
+    const f64 inf = std::numeric_limits<f64>::infinity();
+    for (std::size_t src = 0; src < n; ++src) {
+        std::vector<f64> d(n, inf);
+        d[src] = 0.0;
+        std::vector<std::size_t> queue{src};
+        std::size_t head = 0;
+        while (head < queue.size()) {
+            const std::size_t u = queue[head++];
+            for (const std::size_t v : st.neighbors[u]) {
+                if (std::isinf(d[v])) {
+                    d[v] = d[u] + 1.0;
+                    queue.push_back(v);
+                }
+            }
+        }
+        for (std::size_t v = 0; v < n; ++v) {
+            st.dist.at(src, v) = d[v];
+        }
+    }
+    return st;
+}
+
+// ricci_curvature_edge_bounded: the bounded-support Ollivier-Ricci curvature
+// kappa_R(a, b) = ricci_curvature_edge(build_local_state(skel, a, b, radius),
+// a, b). Reuses the committed per-edge primitive with the LOCAL state, so it is
+// a pure function of B_R(a, b) and localizes byte-exact by construction.
+[[nodiscard]] inline f64 ricci_curvature_edge_bounded(const OneSkeleton& skel,
+                                                      NodeId a, NodeId b,
+                                                      int radius) {
+    return ricci_curvature_edge(build_local_state(skel, a, b, radius), a, b);
+}
+
 inline SkeletonState build_state(const OneSkeleton& skel) {
     SkeletonState st;
     st.nodes.assign(skel.vertices.begin(), skel.vertices.end());

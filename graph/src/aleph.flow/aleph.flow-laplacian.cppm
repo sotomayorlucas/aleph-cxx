@@ -154,6 +154,36 @@ export namespace aleph::flow {
     return detail::assemble(skel, std::move(curvatures), weight_fn);
 }
 
+// Build the weighted Laplacian Delta = D_w - A_w from a graph using the
+// BOUNDED-support Ollivier-Ricci curvature kappa_R (the editor/sim operator).
+//
+// Identical to build_laplacian except each edge's curvature is the bounded
+// kappa_R(a, b) = ricci_curvature_edge_bounded(skel, a, b, radius) computed over
+// the radius-R ball B_R(a, b) (NOT the global support). Because kappa_R(e) is a
+// PURE FUNCTION of B_R(e), this operator localizes byte-exact: a non-dirty
+// edge's ball is unchanged after an edit, so its cached kappa_R == the full
+// rebuild's kappa_R bit-for-bit (same local node set, same sorted order, same
+// local `n`, same wasserstein_1). The global build_laplacian / ricci_curvature
+// stay UNCHANGED for lowering::importance.
+//
+// Determinism: fresh RicciMap inserted in canonical skel.edges order, so
+// assemble's fp summation order matches; same graph -> bit-identical matrix.
+[[nodiscard]] inline WeightedLaplacian build_laplacian_bounded(
+    const aleph::graph::Graph& g, WeightFn weight_fn,
+    int radius = detail::kCurvRadius) {
+    const OneSkeleton skel = OneSkeleton::from_graph(g);
+    RicciMap          curv;
+    for (const auto& [a, b] : skel.edges) {
+        // Mirror build_laplacian: omit edges whose endpoints are absent.
+        if (!skel.contains_vertex(a) || !skel.contains_vertex(b)) {
+            continue;
+        }
+        const f64 kappa =
+            detail::ricci_curvature_edge_bounded(skel, a, b, radius);
+        curv.insert(std::pair<NodeId, NodeId>{a, b}, kappa);
+    }
+    return detail::assemble(skel, std::move(curv), weight_fn);
+}
 // 2-hop closure: every skeleton edge incident to a vertex within 2 hops of any
 // `seed` node. The sound invalidation rule for Ollivier-Ricci kappa(a,b): its
 // transport cost is the graph hop-distance among N(a) u N(b), a 2-hop quantity
