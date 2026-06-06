@@ -599,12 +599,13 @@ shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
 inline void push_tri(SwBuild& out,
                      aleph::math::Vec3 a, aleph::math::Vec3 b, aleph::math::Vec3 c,
                      aleph::math::Vec3 ca, aleph::math::Vec3 cb, aleph::math::Vec3 cc,
+                     aleph::math::Vec2 uva, aleph::math::Vec2 uvb, aleph::math::Vec2 uvc,
+                     aleph::render::sw::TexSampleFn fn,
                      aleph::types::NodeId source) {
     aleph::render::sw::Face f{};
     f.verts = {a, b, c, c};
-    f.uvs = {aleph::math::Vec2{0.0f, 0.0f}, aleph::math::Vec2{0.0f, 0.0f},
-             aleph::math::Vec2{0.0f, 0.0f}, aleph::math::Vec2{0.0f, 0.0f}};
-    f.tex = &tex_white;
+    f.uvs = {uva, uvb, uvc, uvc};  // verts[3]==verts[2] => uv[3]==uv[2]
+    f.tex = fn;
     f.lightmap_id = 0xFFFFFFFFu;  // no lightmap
     f.vcol = {ca, cb, cc, cc};    // Gouraud: per-vertex lit colour (verts[3]==verts[2])
     out.scene.faces.push_back(f);
@@ -637,6 +638,24 @@ inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
         return g.q + g.u * (static_cast<f32>(i) / static_cast<f32>(Nu))
                    + g.v * (static_cast<f32>(j) / static_cast<f32>(Nv));
     };
+    // Per-corner texture coordinate: the parameter position (i/Nu, j/Nv) of the
+    // grid vertex on the parallelogram, scaled by uv_scale (tiling). This is the
+    // raster twin of the PT's `hit_quad` (α,β) — both feed the checker the same
+    // (s,t)·uv_scale, so the tiles align between backends (SPEC §1, exact at
+    // vertices). Baked UNCONDITIONALLY (tex_white ignores uv for Lambertian
+    // quads), keeping one code path; `same_face` stays deterministic.
+    auto UV = [&](int i, int j) noexcept -> aleph::math::Vec2 {
+        return aleph::math::Vec2{
+            (static_cast<f32>(i) / static_cast<f32>(Nu)) * mat.uv_scale,
+            (static_cast<f32>(j) / static_cast<f32>(Nv)) * mat.uv_scale};
+    };
+    // Select the texture ONCE per quad. The φ guard is STRUCTURAL: a φ-tinted
+    // entity (vcol = colormap) must NEVER be checker-multiplied (rast does
+    // tex×vcol), so a textured φ-floor falls back to tex_white. (SPEC §3.4.)
+    const aleph::render::sw::TexSampleFn fn =
+        (mat.kind == aleph::types::MaterialKind::TexturedLambertian && phi == nullptr)
+            ? &aleph::render::sw::tex_checker_uv
+            : &tex_white;
     // Shade PER VERTEX (skip the Lambert+shadow path entirely when φ overrides
     // the colour — the `phi ?` short-circuits shade_face/light_visibility).
     for (int j = 0; j < Nv; ++j) {
@@ -647,8 +666,10 @@ inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
             const Vec3 s10 = phi ? fc : shade_face(c10, n, mat, eye, lights, true, occluders, source);
             const Vec3 s11 = phi ? fc : shade_face(c11, n, mat, eye, lights, true, occluders, source);
             const Vec3 s01 = phi ? fc : shade_face(c01, n, mat, eye, lights, true, occluders, source);
-            push_tri(out, c00, c10, c11, s00, s10, s11, source);
-            push_tri(out, c00, c11, c01, s00, s11, s01, source);
+            push_tri(out, c00, c10, c11, s00, s10, s11,
+                     UV(i, j), UV(i + 1, j), UV(i + 1, j + 1), fn, source);
+            push_tri(out, c00, c11, c01, s00, s11, s01,
+                     UV(i, j), UV(i + 1, j + 1), UV(i, j + 1), fn, source);
         }
     }
 }
@@ -665,7 +686,10 @@ inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
     const aleph::math::Vec3 sa = phi ? fc : shade_face(g.a, n, mat, eye, lights, true, occluders, source);
     const aleph::math::Vec3 sb = phi ? fc : shade_face(g.b, n, mat, eye, lights, true, occluders, source);
     const aleph::math::Vec3 sc = phi ? fc : shade_face(g.c, n, mat, eye, lights, true, occluders, source);
-    push_tri(out, g.a, g.b, g.c, sa, sb, sc, source);
+    // Tris are untextured this slice (the PT gives tris no UV — SPEC §1): inert
+    // zero UVs + the white texture, so the rendered colour is exactly the vcol.
+    const aleph::math::Vec2 z{0.0f, 0.0f};
+    push_tri(out, g.a, g.b, g.c, sa, sb, sc, z, z, z, &tex_white, source);
 }
 
 // SphereLocal -> a deterministic UV sphere of RINGS x SECTORS quad cells, each
@@ -718,8 +742,11 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
             const aleph::math::Vec3 sb = phi ? fc : shade_face(b, b - g.center, mat, eye, lights, false, occluders, source);
             const aleph::math::Vec3 sc = phi ? fc : shade_face(c, c - g.center, mat, eye, lights, false, occluders, source);
             const aleph::math::Vec3 sd = phi ? fc : shade_face(d, d - g.center, mat, eye, lights, false, occluders, source);
-            push_tri(out, a, b, c, sa, sb, sc, source);
-            push_tri(out, a, c, d, sa, sc, sd, source);
+            // Spheres are untextured this slice (the longitude u-seam breaks
+            // raster↔PT parity — SPEC §1): inert zero UVs + the white texture.
+            const aleph::math::Vec2 z{0.0f, 0.0f};
+            push_tri(out, a, b, c, sa, sb, sc, z, z, z, &tex_white, source);
+            push_tri(out, a, c, d, sa, sc, sd, z, z, z, &tex_white, source);
         }
     }
 }

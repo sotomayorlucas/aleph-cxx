@@ -966,3 +966,176 @@ TEST_CASE("build_sw: material-kind scene is deterministic (same_face across buil
         if (!same_face(a.scene.faces[i], b.scene.faces[i])) { all_equal = false; break; }
     CHECK(all_equal);
 }
+
+// ── Task 4c-ii: procedural checker texture on the floor quad ─────────────────
+//
+// emit_quad now bakes real UVs `(i/Nu, j/Nv)·uv_scale` per vertex and selects a
+// TexSampleFn ONCE: `tex_checker_uv` for a TexturedLambertian quad away from φ,
+// else `tex_white`. The rasterizer does `argb_to_linear(tex(u,v)) × vcol` per
+// pixel — so the checker (HI=1.0 / LO=128/255) multiplies the baked Lambert vcol,
+// aligned with the PT's analytic checker on the same quad (SPEC §1/§2/§3.4).
+
+namespace {
+
+// A single TexturedLambertian floor quad (|u|=|v|=2 => Nu=Nv=4). uv_scale is the
+// material default (4.0). Built directly so the geometry/material are exact.
+aleph::lowering::LoweredScene make_textured_floor_scene(
+        aleph::types::MaterialKind kind, aleph::math::f32 uv_scale) {
+    using aleph::lowering::LoweredEntity;
+    aleph::lowering::LoweredScene ls;
+    LoweredEntity floor;
+    floor.source = NodeId{2};
+    floor.world_geometry = QuadLocal{Vec3{-1, 0, -1}, Vec3{2, 0, 0}, Vec3{0, 0, 2}};
+    floor.material.kind     = kind;
+    floor.material.albedo   = Vec3{0.7f, 0.7f, 0.7f};
+    floor.material.uv_scale = uv_scale;
+    ls.entities.push_back(floor);
+    return ls;
+}
+
+}  // namespace
+
+// (a) A TexturedLambertian quad → some face carries a non-zero baked UV AND its
+// `f.tex` is the checker; a plain Lambertian quad keeps `f.tex == &tex_white`
+// (whose baked UVs are *ignored*, so we do NOT assert they are zero).
+TEST_CASE("build_sw: TexturedLambertian floor bakes real UVs + the checker fn") {
+    const aleph::lowering::LoweredScene tex_ls =
+        make_textured_floor_scene(aleph::types::MaterialKind::TexturedLambertian, 4.0f);
+    const aleph::lowering::SwBuild tex = aleph::lowering::build_sw_scene(tex_ls);
+
+    bool found_nonzero_uv = false, all_checker = true, any_face = false;
+    for (const aleph::render::sw::Face& f : tex.scene.faces) {
+        any_face = true;
+        if (f.tex != &aleph::render::sw::tex_checker_uv) all_checker = false;
+        for (std::size_t k = 0; k < 4; ++k)
+            if (!(f.uvs[k] == aleph::math::Vec2{0.0f, 0.0f})) found_nonzero_uv = true;
+    }
+    REQUIRE(any_face);
+    CHECK(found_nonzero_uv);   // real (i/Nu,j/Nv)·uv_scale UVs, not zeroed
+    CHECK(all_checker);        // every face samples tex_checker_uv
+
+    // A plain Lambertian quad → tex_white (its baked UVs are inert, not asserted).
+    const aleph::lowering::LoweredScene lamb_ls =
+        make_textured_floor_scene(aleph::types::MaterialKind::Lambertian, 4.0f);
+    const aleph::lowering::SwBuild lamb = aleph::lowering::build_sw_scene(lamb_ls);
+    bool all_white = true;
+    for (const aleph::render::sw::Face& f : lamb.scene.faces)
+        if (f.tex != &aleph::lowering::detail::tex_white) all_white = false;
+    CHECK(all_white);
+}
+
+// (b) The checker fn alternates per integer cell and pins its two ARGB levels.
+TEST_CASE("build_sw: tex_checker_uv alternates and pins the HI/LO levels") {
+    using aleph::render::sw::tex_checker_uv;
+    // Adjacent cells (⌊u⌋ differs by 1) flip; the diagonal (both ⌊⌋ flip) repeats.
+    CHECK(tex_checker_uv(0.5f, 0.5f) != tex_checker_uv(1.5f, 0.5f));   // adjacent
+    CHECK(tex_checker_uv(0.5f, 0.5f) == tex_checker_uv(1.5f, 1.5f));   // diagonal
+    // Pin the levels: (0,0) cell is LO (0^0=0 -> even), (1,0) is HI.
+    CHECK(tex_checker_uv(0.5f, 0.5f) == 0xFF808080u);
+    CHECK(tex_checker_uv(1.5f, 0.5f) == 0xFFFFFFFFu);
+}
+
+// (d) φ guard: a TexturedLambertian quad built with a φ value falls back to
+// tex_white (a φ floor must NOT be checker×colormap — rast does tex×vcol), and
+// its vcol is the pure colormap colour (the φ path is structurally preserved).
+TEST_CASE("build_sw: phi guard forces tex_white on a textured quad (no checker×colormap)") {
+    const aleph::lowering::LoweredScene ls =
+        make_textured_floor_scene(aleph::types::MaterialKind::TexturedLambertian, 4.0f);
+    std::vector<double> phi{ -1.0 };   // entity 0 (floor) φ=-1 -> blue
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls, &phi);
+
+    bool any_face = false, all_white = true, checked_vcol = false;
+    for (const aleph::render::sw::Face& f : sw.scene.faces) {
+        any_face = true;
+        if (f.tex != &aleph::lowering::detail::tex_white) all_white = false;
+        if (!checked_vcol) {
+            // colormap_diverging(-1, kPhiScale): t=-1 -> blue side {0,0,1}.
+            CHECK(f.vcol[0].x == doctest::Approx(0.0f));
+            CHECK(f.vcol[0].y == doctest::Approx(0.0f));
+            CHECK(f.vcol[0].z == doctest::Approx(1.0f));
+            checked_vcol = true;
+        }
+    }
+    REQUIRE(any_face);
+    CHECK(all_white);       // φ guard: NO checker on a φ-tinted floor
+    CHECK(checked_vcol);
+}
+
+// (Step 6) Parity oracle — the key deliverable. At a tessellation VERTEX the
+// raster's baked UV `(i/Nu, j/Nv)` must equal the PT `hit_quad`'s (α,β) BIT-FOR-
+// BIT, and the two must land in the SAME checker cell after ·uv_scale. We
+// replicate the PT's exact α,β formula here (hit_quad lives in aleph.scene, not
+// reachable from this edit test): for a hit point P on the quad (q,u,v),
+//   n = cross(u,v);  w = n/|n|²;
+//   α = dot(w, cross(P−q, v));   β = dot(w, cross(u, P−q)).
+// (Verbatim from aleph.scene-hit.cppm::hit_quad / quad_append's `w`.) We feed it
+// the EXACT raster vertex point P(i,j) (emit_quad's tessellation vertex) and
+// assert α,β == the baked UV/uv_scale. Vertices only — never mid-cell, where
+// floor() can straddle a boundary.
+TEST_CASE("build_sw: raster baked UV == PT hit_quad (α,β) bit-for-bit at a vertex") {
+    using aleph::math::f32;
+    using aleph::math::Vec3;
+    using aleph::math::Vec2;
+
+    // A unit floor quad q=(-1,0,-1), u=(2,0,0), v=(0,0,2); uv_scale=4.
+    const Vec3 q{-1.0f, 0.0f, -1.0f}, u_edge{2.0f, 0.0f, 0.0f}, v_edge{0.0f, 0.0f, 2.0f};
+    const f32  uv_scale = 4.0f;
+    const aleph::lowering::LoweredScene ls =
+        make_textured_floor_scene(aleph::types::MaterialKind::TexturedLambertian, uv_scale);
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls);
+
+    // Mirror emit_quad's tessellation: Nu = clamp(ceil(|u|/kCell), 1, kMaxCells).
+    auto clampc = [](int x) noexcept {
+        return x < 1 ? 1 : (x > aleph::lowering::detail::kMaxCells
+                                ? aleph::lowering::detail::kMaxCells : x);
+    };
+    const int Nu = clampc(static_cast<int>(
+        std::ceil(aleph::math::length(u_edge) / aleph::lowering::detail::kCell)));
+    const int Nv = clampc(static_cast<int>(
+        std::ceil(aleph::math::length(v_edge) / aleph::lowering::detail::kCell)));
+    REQUIRE(Nu == 4);
+    REQUIRE(Nv == 4);
+
+    // PT α,β (verbatim hit_quad formula).
+    const Vec3 n = aleph::math::cross(u_edge, v_edge);
+    const Vec3 w = n * (1.0f / aleph::math::length_sq(n));
+    auto P = [&](int i, int j) noexcept -> Vec3 {
+        return q + u_edge * (static_cast<f32>(i) / static_cast<f32>(Nu))
+                 + v_edge * (static_cast<f32>(j) / static_cast<f32>(Nv));
+    };
+    auto baked_uv = [&](int i, int j) noexcept -> Vec2 {
+        return Vec2{(static_cast<f32>(i) / static_cast<f32>(Nu)) * uv_scale,
+                    (static_cast<f32>(j) / static_cast<f32>(Nv)) * uv_scale};
+    };
+    auto cell = [](f32 a, f32 b) noexcept -> int {
+        return ((static_cast<int>(std::floor(a)) ^ static_cast<int>(std::floor(b))) & 1);
+    };
+
+    // Probe an interior tessellation vertex (i=1,j=2): away from the [0,1]
+    // boundary (clamps), where the cell straddle warning does not apply.
+    const int pi = 1, pj = 2;
+    const Vec3 pt = P(pi, pj);
+    const Vec3 hv = pt - q;
+    const f32 alpha = aleph::math::dot(w, aleph::math::cross(hv, v_edge));
+    const f32 beta  = aleph::math::dot(w, aleph::math::cross(u_edge, hv));
+    const Vec2 ab{alpha, beta};                                  // PT (raw α,β)
+
+    // The raster bakes uv = (i/Nu, j/Nv)·uv_scale; the PT applies uv_scale INSIDE
+    // its sampler. Compare the raw parameter (α,β) vs the baked uv / uv_scale —
+    // bit-for-bit (Vec2 operator==).
+    const Vec2 baked = baked_uv(pi, pj);
+    const Vec2 baked_param{baked.x / uv_scale, baked.y / uv_scale};
+    MESSAGE("PT (alpha,beta)=(" << alpha << "," << beta << ")  baked_param=("
+            << baked_param.x << "," << baked_param.y << ")");
+    CHECK(ab == baked_param);                                    // (α,β) == (i/Nu,j/Nv) bit-exact
+    // Same checker cell after ·uv_scale (α·sc vs the baked uv).
+    CHECK(cell(alpha * uv_scale, beta * uv_scale) == cell(baked.x, baked.y));
+
+    // The baked UV is actually present on a raster face at this vertex (the bake
+    // and the oracle agree on the same Vec2 the rasterizer will sample).
+    bool found_baked = false;
+    for (const aleph::render::sw::Face& f : sw.scene.faces)
+        for (std::size_t k = 0; k < 4; ++k)
+            if (f.uvs[k] == baked) found_baked = true;
+    CHECK(found_baked);
+}
