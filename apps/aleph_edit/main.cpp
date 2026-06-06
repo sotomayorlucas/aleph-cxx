@@ -23,8 +23,9 @@
 //   controller; after each step write a PPM (raster composite + a path-trace
 //   pass). Print entity/light counts; exit 0.
 
-#include <algorithm>   // std::fill
+#include <algorithm>   // std::fill, std::clamp, std::max
 #include <array>       // std::array (SDL event buffer)
+#include <cmath>       // std::sqrt, std::abs (wave-field heatmap)
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -638,6 +639,63 @@ int run_wave(const std::string& outdir) {
         if (!write_ppm(p.c_str(), film)) {
             std::fprintf(stderr, "aleph_edit: cannot write %s\n", p.c_str());
             return false;
+        }
+        // φ-FIELD HEATMAP: a top-down R×R image of the wave field on the lattice —
+        // the propagating ripple reads here where the 3D raster's fixed colormap
+        // keeps the low-amplitude front near-white. Per-frame normalized by max|φ|
+        // with a signed-sqrt to lift the front relative to the kicked centre;
+        // diverging white→red (φ>0) / white→blue (φ<0); a DELETED node renders as a
+        // dark hole, so the post-delete frames show the wave routing AROUND it.
+        {
+            constexpr int kCell = 18;  // heatmap pixels per lattice cell
+            const auto& u = controller.displacement();
+            double maxabs = 0.0;
+            for (const NodeId nd : init.nodes)
+                if (const double* v = u.at(nd)) maxabs = std::max(maxabs, std::abs(*v));
+            const double inv = (maxabs > 1e-12) ? 1.0 / maxabs : 0.0;
+            const int HW = R * kCell;
+            std::vector<unsigned char> img(static_cast<std::size_t>(HW) *
+                                           static_cast<std::size_t>(HW) * 3u, 0u);
+            for (int z = 0; z < R; ++z) {
+                for (int x = 0; x < R; ++x) {
+                    const NodeId nd = init.nodes[static_cast<std::size_t>(z * R + x)];
+                    const double* v = u.at(nd);
+                    double cr, cg, cb;
+                    if (v == nullptr) {                       // deleted node = dark hole
+                        cr = cg = cb = 0.15;
+                    } else {
+                        const double nf = (*v) * inv;          // ~[-1,1]
+                        // Signed 4th-root: a strong perceptual lift (the kicked
+                        // centre's |φ| dwarfs the propagating front; this compresses
+                        // the huge dynamic range so the travelling ripple reads,
+                        // like a log-scale field plot — sign/structure preserved).
+                        const double t = (nf >= 0.0 ? 1.0 : -1.0) *
+                                         std::pow(std::abs(nf), 0.25);
+                        if (t >= 0.0) { cr = 1.0;       cg = 1.0 - t; cb = 1.0 - t; }
+                        else          { cr = 1.0 + t;   cg = 1.0 + t; cb = 1.0;     }
+                    }
+                    const auto to8 = [](double c) {
+                        return static_cast<unsigned char>(std::clamp(c, 0.0, 1.0) * 255.0);
+                    };
+                    const unsigned char r8 = to8(cr), g8 = to8(cg), b8 = to8(cb);
+                    for (int dy = 0; dy < kCell; ++dy) {
+                        for (int dx = 0; dx < kCell; ++dx) {
+                            const std::size_t px =
+                                (static_cast<std::size_t>(z * kCell + dy) *
+                                     static_cast<std::size_t>(HW) +
+                                 static_cast<std::size_t>(x * kCell + dx)) * 3u;
+                            img[px] = r8; img[px + 1u] = g8; img[px + 2u] = b8;
+                        }
+                    }
+                }
+            }
+            const std::string fp =
+                outdir + "/step" + std::to_string(frame) + "_wave_field.ppm";
+            if (std::FILE* f = std::fopen(fp.c_str(), "wb")) {
+                std::fprintf(f, "P6\n%d %d\n255\n", HW, HW);
+                std::fwrite(img.data(), 1, img.size(), f);
+                std::fclose(f);
+            }
         }
         ++frame;
         return true;
