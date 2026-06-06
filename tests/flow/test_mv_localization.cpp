@@ -93,9 +93,8 @@ Grid make_grid(std::size_t R) {
 
 // Add one Mesh node adjacent to each node in `to`. Returns the new node id.
 NodeId add_object(Graph& g, const std::vector<NodeId>& to) {
-    static int   ctr = 0;
-    const NodeId c   = g.alloc_node_id();
-    g.insert_node(Mesh{c, std::string("add") + std::to_string(ctr++), 1});
+    const NodeId c = g.alloc_node_id();
+    g.insert_node(Mesh{c, std::string("add") + std::to_string(c.value), 1});
     for (const NodeId t : to) {
         REQUIRE(g.add_edge(EdgeKind::Adjacent, c, t).has_value());
     }

@@ -173,11 +173,7 @@ export namespace aleph::flow {
     int radius = detail::kCurvRadius) {
     const OneSkeleton skel = OneSkeleton::from_graph(g);
     RicciMap          curv;
-    for (const auto& [a, b] : skel.edges) {
-        // Mirror build_laplacian: omit edges whose endpoints are absent.
-        if (!skel.contains_vertex(a) || !skel.contains_vertex(b)) {
-            continue;
-        }
+    for (const auto& [a, b] : skel.edges) {   // from_graph guarantees both endpoints are vertices
         const f64 kappa =
             detail::ricci_curvature_edge_bounded(skel, a, b, radius);
         curv.insert(std::pair<NodeId, NodeId>{a, b}, kappa);
@@ -191,7 +187,8 @@ export namespace aleph::flow {
 // order. Deterministic.
 [[nodiscard]] inline std::vector<std::pair<NodeId, NodeId>>
 two_hop_touched_edges(const OneSkeleton&          skel,
-                      const std::vector<NodeId>& seed) {
+                      const std::vector<NodeId>& seed,
+                      int                        radius = detail::kCurvRadius) {
     const std::size_t n = skel.vertices.size();
 
     // node id -> dense index (skeleton vertex order).
@@ -221,7 +218,7 @@ two_hop_touched_edges(const OneSkeleton&          skel,
             frontier.push_back(*is);
         }
     }
-    for (int hop = 0; hop < 2; ++hop) {
+    for (int hop = 0; hop < radius; ++hop) {
         std::vector<std::size_t> next;
         for (const std::size_t u : frontier) {
             for (const std::size_t v : adj[u]) {
@@ -287,11 +284,7 @@ two_hop_touched_edges(const OneSkeleton&          skel,
     // FRESH curvature map, inserted in canonical skel.edges order (the SAME
     // order build_laplacian_bounded uses) -> byte-identical assembly.
     RicciMap curv;
-    for (const auto& [a, b] : skel.edges) {
-        // Mirror the full build: omit edges whose endpoints are absent.
-        if (!skel.contains_vertex(a) || !skel.contains_vertex(b)) {
-            continue;
-        }
+    for (const auto& [a, b] : skel.edges) {   // from_graph guarantees both endpoints are vertices
         const std::pair<NodeId, NodeId> key{a, b};
         f64                             kappa;
         if (dirty_set.contains(key)) {
