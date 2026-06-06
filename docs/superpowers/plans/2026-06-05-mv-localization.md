@@ -1,114 +1,55 @@
-# Mayer-Vietoris Localization — Implementation Plan (physics slice 3)
+# Bounded-support curvature + exact MV localization — Plan (physics slice 3, revised)
 
-> TDD. **Spec:** `docs/superpowers/specs/2026-06-05-mv-localization-design.md`. The HARD gate is **Tier-1**: the localized Δ must EQUAL the full `build_laplacian(g_after)` Δ bit-for-bit on a multi-edit trace. If you can't make Tier-1 pass, report BLOCKED — do NOT loosen the tolerance.
+> TDD. **Spec:** `docs/superpowers/specs/2026-06-05-mv-localization-design.md`. The HARD gate is **Tier-1 byte-EXACT**: localized Δ == full `build_laplacian_bounded` Δ bit-for-bit — now ACHIEVABLE because κ_R is local. Builds on the committed Task-1 primitive (`1a59ae0`: `ricci_curvature_edge`, `build_laplacian_local`, `two_hop_touched_edges`). Branch `mv-localization` (checked out).
 
-**Conventions:** `cmake --build build-release && ctest --test-dir build-release`; one case `--test-case="<name>"`; strict `grep -c "warning:"` → 0. No exceptions/RTTI.
+**Conventions:** `cmake --build build-release && ctest --test-dir build-release`; one case `--test-case`; strict `grep -c "warning:"` → 0. No exceptions/RTTI.
 
-**Read first:** `graph/src/aleph.flow/aleph.flow-ollivier_ricci.cppm` (esp. `build_state` ~:100-141, the per-edge loop `ricci_curvature_from_skeleton` :159-214 — `detail::SkeletonState st`, `uniform_on_neighbors`, the `sub_dist` slice, `wasserstein_1`), and `aleph.flow-laplacian.cppm` (`WeightedLaplacian` :71 with `node_order`/`matrix`/`curvatures`; `assemble(skel, RicciMap, weight_fn)` :114 which **iterates `curvatures` in insertion order**; `build_laplacian` :149; `default_weight`). **Byte-equality hinges on building the localized `curvatures` map by inserting in the SAME `skel.edges` order the full build uses, so `assemble`'s iteration order — hence the diagonal `+=` summation order — is identical.** `OneSkeleton::from_graph` sorts vertices+edges (deterministic).
+**Key existing code (read):** `aleph.flow-ollivier_ricci.cppm` — `detail::SkeletonState` (fields: `neighbors`, `dist` all-pairs DMatrix, node index map), `detail::build_state(skel)` (global all-pairs BFS), `detail::ricci_curvature_edge(st, a, b)` (per-edge κ from a SkeletonState — committed Task-1), `detail::node_index_of`, `uniform_on_neighbors`, `wasserstein_1`, `support` slice. `aleph.flow-laplacian.cppm` — `detail::assemble(skel, RicciMap, wf)` (iterates RicciMap insertion order), `build_laplacian`, `build_laplacian_local` (committed Task-1). `OneSkeleton::from_graph` (sorted).
 
----
-
-## Task 1: localized curvature primitive + Tier-1 (the core + hard gate)
-
-**Files:** `graph/src/aleph.flow/aleph.flow-ollivier_ricci.cppm` (factor `ricci_curvature_edge`), `graph/src/aleph.flow/aleph.flow-laplacian.cppm` (`build_laplacian_local`, `two_hop_touched_edges`), `tests/flow/test_mv_localization.cpp` (new; add to `tests/CMakeLists.txt`).
-
-- [ ] **Step 1 — factor `detail::ricci_curvature_edge(const SkeletonState& st, NodeId a, NodeId b) -> f64`** out of the `ricci_curvature_from_skeleton` loop body (lines ~168-211): everything inside `for (const auto& [a,b] : skel.edges) { ... }` that computes one edge's κ (resolve ia/ib indices from `st`, build `mu`, slice `sub_dist`, call `wasserstein_1`, return κ). Then rewrite the loop to `out.insert({a,b}, ricci_curvature_edge(st, a, b));` — proving the factor is behavior-preserving (existing `test_ollivier_ricci` + `test_laplacian` must still pass byte-identically).
-
-- [ ] **Step 2 — `two_hop_touched_edges`** (free fn in `aleph.flow`, e.g. in laplacian.cppm or ollivier_ricci.cppm):
-```cpp
-// 2-hop closure: every skeleton edge incident to a vertex within 2 hops of `seed`.
-[[nodiscard]] inline std::vector<std::pair<NodeId,NodeId>>
-two_hop_touched_edges(const OneSkeleton& skel, const std::vector<NodeId>& seed) {
-    // build adjacency from skel.edges; BFS radius 2 from each seed node into a set ball2;
-    // return all skel.edges with either endpoint in ball2, in skel.edges order.
-}
-```
-(Deterministic; use the skeleton's sorted edges. Edge keys are canonical `(min,max)` as `from_graph` produces.)
-
-- [ ] **Step 3 — `build_laplacian_local`** (laplacian.cppm):
-```cpp
-[[nodiscard]] inline WeightedLaplacian build_laplacian_local(
-    const aleph::graph::Graph& g_after, const WeightedLaplacian& prev,
-    const std::vector<std::pair<NodeId,NodeId>>& dirty_edges,
-    WeightFn weight_fn, int* recompute_count = nullptr) {
-    const OneSkeleton skel = OneSkeleton::from_graph(g_after);
-    const detail::SkeletonState st = detail::build_state(skel);   // full BFS reused this slice
-    // dirty as a set for O(1) lookup (canonical edge key)
-    RicciMap curv;                                                // FRESH, inserted in skel.edges order
-    for (const auto& [a, b] : skel.edges) {
-        f64 k;
-        if (/* (a,b) in dirty_edges */) { k = detail::ricci_curvature_edge(st, a, b); if (recompute_count) ++*recompute_count; }
-        else { const f64* cached = prev.curvatures.get({a, b}); k = cached ? *cached : detail::ricci_curvature_edge(st, a, b); }
-        curv.insert({a, b}, k);
-    }
-    return detail::assemble(skel, std::move(curv), weight_fn);    // canonical order ⇒ byte-equal to full
-}
-```
-(Confirm `RicciMap::insert`/`get`, `OrderedMap` API, and `assemble`'s signature against the real code; adapt names. The cached-miss → recompute is the safe fallback.)
-
-- [ ] **Step 4 — Tier-1 test** `tests/flow/test_mv_localization.cpp`:
-```cpp
-#include "doctest.h"
-#include <string>
-#include <vector>
-import aleph.flow; import aleph.graph; import aleph.types; import aleph.math;
-using namespace aleph::types; using aleph::graph::Graph;
-namespace { /* make_grid(R) -> Graph of R×R Mesh nodes + 4-neighbour Adjacent edges (mirror tests/flow patterns); return ids */ }
-
-TEST_CASE("mv-local: localized Δ == full build_laplacian, bit-for-bit, over an edit") {
-    // g0 = R×R grid; full0 = build_laplacian(g0).
-    // Edit: add 1 Mesh node C adjacent to an interior node + its Adjacent edges -> g1.
-    // full1 = build_laplacian(g1, default_weight);
-    // seed = {C} ∪ endpoints of the new Adjacent edges; dirty = two_hop_touched_edges(skel(g1), seed);
-    // int rc=0; local1 = build_laplacian_local(g1, full0, dirty, default_weight, &rc);
-    REQUIRE(local1.node_order == full1.node_order);
-    CHECK(local1.matrix.approx_eq(full1.matrix, 1e-12));               // exact in practice
-    for (auto& [e, kf] : full1.curvatures) { auto* kl=local1.curvatures.get(e); REQUIRE(kl); CHECK(std::abs(*kl-kf)<=1e-12); }
-    CHECK(local1.curvatures.size()==full1.curvatures.size());
-    CHECK(rc == (int)dirty.size());
-    CHECK(rc < (int)full1.curvatures.size());                          // the win: O(touched) < O(N)
-}
-TEST_CASE("mv-local: byte-EXACT (not just approx) on the grid") {
-    // same setup; assert local1.matrix.at(i,j) == full1.matrix.at(i,j) exactly for all i,j
-    // (the canonical-order assembly makes the fp summation identical). If this fails, the
-    // curvatures map insertion order differs — FIX the order, don't loosen.
-}
-TEST_CASE("mv-local: multi-edit trace stays exact") {
-    // apply several adds (and a delete if feasible at flow level) in sequence, threading prev
-    // through each; assert localized == full at every step. This stress-tests the 2-hop rule.
-}
-```
-- [ ] **Step 5 — build + run** `--test-case="mv-local*"` → pass (esp. the byte-EXACT one). Existing `test_ollivier_ricci`/`test_laplacian` still pass. Full `ctest`; strict 0. **Commit** `feat(flow): localized curvature recompute (build_laplacian_local) — byte-identical to full, certified Tier-1`.
-
-> If the byte-EXACT test fails but approx passes: the localized `curvatures` insertion order differs from full — ensure you iterate `skel.edges` (the SAME order `ricci_curvature_from_skeleton` uses) when building `curv`. If the multi-edit trace ever fails approx: the 2-hop rule under-approximated on that topology — report it (widen radius or note the degenerate case); do NOT loosen tolerance.
+**RADIUS:** `constexpr int kCurvRadius = 2`. B₂(a,b) provably captures all support geodesics (i∈N(a),j∈N(b) ⇒ d(i,j)≤3 with intermediates ≤2 hops of {a,b}), so κ_{R=2} matches the global support geometry exactly (only the local `n`=ball size differs from global).
 
 ---
 
-## Task 2: controller wiring + MV certificate + --wave guard
+## Task 1: bounded-support curvature (the new core)
 
-**Files:** `bridge/src/aleph.edit/aleph.edit-controller.cppm`, `tests/edit/test_sim_controller.cpp` (or a new `test_mv_controller.cpp`).
+**Files:** `graph/src/aleph.flow/aleph.flow-ollivier_ricci.cppm`, `graph/src/aleph.flow/aleph.flow-laplacian.cppm`, `tests/flow/test_mv_localization.cpp` (extend).
 
-- [ ] **Step 1 — `g_before` capture:** add member `aleph::graph::Graph prev_graph_{};`; in `apply(Op)`, capture `prev_graph_ = graph_;` IMMEDIATELY before `apply_op(graph_, op)` (so it holds g_before incl. soon-to-be-deleted edges).
-- [ ] **Step 2 — localized rebuild** in `rebuild_operator_and_reproject` (still gated by the existing `topo_changed`): import `aleph.sheaf` (for `decompose_rewrite`). Derive `preserved` (= current graph node ids minus the just-created ones — pass the RewriteRecord in, or recompute survivors). `auto [u,k,r] = decompose_rewrite(prev_graph_, graph_, preserved);` seed = R's mesh nodes ∪ endpoints of created/deleted Adjacent edges; `dirty = two_hop_touched_edges(OneSkeleton::from_graph(graph_), seed)`. Then:
-```cpp
-constexpr double kLocalFraction = 0.5;
-const OneSkeleton skel = ...from_graph(graph_);
-if (/* localizable op */ && dirty.size() <= kLocalFraction * skel.edges.size())
-    operator_ = aleph::flow::build_laplacian_local(graph_, operator_, dirty, aleph::flow::default_weight);
-else
-    operator_ = aleph::flow::build_laplacian(graph_, aleph::flow::default_weight);   // fallback
-u_.reproject(operator_.node_order); v_.reproject(operator_.node_order);
-```
-(rebuild_operator_and_reproject is also called from `enable_sim` indirectly? No — enable_sim builds fresh. Only the apply() path has a prev. On the FIRST build / enable_sim, use the full `build_laplacian`. Ensure `operator_` is valid before the first localized call.)
-- [ ] **Step 2b — `rebuild_operator_and_reproject` needs the RewriteRecord/preserved** — thread it from `apply()` (which has `rec`). Adjust the helper signature to take the touched info, or inline the localized logic in `apply()`.
-- [ ] **Step 3 — tests** (`tests/edit/test_mv_controller.cpp`, add to CMake): after an `AddObject` via the controller, the controller's `operator_.matrix` equals a fresh `build_laplacian(controller graph)` (the controller localized correctly); AND the MV Tier-2 certificate closes: `CHECK(mayer_vietoris_certify_with(graph, u, r, k, SheafKind::Visibility).residual == 0);`. (Expose a const accessor to `operator_` for the test if needed, or test via the public surface.)
-- [ ] **Step 4 — --wave byte-identical guard:** the wave's Δ now comes (on edits) from the localized path. `mkdir -p /tmp/base /tmp/after`; capture `--wave /tmp/base` BEFORE wiring (or from `main`), then after; `diff -rq` must be EMPTY (localized==full ⇒ identical Δ ⇒ identical wave). The `--wave` demo does a DeleteObject mid-run — this exercises the localized DELETE path. If frames differ, the localized delete is wrong — STOP/report.
-- [ ] **Step 5 — full `ctest` + strict 0 + the win:** add a `--wave`/headless log of `recompute_count` showing O(touched) ≪ |E| on the lattice (a printf in the localized path, or a controller accessor). **Commit** `feat(sim): controller localizes Δ on edit (MV cover + 2-hop) — --wave byte-identical, MV cert closes`.
+- [ ] **Step 1 — `detail::build_local_state(skel, a, b, radius) -> SkeletonState`:** BFS from `{a,b}` over `skel`'s adjacency to `radius` hops → the local ball node set, SORTED (canonical, deterministic). Build a `SkeletonState` scoped to the ball: local `neighbors` (each ball node's neighbors that are in the ball — note: a ball node at the boundary may have neighbors outside; INCLUDE them in the support only if within `radius`+? — to keep κ well-defined use the induced subgraph on the ball, distances via BFS WITHIN the ball). `dist` = all-pairs BFS within the induced ball subgraph. `n` = ball size. This must produce a `SkeletonState` that `ricci_curvature_edge(local_st, a, b)` consumes identically.
+  - Subtlety: `ricci_curvature_edge` uses `uniform_on_neighbors(ia, st.neighbors, n)` (μ over N(a)) and the `support` (finite-distance nodes). In the local state, N(a) must be a's TRUE 1-hop neighbours (all of them — they're within radius 2 ≥ 1), and the support is the ball. Ensure a's full neighbour set is captured (radius≥1 guarantees it). Distances among support nodes (≤3 hops) are exact within B₂.
+- [ ] **Step 2 — `detail::ricci_curvature_edge_bounded(skel, a, b, radius)`** = `ricci_curvature_edge(build_local_state(skel, a, b, radius), a, b)`. (Reuses the committed per-edge fn with a LOCAL state ⇒ κ_R.)
+- [ ] **Step 3 — `build_laplacian_bounded(g, weight_fn, radius=kCurvRadius)`** (exported, laplacian.cppm): `skel = from_graph(g)`; fresh `RicciMap` iterating `skel.edges` in order, `κ[e] = ricci_curvature_edge_bounded(skel, e.a, e.b, radius)`; `assemble(skel, curv, wf)`. (The global `build_laplacian`/`ricci_curvature` stay UNCHANGED for `lowering::importance`.)
+- [ ] **Step 4 — tests** (extend `test_mv_localization.cpp`): (a) **determinism** — `build_laplacian_bounded(g)` twice → byte-identical matrix; (b) **sanity** — `is_symmetric(1e-12)`, `ones_in_kernel(1e-12)` hold (Δ is still a valid graph Laplacian); (c) **locality fidelity** — on a large grid, an interior edge's `ricci_curvature_edge_bounded(skel,a,b,2)` ≈ the global `ricci_curvature_edge` within ~1e-6 (R=2 captures the local geometry; only the perturbation-`n` differs). 
+- [ ] **Step 5 — build + run** `--test-case="mv-local*"` + full ctest + strict 0. **Commit** `feat(flow): bounded-support Ollivier-Ricci curvature (build_laplacian_bounded) — local operator`.
+
+---
+
+## Task 2: exact localization on the bounded operator (Tier-1 byte-exact)
+
+**Files:** `graph/src/aleph.flow/aleph.flow-laplacian.cppm` (rework `build_laplacian_local`), `tests/flow/test_mv_localization.cpp`.
+
+- [ ] **Step 1 — rework `build_laplacian_local`** to use BOUNDED κ: per edge, `κ[e] = dirty.contains(e) ? ricci_curvature_edge_bounded(skel_after, e.a, e.b, kCurvRadius) (++count) : prev.curvatures.get(e)` (cached). Fresh RicciMap in `skel.edges` order → `assemble`. (The cached κ are bounded κ_R from the previous `build_laplacian_bounded`/`build_laplacian_local`.) NO global `build_state` — each recompute builds its own local state (the asymptotic win).
+- [ ] **Step 2 — dirty derivation:** `dirty = two_hop_touched_edges(skel_after, seed)` with the BFS radius = `kCurvRadius` (an edit changes κ_R(e) iff within R hops of e). `seed` = changed mesh nodes ∪ endpoints of created/deleted edges.
+- [ ] **Step 3 — Tier-1 byte-EXACT test:** g0=grid; `prev = build_laplacian_bounded(g0)`. Edit→g1 (add node + edges). `full = build_laplacian_bounded(g1)`; `dirty = two_hop_touched_edges(skel(g1), seed)`; `int rc=0; local = build_laplacian_local(g1, prev, dirty, default_weight, &rc)`. Assert:
+  - `local.node_order == full.node_order`;
+  - `local.matrix.at(i,j) == full.matrix.at(i,j)` for ALL i,j — **`==`, bit-exact** (now holds: κ_R is local, non-dirty edges' cached κ_R == full κ_R exactly, same local `n`);
+  - every curvature matches exactly; `rc == dirty.size() < |E|`.
+  - **Multi-edit trace** (several adds + a delete) threading `prev` → exact at every step.
+- [ ] **Step 4 — build + run.** If byte-exact STILL fails: the local-state node ordering or `n` differs between cached and recomputed for a non-dirty edge — make `build_local_state` fully deterministic (sorted ball, induced-subgraph distances independent of the rest of the graph). This MUST pass now; if not, report BLOCKED with the exact mismatching edge. **Commit** `feat(flow): exact MV localization on bounded curvature — Tier-1 byte-identical`.
+
+---
+
+## Task 3: controller wiring + new --wave baseline + win
+
+**Files:** `bridge/src/aleph.edit/aleph.edit-controller.cppm`, tests, `apps/aleph_edit/main.cpp` (no change expected).
+
+- [ ] **Step 1 — operator_ → bounded:** `enable_sim` and the first build use `aleph::flow::build_laplacian_bounded(graph_, default_weight)` (NOT the global `build_laplacian`). This changes the wave's Δ → a NEW deterministic `--wave` baseline (expected; recapture it).
+- [ ] **Step 2 — `prev_graph_` capture** (member; set before `apply_op`). In `rebuild_operator_and_reproject` (gated by `topo_changed`): derive `preserved`; `decompose_rewrite(prev_graph_, graph_, preserved)` → seed from R + created/deleted-edge endpoints; `dirty = two_hop_touched_edges(skel_after, seed)`; if `dirty.size() <= kLocalFraction*|E|` and the op is localizable → `operator_ = build_laplacian_local(graph_, operator_, dirty, default_weight, &recompute_count_)`, else `build_laplacian_bounded(graph_, …)` (fallback). `u_/v_` reproject as today.
+- [ ] **Step 3 — tests** (`test_mv_controller.cpp`): after an `AddObject`, controller `operator_.matrix` == `build_laplacian_bounded(controller graph)` byte-exact (localized correctly); MV Tier-2 `mayer_vietoris_certify_with(graph, u, r, k, Visibility).residual == 0`.
+- [ ] **Step 4 — --wave determinism + win:** capture the NEW `--wave` baseline (`/tmp/base`), run again (`/tmp/after`), `diff -rq` EMPTY (run-to-run determinism on the localized path, incl. the mid-run DeleteObject). Log `recompute_count` per edit showing O(touched) ≪ |E|. ctest + strict 0. **Commit** `feat(sim): controller on bounded localized Δ — wave deterministic, MV cert closes, O(touched) recompute`.
 
 ---
 
 ## Final verification
-- [ ] Tier-1 byte-EXACT (localized==full) on single + multi-edit traces; existing flow tests unchanged.
-- [ ] Tier-2 MV `residual==0`. `ctest` all pass; strict 0.
-- [ ] `--wave` byte-identical vs pre-wiring (localized delete correct).
-- [ ] `recompute_count` log shows O(touched) ≪ |E| (the demonstrable targeting; wall-clock win deferred to the bounded-BFS follow-up).
+- [ ] Tier-1 byte-EXACT (localized == full bounded) on single + multi-edit traces.
+- [ ] Tier-2 MV `residual==0`; ctest all pass; strict 0.
+- [ ] `--wave` run-to-run byte-identical (new bounded baseline); `recompute_count` O(touched) ≪ |E|.
