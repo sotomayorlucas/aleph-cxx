@@ -63,6 +63,7 @@ struct MaterialParams {
     aleph::math::f32           fuzz{0};
     aleph::math::f32           ior{1.5f};
     aleph::math::Vec3          emit{0, 0, 0};
+    aleph::math::f32           uv_scale{4.0f};
 };
 
 // A resolved drawable: its source node, world-space geometry, and the material
@@ -163,7 +164,7 @@ to_world(const aleph::types::GeometryPayload& local, const Mat4& world) {
 
 // Project a graph Material onto the normalized IR params.
 [[nodiscard]] inline MaterialParams to_params(const aleph::types::Material& m) noexcept {
-    return MaterialParams{m.kind, m.albedo, m.fuzz, m.ior, m.emit};
+    return MaterialParams{m.kind, m.albedo, m.fuzz, m.ior, m.emit, m.uv_scale};
 }
 
 // Photometric luminance (Rec. 709) of an emission color. > 0 ⇒ physically emissive.

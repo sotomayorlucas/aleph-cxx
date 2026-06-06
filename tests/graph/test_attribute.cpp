@@ -8,6 +8,7 @@ TEST_CASE("MaterialKind values") {
     CHECK(static_cast<int>(MaterialKind::Metal)      == 1);
     CHECK(static_cast<int>(MaterialKind::Dielectric) == 2);
     CHECK(static_cast<int>(MaterialKind::Emissive)   == 3);
+    CHECK(static_cast<int>(MaterialKind::TexturedLambertian) == 4);
 }
 
 TEST_CASE("LightKind values") {

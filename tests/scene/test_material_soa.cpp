@@ -35,10 +35,11 @@ TEST_CASE("EmissiveSoA: emit color") {
     CHECK(e.emit[0] == Vec3{15, 15, 15});
 }
 
-TEST_CASE("TexturedLambertianSoA: tex_id + uv_scale") {
+TEST_CASE("TexturedLambertianSoA: albedo + tex_id + uv_scale") {
     TexturedLambertianSoA t;
-    const auto i = textured_lambertian_append(t, 7u, Vec2{2.0f, 1.0f});
+    const auto i = textured_lambertian_append(t, Vec3{0.2f, 0.4f, 0.6f}, 7u, Vec2{2.0f, 1.0f});
     CHECK(i == 0u);
+    CHECK(t.albedo[0] == Vec3{0.2f, 0.4f, 0.6f});
     CHECK(t.tex_id[0] == 7u);
     CHECK(t.uv_scale[0] == Vec2{2.0f, 1.0f});
 }

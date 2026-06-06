@@ -41,13 +41,16 @@ inline std::uint32_t emissive_append(EmissiveSoA& s, aleph::math::Vec3 emit) noe
 }
 
 struct TexturedLambertianSoA {
+    std::vector<aleph::math::Vec3> albedo;
     std::vector<std::uint32_t>     tex_id;
     std::vector<aleph::math::Vec2> uv_scale;
 };
 inline std::uint32_t textured_lambertian_append(TexturedLambertianSoA& s,
+                                                  aleph::math::Vec3 albedo,
                                                   std::uint32_t tex_id,
                                                   aleph::math::Vec2 uv_scale) noexcept {
-    const std::uint32_t idx = static_cast<std::uint32_t>(s.tex_id.size());
+    const std::uint32_t idx = static_cast<std::uint32_t>(s.albedo.size());
+    s.albedo.push_back(albedo);
     s.tex_id.push_back(tex_id);
     s.uv_scale.push_back(uv_scale);
     return idx;

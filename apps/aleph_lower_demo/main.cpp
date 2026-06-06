@@ -324,6 +324,8 @@ aleph::scene::MaterialHandle add_material(aleph::scene::Scene& s,
             return aleph::scene::scene_add_dielectric(s, m.ior);
         case aleph::types::MaterialKind::Emissive:
             return aleph::scene::scene_add_emissive(s, m.emit);
+        case aleph::types::MaterialKind::TexturedLambertian:
+            return aleph::scene::scene_add_textured_lambertian(s, m.albedo, {m.uv_scale, m.uv_scale});
     }
     return aleph::scene::scene_add_lambertian(s, m.albedo);
 }
