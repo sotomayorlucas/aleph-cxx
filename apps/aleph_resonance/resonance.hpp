@@ -18,6 +18,7 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <numbers>
 #include <vector>
 
 import aleph.flow;   // IncrementalLaplacian (the shared Δ)
@@ -46,8 +47,9 @@ struct ResonancePoint {
 // eigenvalue (= every resonance) of Δ.
 [[nodiscard]] inline f64
 resonance_f_max_hz(const aleph::flow::IncrementalLaplacian& flow) {
-    f64 max_diag = 0.0;
     const std::size_t n = flow.laplacian.rows();
+    if (n == 0) return 0.0;  // empty Δ — no spectrum to sweep
+    f64 max_diag = 0.0;
     for (std::size_t i = 0; i < n; ++i) {
         const f64 d = flow.laplacian.at(i, i);
         if (d > max_diag) {
@@ -56,7 +58,7 @@ resonance_f_max_hz(const aleph::flow::IncrementalLaplacian& flow) {
     }
     const f64 k2_max = 2.0 * max_diag;  // Gershgorin upper bound on λ_max(Δ)
     return (aleph::sim::kSpeedOfSound * std::sqrt(k2_max)) /
-           (2.0 * 3.14159265358979323846);
+           (2.0 * std::numbers::pi);
 }
 
 // Sweep frequency ∈ [0, f_max_hz] in `steps`+1 inclusive samples. Per step:
