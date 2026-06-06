@@ -305,6 +305,8 @@ sun_tint(aleph::math::Vec3 point, aleph::math::Vec3 N,
                       : aleph::math::lerp(kSkyHorizon, kSkyZenith, (a - 0.5f) * 2.0f);
 }
 // Schlick Fresnel — MANUAL quintic (std::pow is not bit-stable; mirrors render.rt).
+// Requires ior > -1 (physical glass is >> 0; 1.5 nominal). At ior == -1 the r0
+// denominator is zero — no reachable path sets a negative ior (Dielectric=1.5).
 [[nodiscard]] inline aleph::math::f32 schlick_f32(aleph::math::f32 cosine, aleph::math::f32 ior) noexcept {
     aleph::math::f32 r0 = (1.0f - ior) / (1.0f + ior); r0 = r0 * r0;
     const aleph::math::f32 oc = std::max(0.0f, 1.0f - cosine);
@@ -531,6 +533,9 @@ shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
             const aleph::math::f32  vis = light_visibility(point, N, L, occluders, self);
             const aleph::math::Vec3 H0 = Ldir + V;
             const aleph::math::f32  hlen = aleph::math::length(H0);
+            // Blinn-Phong lobe: std::pow (variable shininess in [4,16]) is the one
+            // libm call in shade — bit-stable PER-RUN (deterministic for fixed f32
+            // inputs, so same_face holds); only Metal/Dielectric vcol touch it.
             aleph::math::f32 spec = 0.0f;
             if (hlen > 1e-8f) {
                 const aleph::math::f32 ndh = aleph::math::dot(N, H0 * (1.0f / hlen));
@@ -559,6 +564,8 @@ shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
             if (hlen <= 1e-8f) continue;
             const aleph::math::f32  ndh = aleph::math::dot(N, H0 * (1.0f / hlen));
             if (ndh <= 0.0f) continue;
+            // std::pow (fixed kGlassShininess): see the Metal-branch note — libm,
+            // bit-stable per-run, the one non-quintic pow in shade.
             const aleph::math::f32  spec = std::pow(ndh, kGlassShininess) * F;
             lit = lit + L.material.emit * (spec * atten * kLightScale * vis);
         }

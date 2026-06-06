@@ -647,6 +647,9 @@ using aleph::math::f32;
 // ao; amb = sky_ambient + sun_tint; lit = hadamard(albedo,amb)*ao + emit; the
 // per-light loop; *kRasterExposure). If `==` ever fails, Task 1's Lambert branch
 // has DIVERGED — a real regression to surface, NOT a reason to switch to Approx.
+// SYNC POINT: if build_sw.cppm shade_face's Lambertian/Emissive branch (the tail
+// of shade_face, ~lines 571-585) is ever changed, update this copy verbatim in
+// lockstep — otherwise the golden silently drifts with the implementation.
 [[nodiscard]] Vec3 shade_lambert_ref(Vec3 point, Vec3 normal, Vec3 albedo, Vec3 emit,
                                      const std::vector<LoweredEntity>& lights,
                                      bool two_sided,
