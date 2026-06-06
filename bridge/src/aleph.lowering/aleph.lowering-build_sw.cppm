@@ -193,6 +193,28 @@ inline constexpr aleph::math::f32 kShadowEps     = 1.0e-3f;
 inline constexpr aleph::math::f32 kShadowBias    = 2.0e-3f;
 inline constexpr int              kShadowSamples = 2;  // 2x2 on area lights
 
+// --- per-vertex ambient occlusion ------------------------------------------
+//
+// AO darkens the AMBIENT term (complementary to the contact shadows, which darken
+// the DIRECT light). For a shaded point with unit normal N we cast `kAoRays` FIXED
+// hemisphere directions and count how many strike *other* geometry within `kAoDist`
+// (reusing the contact-shadow `seg_hits_*` primitives as max-distance AO rays):
+// `ao = max(kAoFloor, 1 − occluded/kAoRays)`. Deterministic — fixed directions,
+// fixed order, branchless ONB, pure f32. Multiplies ONLY the ambient seed.
+inline constexpr int              kAoRays  = 9;     // 1 up + 8 around (~50° elev)
+inline constexpr aleph::math::f32 kAoDist  = 2.0f;  // local occlusion radius (world units)
+inline constexpr aleph::math::f32 kAoBias  = kShadowBias;  // reuse the shadow bias (2e-3)
+inline constexpr aleph::math::f32 kAoFloor = 0.15f; // AO never blacks the ambient below this
+// Hemisphere directions in TANGENT space (z=up): 1 straight up + a ring of 8 at
+// ~50° elevation. Each is unit (0.643²+0.766²=1; 0.455²+0.455²+0.766²=1).
+inline constexpr std::array<aleph::math::Vec3, kAoRays> kAoDirs = {
+    aleph::math::Vec3{0.0f, 0.0f, 1.0f},
+    aleph::math::Vec3{ 0.643f,  0.000f, 0.766f}, aleph::math::Vec3{ 0.455f,  0.455f, 0.766f},
+    aleph::math::Vec3{ 0.000f,  0.643f, 0.766f}, aleph::math::Vec3{-0.455f,  0.455f, 0.766f},
+    aleph::math::Vec3{-0.643f,  0.000f, 0.766f}, aleph::math::Vec3{-0.455f, -0.455f, 0.766f},
+    aleph::math::Vec3{ 0.000f, -0.643f, 0.766f}, aleph::math::Vec3{ 0.455f, -0.455f, 0.766f},
+};
+
 // Centre of a light's geometry — its effective point-light position for the
 // preview. Quad centre = q + (u+v)/2; tri centre = centroid; sphere = centre.
 [[nodiscard]] inline aleph::math::Vec3
@@ -264,6 +286,68 @@ light_center(const aleph::types::GeometryPayload& g) noexcept {
     if (w < 0.0f || u + w > 1.0f) return false;
     const aleph::math::f32 t = aleph::math::dot(e2, qv) * inv;
     return t > kShadowEps && t < len - kShadowEps;
+}
+
+// --- ambient occlusion -----------------------------------------------------
+//
+// Branchless orthonormal basis (T,B) from a unit normal n (Duff et al. 2017).
+// No T/B discontinuity at component ties; deterministic pure-f32 (std::copysign).
+inline void onb_from_normal(aleph::math::Vec3 n,
+                            aleph::math::Vec3& T, aleph::math::Vec3& B) noexcept {
+    const aleph::math::f32 s = std::copysign(1.0f, n.z);
+    const aleph::math::f32 a = -1.0f / (s + n.z);
+    const aleph::math::f32 b = n.x * n.y * a;
+    T = aleph::math::Vec3{1.0f + s * n.x * n.x * a, s * b, -s * n.x};
+    B = aleph::math::Vec3{b, s + n.y * n.y * a, -n.y};
+}
+
+// Per-vertex AO factor ∈ [kAoFloor, 1]: cast `kAoRays` fixed hemisphere dirs from
+// the (normal-biased) `point` and count those that strike *other* geometry within
+// `kAoDist`. `ao = max(kAoFloor, 1 − occluded/kAoRays)`. Skips `self` (a convex
+// sphere mustn't self-darken; the floor's AO comes from OTHER entities).
+//
+// AO-NORMAL REORIENTATION (required): the quad/tri normal sign is arbitrary — the
+// floor's cross(u,v)=(0,−64,0) points DOWN. AO is sign-SENSITIVE, so we reorient to
+// the world-up hemisphere INTERNALLY (`N_ao`); a down-pointing N would otherwise
+// sample BELOW the floor and never see the sphere above → the floor wouldn't darken.
+// The caller passes the RAW signed N (the Lambert path keeps it; this flip is local
+// to AO so `vcol` byte-determinism is preserved).
+[[nodiscard]] inline aleph::math::f32
+ambient_occlusion(aleph::math::Vec3 point, aleph::math::Vec3 N,
+                  const std::vector<LoweredEntity>& occluders,
+                  aleph::types::NodeId self) noexcept {
+    using aleph::math::Vec3;
+    const Vec3 N_ao = (aleph::math::dot(N, Vec3{0.0f, 1.0f, 0.0f}) < 0.0f) ? N * -1.0f : N;
+    Vec3 T, B;
+    onb_from_normal(N_ao, T, B);
+    const Vec3 p0 = point + N_ao * kAoBias;
+    int occluded = 0;
+    for (const Vec3& dt : kAoDirs) {
+        const Vec3 d = T * dt.x + B * dt.y + N_ao * dt.z;   // world dir (unit)
+        bool hit = false;
+        for (const LoweredEntity& o : occluders) {
+            if (o.source == self) continue;
+            if (std::visit(
+                    [&](const auto& gg) noexcept -> bool {
+                        using G = std::decay_t<decltype(gg)>;
+                        if constexpr (std::is_same_v<G, aleph::types::SphereLocal>) {
+                            return seg_hits_sphere(p0, d, kAoDist, gg);
+                        } else if constexpr (std::is_same_v<G, aleph::types::QuadLocal>) {
+                            return seg_hits_quad(p0, d, kAoDist, gg);
+                        } else {  // aleph::types::TriLocal
+                            return seg_hits_tri(p0, d, kAoDist, gg);
+                        }
+                    },
+                    o.world_geometry)) {
+                hit = true;
+                break;
+            }
+        }
+        if (hit) ++occluded;
+    }
+    return std::max(kAoFloor,
+                    1.0f - static_cast<aleph::math::f32>(occluded)
+                               / static_cast<aleph::math::f32>(kAoRays));
 }
 
 // --- light visibility ------------------------------------------------------
@@ -345,7 +429,11 @@ shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
         ? normal * (1.0f / nlen)
         : aleph::math::Vec3{0.0f, 1.0f, 0.0f};
 
-    aleph::math::Vec3 lit = base_albedo * kAmbient + self_emit;
+    // Ambient occlusion darkens ONLY the ambient seed (the per-light diffuse keeps
+    // its own shadow `vis` multiply, the disjoint addend — no double-darkening).
+    // Pass the RAW signed N; `ambient_occlusion` does its own world-up reorientation.
+    const aleph::math::f32 ao = ambient_occlusion(point, N, occluders, self);
+    aleph::math::Vec3 lit = base_albedo * (kAmbient * ao) + self_emit;
     for (const LoweredEntity& L : lights) {
         const aleph::math::Vec3 d = light_center(L.world_geometry) - point;
         const aleph::math::f32 dist_sq = aleph::math::dot(d, d);
