@@ -165,6 +165,14 @@ TEST_CASE("build_sw: 1 sphere + 1 quad -> SPEC face counts + face_source map") {
     CHECK(faces_from(sw, s.quad)   == quad_faces);
     CHECK(faces_from(sw, s.sphere) + faces_from(sw, s.quad) == sw.face_source.size());
 
+    // Polish slice 4d: pin the finer-sphere target so an accidental down-tune is
+    // caught, plus a geometric "rounder than before" floor (old 12 rings ≈0.262 rad).
+    CHECK(aleph::lowering::kSphereRings   >= 20);
+    CHECK(aleph::lowering::kSphereSectors >= 28);
+    const double polar_step = 3.14159265358979323846 /
+                              static_cast<double>(aleph::lowering::kSphereRings);
+    CHECK(polar_step <= 0.18);   // 20 rings ≈0.157 passes; old 12 rings ≈0.262 fails
+
     for (NodeId src : sw.face_source) {
         const bool is_known = (src == s.sphere) || (src == s.quad);
         CHECK(is_known);
@@ -314,6 +322,33 @@ TEST_CASE("build_sw: contact shadow darkens the floor under a sphere") {
     REQUIRE(found_far);
     // The shadowed face under the sphere is measurably darker than the far one.
     CHECK(lum_under < lum_far);
+}
+
+TEST_CASE("build_sw: softer shadows resolve 1/16-step penumbra visibility (4x4 grid)") {
+    using aleph::math::f32;
+    const aleph::lowering::LoweredScene ls = make_shadow_scene();
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls);
+    REQUIRE(ls.lights.size() == 1u);
+    // The 4x4 (16-sample) area grid yields penumbra visibility in 1/16ths — a value
+    // the old 2x2 (quarter-step) grid could not produce. Probe light_visibility at
+    // floor-face vertices and assert at least one genuine 16th-but-not-quarter step
+    // (e.g. the penumbra corner's 10/16 = 0.625). Direct granularity proof; no
+    // dependence on luminance/atten or how many cells fall in the penumbra.
+    bool found_sixteenth = false;
+    for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
+        if (!(sw.face_source[i] == NodeId{2})) continue;             // floor faces
+        const Vec3 p = sw.scene.faces[i].verts[0];
+        const f32 v = aleph::lowering::detail::light_visibility(
+            p, Vec3{0.0f, 1.0f, 0.0f}, ls.lights[0], ls.entities, NodeId{2});
+        if (v <= 0.001f || v >= 0.999f) continue;                    // penumbra only
+        const f32 s16 = v * 16.0f, s4 = v * 4.0f;
+        if (std::fabs(s16 - std::round(s16)) < 1e-3f &&              // a 16th-step
+            std::fabs(s4  - std::round(s4))  > 1e-3f) {              // not a quarter-step
+            found_sixteenth = true; break;
+        }
+    }
+    CHECK(found_sixteenth);
+    CHECK(aleph::lowering::detail::kShadowSamples >= 4);
 }
 
 TEST_CASE("build_sw: sphere front face stays lit (no false self-shadow)") {

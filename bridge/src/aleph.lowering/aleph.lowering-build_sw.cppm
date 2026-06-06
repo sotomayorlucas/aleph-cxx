@@ -84,8 +84,8 @@ struct SwBuild {
 // rings/sectors for determinism"). Exported so tests can pin the per-sphere face
 // count to `kSphereRings * kSphereSectors * 2` against the SPEC formula rather
 // than a literal. Kept small for a fluid raster view; bump only with care.
-inline constexpr int kSphereRings   = 12;  // latitude bands  (theta: 0..pi)
-inline constexpr int kSphereSectors = 16;  // longitude slices (phi:   0..2pi)
+inline constexpr int kSphereRings   = 20;  // was 12; latitude bands  (theta: 0..pi)
+inline constexpr int kSphereSectors = 28;  // was 16; longitude slices (phi:   0..2pi)
 
 namespace detail {
 
@@ -184,10 +184,10 @@ inline constexpr int              kMaxCells = 24;    // per-axis tessellation ca
 //   * kShadowEps    — hit window margin (t ∈ (eps, len−eps)) + degeneracy guard.
 //   * kShadowBias   — normal offset of the segment start so the surface doesn't
 //                     self-hit at the contact (avoids acne / peter-panning).
-//   * kShadowSamples— 2×2 grid across an area (QuadLocal) light => soft penumbra.
+//   * kShadowSamples— 4×4 grid across an area (QuadLocal) light => soft penumbra.
 inline constexpr aleph::math::f32 kShadowEps     = 1.0e-3f;
 inline constexpr aleph::math::f32 kShadowBias    = 2.0e-3f;
-inline constexpr int              kShadowSamples = 2;  // 2x2 on area lights
+inline constexpr int              kShadowSamples = 4;  // was 2; 4x4 on area lights
 
 // --- per-vertex ambient occlusion ------------------------------------------
 //
