@@ -33,6 +33,7 @@ add_executable(aleph_tests
     graph/test_invariants_6_10.cpp
     linalg/test_gf2.cpp
     linalg/test_sparse.cpp
+    linalg/test_bk_ldlt.cpp
     dpo/test_dpo.cpp
     sheaf/test_simplex.cpp
     sheaf/test_union_find.cpp
