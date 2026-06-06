@@ -117,6 +117,33 @@ InitialScene build_initial_graph() {
     smat.emit   = Vec3{0.0f, 0.0f, 0.0f};
     g.insert_node(std::move(smat));
 
+    // A chrome sphere to the matte sphere's left — exercises the Metal raster shade
+    // (signed sky↔ground reflection + Blinn-Phong highlight).
+    const NodeId metal_sphere = g.alloc_node_id();
+    Mesh msphere{metal_sphere, std::string("metal_sphere"), 0};
+    msphere.geometry = SphereLocal{Vec3{-1.5f, 0.5f, 0.0f}, 0.5f};
+    g.insert_node(std::move(msphere));
+
+    const NodeId metal_mat = g.alloc_node_id();
+    Material mmat{metal_mat, MaterialKind::Metal};
+    mmat.albedo = Vec3{0.85f, 0.85f, 0.9f};
+    mmat.fuzz   = 0.05f;
+    mmat.emit   = Vec3{0.0f, 0.0f, 0.0f};
+    g.insert_node(std::move(mmat));
+
+    // A glass sphere to the matte sphere's right — exercises the Dielectric raster
+    // shade (Schlick Fresnel bright rim + dim center).
+    const NodeId glass_sphere = g.alloc_node_id();
+    Mesh gsphere{glass_sphere, std::string("glass_sphere"), 0};
+    gsphere.geometry = SphereLocal{Vec3{1.5f, 0.5f, 0.0f}, 0.5f};
+    g.insert_node(std::move(gsphere));
+
+    const NodeId glass_mat = g.alloc_node_id();
+    Material gmat{glass_mat, MaterialKind::Dielectric};
+    gmat.ior  = 1.5f;
+    gmat.emit = Vec3{0.0f, 0.0f, 0.0f};
+    g.insert_node(std::move(gmat));
+
     // A large floor quad in the y=0 plane.
     s.floor = g.alloc_node_id();
     Mesh floor{s.floor, std::string("floor"), 0};
@@ -142,9 +169,13 @@ InitialScene build_initial_graph() {
 
     (void)g.add_edge(EdgeKind::Contains,   s.root, cam_id);
     (void)g.add_edge(EdgeKind::Contains,   s.root, s.sphere);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, metal_sphere);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, glass_sphere);
     (void)g.add_edge(EdgeKind::Contains,   s.root, s.floor);
     (void)g.add_edge(EdgeKind::Contains,   s.root, light_id);
     (void)g.add_edge(EdgeKind::References, s.sphere, sphere_mat);
+    (void)g.add_edge(EdgeKind::References, metal_sphere, metal_mat);
+    (void)g.add_edge(EdgeKind::References, glass_sphere, glass_mat);
     (void)g.add_edge(EdgeKind::References, s.floor,  floor_mat);
     return s;
 }
@@ -329,6 +360,9 @@ int run_headless(const std::string& outdir) {
     cam.pitch  = 0.25f;
     cam.radius = 5.0f;
     cam.vfov_deg = 45.0f;
+    // Re-bake sw_ at the FINAL framed pose: the ctor baked while cam_ was still the
+    // default {0,0,5} eye, but Metal/Dielectric vcol is view-dependent.
+    controller.rebake_view();
 
     aleph::threads::Pool pool(thread_count());
 
@@ -421,7 +455,7 @@ int run_headless(const std::string& outdir) {
     {
         aleph::lowering::AddObject add{};
         add.parent   = root;
-        add.geometry = aleph::types::SphereLocal{Vec3{1.5f, 0.5f, 0.0f}, 0.5f};
+        add.geometry = aleph::types::SphereLocal{Vec3{0.0f, 0.5f, 1.5f}, 0.5f};
         add.material = lambertian(Vec3{0.15f, 0.5f, 0.85f});
         if (!apply(aleph::lowering::Op{add}, "AddObject")) return 1;
     }
@@ -496,6 +530,8 @@ int run_wave(const std::string& outdir) {
     cam.pitch    = 0.6f;
     cam.radius   = static_cast<f32>(R) * 1.7f;
     cam.vfov_deg = 45.0f;
+    // Re-bake sw_ at the FINAL framed pose (the ctor baked at the default eye).
+    controller.rebake_view();
 
     controller.enable_sim(true);
     (void)controller.kick(center, 1.5);
@@ -617,6 +653,9 @@ int run_live(bool wave_demo = false) {
         cam.radius   = 5.0f;
         cam.vfov_deg = 45.0f;
     }
+    // Re-bake sw_ at the FINAL framed pose (the ctor baked at the default eye);
+    // Metal/Dielectric vcol is view-dependent.
+    controller.rebake_view();
 
     aleph::threads::Pool pool(thread_count());
     aleph::editor::UiCtx ui{};

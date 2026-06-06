@@ -355,6 +355,12 @@ public:
         return r;
     }
 
+    // Re-bake sw_ (+ render_) at the CURRENT orbit pose. The shell calls this once
+    // after setting the framed camera, since the ctor baked at the default pose and
+    // the Metal/Dielectric vcol is view-dependent (so the construction-time bake used
+    // the wrong eye). No-op-safe: a plain re-derive of both backends from `prev_`.
+    void rebake_view() { rebuild_backends_from_prev(); }
+
     // ── Accessors ────────────────────────────────────────────────────────────
     [[nodiscard]] OrbitCamera&       camera()       noexcept { return cam_; }
     [[nodiscard]] const OrbitCamera& camera() const noexcept { return cam_; }
@@ -525,9 +531,9 @@ private:
                 for (std::size_t j = 0; j < u_.order.size(); ++j)
                     if (u_.order[j] == src) { phi_entity[i] = u_.data[j]; break; }
             }
-            sw_ = aleph::lowering::build_sw_scene(prev_, &phi_entity);
+            sw_ = aleph::lowering::build_sw_scene(prev_, cam_.look_from(), &phi_entity);
         } else {
-            sw_ = aleph::lowering::build_sw_scene(prev_);
+            sw_ = aleph::lowering::build_sw_scene(prev_, cam_.look_from());
         }
         // Path-trace SoA/BVH scene + camera pose (camera pose is also mirrored by
         // the orbit camera, which the shell drives; we keep the IR camera for the
