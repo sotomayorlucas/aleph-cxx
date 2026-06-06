@@ -5,7 +5,8 @@ target_sources(aleph_linalg_sparse
         aleph.linalg.sparse-dense.cppm
         aleph.linalg.sparse-csr.cppm
         aleph.linalg.sparse-ldlt.cppm
-        aleph.linalg.sparse-ldlt_sparse.cppm)
+        aleph.linalg.sparse-ldlt_sparse.cppm
+        aleph.linalg.sparse-bk_ldlt.cppm)
 target_link_libraries(aleph_linalg_sparse
     PUBLIC  aleph_math
     PRIVATE aleph_flags_isa)

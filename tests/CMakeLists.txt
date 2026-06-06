@@ -33,6 +33,7 @@ add_executable(aleph_tests
     graph/test_invariants_6_10.cpp
     linalg/test_gf2.cpp
     linalg/test_sparse.cpp
+    linalg/test_bk_ldlt.cpp
     dpo/test_dpo.cpp
     sheaf/test_simplex.cpp
     sheaf/test_union_find.cpp
@@ -100,7 +101,8 @@ add_executable(aleph_tests
     edit/test_mv_controller.cpp
     sim/test_section.cpp
     sim/test_wave.cpp
-    sim/test_diffuse.cpp)
+    sim/test_diffuse.cpp
+    sim/test_helmholtz.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_include_directories(aleph_tests PRIVATE
