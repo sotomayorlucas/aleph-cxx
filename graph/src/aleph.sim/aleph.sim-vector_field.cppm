@@ -2,7 +2,6 @@ module;
 #include <cmath>
 #include <cstddef>
 #include <expected>
-#include <limits>
 #include <span>
 #include <vector>
 
@@ -41,21 +40,23 @@ struct VectorDiffuseStepper {
 
         std::vector<f64> comp(n);  // f64 scratch reused across the 3 component blocks.
 
+        // comp[] holds the f64 snapshot of the component, so the write-back reads it
+        // (not u.data[i].c again) — the scratch's purpose + no redundant re-read/cast.
         // --- X ---
         for (std::size_t i = 0; i < n; ++i) comp[i] = static_cast<f64>(u.data[i].x);
         { const std::vector<f64> lap = delta.matvec(std::span<const f64>(comp.data(), n));
           for (std::size_t i = 0; i < n; ++i)
-              u.data[i].x = static_cast<f32>(static_cast<f64>(u.data[i].x) - dt * params.alpha * lap[i]); }
+              u.data[i].x = static_cast<f32>(comp[i] - dt * params.alpha * lap[i]); }
         // --- Y ---
         for (std::size_t i = 0; i < n; ++i) comp[i] = static_cast<f64>(u.data[i].y);
         { const std::vector<f64> lap = delta.matvec(std::span<const f64>(comp.data(), n));
           for (std::size_t i = 0; i < n; ++i)
-              u.data[i].y = static_cast<f32>(static_cast<f64>(u.data[i].y) - dt * params.alpha * lap[i]); }
+              u.data[i].y = static_cast<f32>(comp[i] - dt * params.alpha * lap[i]); }
         // --- Z ---
         for (std::size_t i = 0; i < n; ++i) comp[i] = static_cast<f64>(u.data[i].z);
         { const std::vector<f64> lap = delta.matvec(std::span<const f64>(comp.data(), n));
           for (std::size_t i = 0; i < n; ++i)
-              u.data[i].z = static_cast<f32>(static_cast<f64>(u.data[i].z) - dt * params.alpha * lap[i]); }
+              u.data[i].z = static_cast<f32>(comp[i] - dt * params.alpha * lap[i]); }
 
         // Single post-update non-finite pass over all 3 components.
         for (std::size_t i = 0; i < n; ++i)

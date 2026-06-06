@@ -183,6 +183,9 @@ TEST_CASE("VectorDiffuseStepper: deterministic — identical state across two ru
     };
     std::vector<Vec3> a = run(), b = run();
     REQUIRE(a.size() == b.size());
-    for (std::size_t i = 0; i < a.size(); ++i)
-        CHECK(a[i] == b[i]);   // Vec3::operator== compares x,y,z
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        CHECK(a[i] == b[i]);          // Vec3::operator== compares x,y,z (ignores w)
+        CHECK(a[i].w == b[i].w);      // belt-and-suspenders: w is untouched (stays 0)
+        CHECK(a[i].w == 0.0f);        // the stepper never writes w
+    }
 }
