@@ -1,5 +1,7 @@
 #include "doctest.h"
 
+#include <algorithm>  // std::max (orbit-threads-eye vcol delta)
+#include <cmath>      // std::abs
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -188,6 +190,84 @@ aleph::lowering::MaterialParams green_lambertian() {
     auto full = aleph::lowering::lower(oracle);
     if (!full.has_value()) return false;
     return freeze(c.lowered()) == freeze(*full);
+}
+
+// ── Metal + Lambertian scene (view-tracking oracle) ──────────────────────────
+// root Transform (identity) Contains a Camera + a Metal sphere (view-DEPENDENT
+// vcol: chrome reflection tracks the eye) + a Lambertian sphere (view-INDEPENDENT
+// vcol). The two materials give the orbit-threads-eye oracle teeth: orbiting must
+// move the Metal vcol but leave the Lambertian vcol byte-identical.
+struct MetalLambert {
+    Graph  g;
+    NodeId root{}, cam{}, metal_mesh{}, metal_mat{}, lamb_mesh{}, lamb_mat{};
+};
+
+MetalLambert make_metal_lambert() {
+    MetalLambert s;
+    Graph& g = s.g;
+
+    s.root = g.alloc_node_id();
+    g.insert_node(Transform{s.root, 0, LocalTransform{Mat4::identity()}});
+
+    s.cam = g.alloc_node_id();
+    Camera cam{s.cam, std::string("sensor0")};
+    cam.look_from = Vec3{0, 0, 5};
+    cam.look_at   = Vec3{0, 0, 0};
+    cam.up        = Vec3{0, 1, 0};
+    cam.vfov_deg  = 40.0f;
+    g.insert_node(std::move(cam));
+
+    // Metal sphere (left).
+    s.metal_mesh = g.alloc_node_id();
+    Mesh metal_mesh{s.metal_mesh, std::string("metal_sphere"), 0};
+    metal_mesh.geometry = SphereLocal{Vec3{-2, 0, 0}, 1.0f};
+    g.insert_node(std::move(metal_mesh));
+
+    s.metal_mat = g.alloc_node_id();
+    Material mmat{s.metal_mat, MaterialKind::Metal};
+    mmat.albedo = Vec3{0.9f, 0.9f, 0.9f};
+    mmat.fuzz   = 0.0f;
+    g.insert_node(std::move(mmat));
+
+    // Lambertian sphere (right).
+    s.lamb_mesh = g.alloc_node_id();
+    Mesh lamb_mesh{s.lamb_mesh, std::string("lamb_sphere"), 0};
+    lamb_mesh.geometry = SphereLocal{Vec3{2, 0, 0}, 1.0f};
+    g.insert_node(std::move(lamb_mesh));
+
+    s.lamb_mat = g.alloc_node_id();
+    Material lmat{s.lamb_mat, MaterialKind::Lambertian};
+    lmat.albedo = Vec3{0.2f, 0.6f, 0.9f};
+    g.insert_node(std::move(lmat));
+
+    (void)g.add_edge(EdgeKind::Contains,   s.root, s.cam);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, s.metal_mesh);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, s.lamb_mesh);
+    (void)g.add_edge(EdgeKind::References, s.metal_mesh, s.metal_mat);
+    (void)g.add_edge(EdgeKind::References, s.lamb_mesh,  s.lamb_mat);
+    return s;
+}
+
+// Byte-equal comparison of two SceneRT faces' geometry/uv/vcol payload. Mirrors
+// test_build_sw.cpp's `same_face` (the determinism/identity oracle).
+[[nodiscard]] bool same_face(const aleph::render::sw::Face& a,
+                             const aleph::render::sw::Face& b) {
+    for (std::size_t k = 0; k < 4; ++k) {
+        if (!(a.verts[k] == b.verts[k])) return false;
+        if (!(a.uvs[k]   == b.uvs[k]))   return false;
+        if (!(a.vcol[k]  == b.vcol[k]))  return false;
+    }
+    return true;
+}
+
+// The MaterialKind of the entity that sourced raster face `i` (via `face_source`
+// -> the lowered IR's handle_map -> the entity's material).
+[[nodiscard]] MaterialKind face_material_kind(const aleph::edit::EditorController& c,
+                                              std::size_t face_i) {
+    const NodeId src = c.face_source()[face_i];
+    const std::uint32_t* idx = c.lowered().handle_map.get(src);
+    REQUIRE(idx != nullptr);
+    return c.lowered().entities[*idx].material.kind;
 }
 
 // Every raster face's source is a LIVE entity in the lowered IR (no dangling
@@ -418,4 +498,113 @@ TEST_CASE("edit: scripted Op sequence -> final counts + per-step lowered == full
     REQUIRE(a_idx != nullptr);
     CHECK(c.lowered().entities[*a_idx].material.albedo == Vec3{0.0f, 0.0f, 1.0f});
     CHECK(c.lowered().handle_map.get(ora.mesh_b) == nullptr);
+}
+
+// ── live-orbit slice 4c-i-b — rebake_view_sw == the full sw_ (sim-OFF) ───────
+// `rebake_view_sw()` is exactly the sw_ half of `rebuild_backends_from_prev`, so
+// (sim OFF) the controller's `raster_scene()` faces must be `same_face`-byte-
+// identical to a fresh `build_sw_scene(c.lowered(), c.camera().look_from())` at
+// the same eye. (Thin wiring check — the per-pixel shading is pinned in
+// test_build_sw.cpp.)
+TEST_CASE("edit: rebake_view_sw reproduces the full sw_ bake (sim-OFF, byte-identical)") {
+    TwoMesh ctl = make_two_mesh();
+    aleph::edit::EditorController c{std::move(ctl.g)};
+
+    // Move off the default pose so the eye-explicit overload exercises a real
+    // (non-trivial) look_from.
+    c.camera().orbit(120.0f, 40.0f);
+    c.rebake_view_sw();
+
+    const aleph::lowering::SwBuild ref =
+        aleph::lowering::build_sw_scene(c.lowered(), c.camera().look_from());
+
+    REQUIRE(c.raster_scene().faces.size() == ref.scene.faces.size());
+    bool all_equal = true;
+    for (std::size_t i = 0; i < ref.scene.faces.size(); ++i)
+        if (!same_face(c.raster_scene().faces[i], ref.scene.faces[i])) { all_equal = false; break; }
+    CHECK(all_equal);
+}
+
+// ── live-orbit slice 4c-i-b — rebake_view_sw leaves prim_source_ untouched ───
+// render_/BVH + prim_source_ are view-INDEPENDENT and rebuilt ONLY by the full
+// path. A sw_-only re-bake (even after a large orbit) must leave `prim_source()`
+// byte-unchanged (element-wise NodeId ==).
+TEST_CASE("edit: rebake_view_sw leaves prim_source_ byte-unchanged") {
+    MetalLambert ctl = make_metal_lambert();
+    aleph::edit::EditorController c{std::move(ctl.g)};
+
+    const std::vector<NodeId> before = c.prim_source();  // copy
+    c.camera().orbit(400.0f, 0.0f);                       // large yaw
+    c.rebake_view_sw();
+    const std::vector<NodeId>& after = c.prim_source();
+
+    REQUIRE(after.size() == before.size());
+    bool unchanged = true;
+    for (std::size_t i = 0; i < before.size(); ++i)
+        if (!(after[i] == before[i])) { unchanged = false; break; }
+    CHECK(unchanged);
+}
+
+// ── live-orbit slice 4c-i-b — has_view_dependent_material classifies ─────────
+// Metal (or Dielectric) entity present -> true; an all-Lambertian scene -> false.
+TEST_CASE("edit: has_view_dependent_material is true for Metal, false for all-Lambertian") {
+    {
+        MetalLambert ml = make_metal_lambert();
+        aleph::edit::EditorController c{std::move(ml.g)};
+        CHECK(c.has_view_dependent_material());           // has a Metal sphere
+    }
+    {
+        TwoMesh tm = make_two_mesh();                     // both Lambertian
+        aleph::edit::EditorController c{std::move(tm.g)};
+        CHECK_FALSE(c.has_view_dependent_material());
+    }
+}
+
+// ── live-orbit slice 4c-i-b — orbit threads the live eye (the new behaviour) ─
+// A Metal sphere + a Lambertian sphere. Bake, record per-face vcol[0]; orbit by a
+// LARGE yaw (400 ≈ 3.2 rad — yaw unclamped, kOrbitSpeed=0.008) so the reflection
+// moves unambiguously; `rebake_view_sw()`. The Metal faces' vcol must MOVE
+// (max |Δ| > 0.05 — the eye reached the bake) while EVERY Lambertian face vcol is
+// byte-IDENTICAL (the default shade branch never reads V). Proves the threading +
+// the gate rationale, not the shading math.
+TEST_CASE("edit: orbit threads the eye -> Metal vcol moves, Lambertian vcol byte-identical") {
+    MetalLambert ml = make_metal_lambert();
+    aleph::edit::EditorController c{std::move(ml.g)};
+
+    const std::size_t nfaces = c.raster_scene().faces.size();
+    REQUIRE(nfaces > 0u);
+    REQUIRE(c.face_source().size() == nfaces);
+
+    // Snapshot vcol[0] per face, tagged by source material kind.
+    std::vector<Vec3>         vcol_old(nfaces);
+    std::vector<MaterialKind> kind(nfaces);
+    std::size_t metal_faces = 0, lamb_faces = 0;
+    for (std::size_t i = 0; i < nfaces; ++i) {
+        vcol_old[i] = c.raster_scene().faces[i].vcol[0];
+        kind[i]     = face_material_kind(c, i);
+        if (kind[i] == MaterialKind::Metal)           ++metal_faces;
+        else if (kind[i] == MaterialKind::Lambertian) ++lamb_faces;
+    }
+    REQUIRE(metal_faces > 0u);
+    REQUIRE(lamb_faces  > 0u);
+
+    c.camera().orbit(400.0f, 0.0f);
+    c.rebake_view_sw();
+    REQUIRE(c.raster_scene().faces.size() == nfaces);  // geometry count stable
+
+    aleph::math::f32 max_metal_delta = 0.0f;
+    bool lambertian_identical = true;
+    for (std::size_t i = 0; i < nfaces; ++i) {
+        const Vec3 v = c.raster_scene().faces[i].vcol[0];
+        if (kind[i] == MaterialKind::Metal) {
+            const Vec3 d = v - vcol_old[i];
+            max_metal_delta = std::max(max_metal_delta,
+                std::max(std::abs(d.x), std::max(std::abs(d.y), std::abs(d.z))));
+        } else if (kind[i] == MaterialKind::Lambertian) {
+            if (!(v == vcol_old[i])) lambertian_identical = false;
+        }
+    }
+    INFO("max Metal vcol delta = " << max_metal_delta);
+    CHECK(max_metal_delta > 0.05f);       // chrome reflection tracked the eye
+    CHECK(lambertian_identical);          // view-independent: byte-unchanged
 }
