@@ -73,7 +73,7 @@ constexpr int kSSAA = 2;
 //   root Transform (identity)
 //     ├─Contains─▶ Camera (looks at the origin)
 //     ├─Contains─▶ Mesh (SphereLocal) ─References─▶ Material (Lambertian red)
-//     ├─Contains─▶ Mesh (QuadLocal floor) ─References─▶ Material (grey)
+//     ├─Contains─▶ Mesh (QuadLocal floor) ─References─▶ Material (TexturedLambertian checker)
 //     └─Contains─▶ Light (Area, overhead quad)
 //
 // Lowers cleanly (a Camera + valid References), so the controller is
@@ -153,9 +153,10 @@ InitialScene build_initial_graph() {
     g.insert_node(std::move(floor));
 
     const NodeId floor_mat = g.alloc_node_id();
-    Material fmat{floor_mat, MaterialKind::Lambertian};
-    fmat.albedo = Vec3{0.6f, 0.6f, 0.62f};
-    fmat.emit   = Vec3{0.0f, 0.0f, 0.0f};
+    Material fmat{floor_mat, MaterialKind::TexturedLambertian};
+    fmat.albedo   = Vec3{0.6f, 0.55f, 0.5f};   // neutral tan/grey checker base
+    fmat.emit     = Vec3{0.0f, 0.0f, 0.0f};
+    fmat.uv_scale = 8.0f;                       // 8 tiles across the 8-unit floor quad (uv∈[0,1])
     g.insert_node(std::move(fmat));
 
     // An overhead area light (its own emissive quad geometry).
