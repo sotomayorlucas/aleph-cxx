@@ -501,6 +501,85 @@ int run_headless(const std::string& outdir) {
     return 0;
 }
 
+// ── Live-orbit view-tracking capture (visual slice 4c-i-b) ───────────────────
+// Demonstrate that re-baking sw_ at the live eye (rebake_view_sw) makes the
+// Metal/Dielectric raster vcol track the orbit: render the editor scene at two
+// different orbit yaws — each preceded by rebake_view_sw() — into a side-by-side
+// raster montage. The chrome sphere's sky/ground reflection + highlight should
+// sit in a DIFFERENT place between the two poses (vs the frozen 4c-i behaviour).
+// Not SDL-guarded so it runs headless. Returns the process exit code.
+int run_orbit_track(const std::string& outdir) {
+    InitialScene init = build_initial_graph();
+    aleph::edit::EditorController controller{std::move(init.g)};
+
+    constexpr int W = 320, H = 240;
+    controller.set_viewport(W, H);
+    auto& cam    = controller.camera();
+    cam.target   = Vec3{0.0f, 0.5f, 0.0f};
+    cam.pitch    = 0.25f;
+    cam.radius   = 5.0f;
+    cam.vfov_deg = 45.0f;
+
+    if (!controller.has_view_dependent_material()) {
+        std::fprintf(stderr,
+            "aleph_edit[orbit-track]: scene has no Metal/Dielectric — nothing to track\n");
+        return 1;
+    }
+
+    aleph::threads::Pool pool(thread_count());
+
+    // The montage is two raster panels side by side (2W × H).
+    std::vector<Vec3> mont_px(static_cast<std::size_t>(2 * W) * H);
+    aleph::render::common::Film montage{mont_px.data(), 2 * W, H, 2 * W};
+
+    std::vector<Vec3> ss_px(static_cast<std::size_t>(kSSAA) * kSSAA * W * H);
+    std::vector<f32>  ss_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
+    aleph::render::common::Film ss_film{ss_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
+
+    std::vector<Vec3> panel_px(static_cast<std::size_t>(W) * H);
+    aleph::render::common::Film panel{panel_px.data(), W, H, W};
+
+    // Render the controller's current raster view (eye = cam) into `panel`, then
+    // copy it into the montage at horizontal offset `x0`.
+    auto render_into = [&](int x0) {
+        clear_sky(ss_film);
+        std::fill(ss_depth.begin(), ss_depth.end(), 0.0f);
+        aleph::render::sw::rasterize(controller.raster_scene(),
+                                     orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
+                                     ss_film, ss_depth, pool);
+        aleph::render::sw::downsample_box(ss_film, panel, kSSAA);
+        for (int y = 0; y < H; ++y) {
+            for (int x = 0; x < W; ++x) {
+                montage.pixels[y * montage.stride_pixels + (x0 + x)] =
+                    panel.pixels[y * panel.stride_pixels + x];
+            }
+        }
+    };
+
+    // Pose A: yaw 0.0; re-bake sw_ at this eye, render the left panel.
+    cam.yaw = 0.0f;
+    controller.rebake_view_sw();
+    render_into(0);
+
+    // Pose B: a large yaw swing; re-bake again, render the right panel. With
+    // tracking ON the chrome reflection follows the eye, so the two panels differ
+    // on the Metal/Dielectric spheres.
+    cam.yaw = 1.2f;
+    controller.rebake_view_sw();
+    render_into(W);
+
+    std::string mp = outdir + "/2026-06-06-live-orbit-tracking.ppm";
+    if (!write_ppm(mp.c_str(), montage)) {
+        std::fprintf(stderr, "aleph_edit: cannot write %s\n", mp.c_str());
+        return 1;
+    }
+    std::printf("aleph_edit[orbit-track]: wrote %s (poseA yaw=0.0, poseB yaw=1.2, "
+                "view-dependent=%d)\n",
+                mp.c_str(),
+                static_cast<int>(controller.has_view_dependent_material()));
+    return 0;
+}
+
 // ── Headless wave capture (SPEC §3.2 physics seam) ───────────────────────────
 // The thesis demo: kick a node at the centre of a lattice, capture the φ-wave as
 // it ripples outward (N frames), then DELETE a node in the wavefront's path — the
@@ -698,6 +777,18 @@ int run_live(bool wave_demo = false) {
     int  mouse_x = 0, mouse_y = 0;
     u32  last_input_ms = win.ticks_ms();
 
+    // ── Live-orbit view tracking (shell-only throttle) ───────────────────────
+    // Orbit/zoom move `cam_` + the raster MVP every frame, but the baked Metal/
+    // Dielectric vcol in `sw_` is pinned to the eye at the last bake. On a view
+    // gesture mark `view_dirty`; in the raster block, re-bake `sw_` at the live
+    // eye at most ~12 Hz (kViewRebakeMs) so chrome/glass track the orbit without
+    // a re-bake every frame. Gated by `has_view_dependent_material()` so all-
+    // Lambertian (incl. the wave lattice) never re-bakes. `last_rebake_ms = 0`
+    // (NOT `now`) so the first orbit re-bakes on the first throttled frame.
+    bool          view_dirty     = false;
+    u32           last_rebake_ms = 0;
+    constexpr u32 kViewRebakeMs  = 80;
+
     // The selected mesh's editable albedo (the UI color sliders bind to this and
     // emit a SetMaterial when changed). Seeded from the picked node's lowered
     // material on each new selection.
@@ -741,10 +832,12 @@ int run_live(bool wave_demo = false) {
                     if (left_down) {
                         controller.camera().orbit(static_cast<f32>(e.dx),
                                                   static_cast<f32>(e.dy));
+                        view_dirty = true;
                     }
                     break;
                 case aleph::window::Event::Kind::MouseWheel:
                     controller.camera().zoom(e.wheel > 0 ? (1.0f / 1.12f) : 1.12f);
+                    view_dirty = true;
                     break;
                 default: break;
             }
@@ -840,6 +933,18 @@ int run_live(bool wave_demo = false) {
         } else {
             mode    = Mode::Raster;
             tracing = false;
+
+            // Live-orbit view tracking: re-bake `sw_` at the current eye so Metal/
+            // Dielectric vcol follows the orbit. Throttled (~12 Hz) + gated to view-
+            // dependent scenes (the wave lattice is all-Lambertian → never fires, so
+            // it can't fight `step()`'s per-frame φ rebuild below). Runs before the
+            // rasterize so the re-baked `sw_` is what gets drawn this frame.
+            if (view_dirty && controller.has_view_dependent_material()
+                    && (now - last_rebake_ms) >= kViewRebakeMs) {
+                controller.rebake_view_sw();
+                last_rebake_ms = now;
+                view_dirty     = false;
+            }
 
             // Advance the wave one fixed sub-step (re-bakes φ→vcol) before drawing.
             if (wave_demo) (void)controller.step(kWaveDt);
@@ -947,10 +1052,11 @@ int run_live(bool wave_demo = false) {
 
 int main(int argc, char** argv) {
     // ── Arg parse ─────────────────────────────────────────────────────────────
-    //   --headless <outdir>  scripted windowless edit demo (PPM pairs)
-    //   --wave <outdir>      headless wave-field capture (deterministic frames)
-    //   --wave-live          interactive wave on the lattice (needs SDL2)
-    //   (no args)            interactive structural editor (needs SDL2)
+    //   --headless <outdir>     scripted windowless edit demo (PPM pairs)
+    //   --wave <outdir>         headless wave-field capture (deterministic frames)
+    //   --orbit-track <outdir>  2-pose live-orbit view-tracking montage (1 PPM)
+    //   --wave-live             interactive wave on the lattice (needs SDL2)
+    //   (no args)               interactive structural editor (needs SDL2)
     bool wave_live = false;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
@@ -963,6 +1069,11 @@ int main(int argc, char** argv) {
             std::string outdir = (i + 1 < argc) ? std::string(argv[i + 1])
                                                 : std::string("/tmp/wave");
             return run_wave(outdir);
+        }
+        if (arg == "--orbit-track") {
+            std::string outdir = (i + 1 < argc) ? std::string(argv[i + 1])
+                                                : std::string("/tmp/orbit_track");
+            return run_orbit_track(outdir);
         }
         if (arg == "--wave-live") wave_live = true;
     }
