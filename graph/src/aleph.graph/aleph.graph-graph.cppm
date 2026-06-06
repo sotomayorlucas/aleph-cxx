@@ -92,6 +92,27 @@ public:
         (void)nodes_.remove(id);
     }
 
+    // An EXACT structural copy of this graph: same node ids, same edge ids
+    // (src/dst/kind), and the same IdAllocator watermarks, so a clone is
+    // indistinguishable from the original for every subsequent operation
+    // (fresh ids continue from the same point). The node/edge maps are move-only
+    // (OrderedMap), so this is the sanctioned deep copy — it rebuilds the maps by
+    // copying each value. Used to snapshot g_before for a localized DPO rebuild
+    // (decompose_rewrite + deleted-edge endpoint lookup), where Graph's
+    // move-only-ness otherwise forces a rebuild-from-scratch.
+    [[nodiscard]] Graph clone() const {
+        Graph out;
+        for (auto [id, node] : nodes_) {
+            (void)id;
+            out.nodes_.insert(aleph::types::id_of(node), node);
+        }
+        for (auto [eid, e] : edges_) {
+            out.edges_.insert(eid, e);
+        }
+        out.ids_ = ids_;  // preserve watermarks so future ids don't collide
+        return out;
+    }
+
 protected:
     NodeMap                    nodes_{};
     EdgeMap                    edges_{};

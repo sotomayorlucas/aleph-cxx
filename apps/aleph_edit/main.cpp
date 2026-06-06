@@ -473,7 +473,12 @@ int run_headless(const std::string& outdir) {
 // gap zeroes), so the ripple genuinely RE-ROUTES around the hole while the rest
 // of the wave persists (N more frames). All frames are deterministic PPMs.
 int run_wave(const std::string& outdir) {
-    constexpr int R = 7, N = 24;
+    // R is large enough that a mid-run DeleteObject's local 2-hop dirty ball is
+    // ≪ |E|, so the controller's localized κ_R rebuild engages (O(touched), not a
+    // full rebuild) — the demonstrable win of this slice. (A small grid would make
+    // the 2-hop neighbourhood a large fraction of |E| and trip the full-bounded
+    // fallback, which is correct but doesn't show localization.)
+    constexpr int R = 13, N = 24;
     constexpr aleph::math::f32 kDt = 0.02f;
 
     LatticeScene init = build_lattice_graph(R);
@@ -543,6 +548,12 @@ int run_wave(const std::string& outdir) {
                      static_cast<int>(r.error()));
         return 1;
     }
+    // The localized win: the mid-run DeleteObject rebuilt Δ by recomputing only
+    // the κ_R edges within 2 hops of the deleted node — O(touched) ≪ |E|.
+    std::printf("aleph_edit[wave]: DeleteObject recomputed %d kappa_R edges "
+                "(|E| = %zu)\n",
+                controller.last_recompute_count(),
+                controller.wave_operator().curvatures.size());
 
     // Phase 2: the wave continues, now re-routing around the deleted node.
     for (int i = 0; i < N; ++i) {

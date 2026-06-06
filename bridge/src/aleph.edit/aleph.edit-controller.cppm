@@ -35,12 +35,14 @@ module;
 #include <limits>
 #include <optional>
 #include <utility>
+#include <variant>
 #include <vector>
 
 export module aleph.edit:controller;
 
 import aleph.graph;           // Graph (the truth)
-import aleph.types;           // NodeId
+import aleph.types;           // NodeId, EdgeId
+import aleph.containers;      // FlatSet (decompose_rewrite preserved set)
 import aleph.math;            // Vec3, Mat4, f32, normalize/cross/dot
 import aleph.lowering;        // lower / lower_incremental / Op / OpError / apply_op /
                               // LoweredScene / build_render_scene / build_sw_scene / SwBuild
@@ -48,7 +50,8 @@ import aleph.render.sw;       // SceneRT, Face
 import aleph.render.common;   // Camera, make_camera
 import aleph.scene;           // Scene
 import aleph.dpo;             // RewriteRecord
-import aleph.flow;            // WeightedLaplacian, build_laplacian, default_weight (Δ)
+import aleph.sheaf;           // OneSkeleton, decompose_rewrite (R/U/K cover)
+import aleph.flow;            // WeightedLaplacian, build_laplacian{,_bounded,_local}, default_weight (Δ)
 import aleph.sim;             // Section<f64>, WaveStepper, StepError (φ wave field)
 
 export namespace aleph::edit {
@@ -226,6 +229,15 @@ public:
     // then adopt the new LoweredScene as `prev` for the next incremental step.
     [[nodiscard]] std::expected<void, aleph::lowering::OpError>
     apply(const aleph::lowering::Op& op) {
+        // (0) Snapshot the pre-op graph (g_before) so a successful structural
+        //     edit can localize the wave operator rebuild: decompose_rewrite +
+        //     two_hop_touched_edges need both g_before and g_after. Captured
+        //     UNCONDITIONALLY before apply_op (which mutates graph_ in place);
+        //     on an apply_op failure graph_ is untouched and prev_graph_ is just
+        //     a harmless extra copy never read. (Graph is move-only, so this is
+        //     an exact id-preserving clone, not a copy-assign.)
+        prev_graph_ = graph_.clone();
+
         // (1) Mutate the truth transactionally. Failure ⇒ graph untouched.
         auto rec = aleph::lowering::apply_op(graph_, op);
         if (!rec.has_value()) {
@@ -265,7 +277,17 @@ public:
                                    || !rec->deleted_nodes.empty()
                                    || !rec->created_edges.empty()
                                    || !rec->deleted_edges.empty();
-            if (topo_changed) rebuild_operator_and_reproject();
+            if (topo_changed) {
+                // Localizable structural ops (AddObject / DeleteObject) recompute
+                // only the κ_R edges within 2 hops of the edit; ApplyRule (an
+                // arbitrary rewrite) takes the full bounded rebuild. Attribute-only
+                // ops (SetMaterial / SetTransform) never reach here — topo_changed
+                // is false for them.
+                const bool op_is_localizable =
+                    std::holds_alternative<aleph::lowering::AddObject>(op) ||
+                    std::holds_alternative<aleph::lowering::DeleteObject>(op);
+                rebuild_operator_localized(*rec, op_is_localizable);
+            }
         }
         rebuild_backends_from_prev();
         return {};
@@ -279,7 +301,14 @@ public:
     void enable_sim(bool on) {
         sim_enabled_ = on;
         if (on) {
-            operator_ = aleph::flow::build_laplacian(graph_, aleph::flow::default_weight);
+            // The wave operator is the BOUNDED-support curvature Laplacian κ_R
+            // (build_laplacian_bounded): a pure function of each edge's radius-R
+            // ball, so an edit can rebuild it byte-exact by recomputing only the
+            // R-hop-dirty edges (build_laplacian_local, in apply()). The first
+            // build has no valid prev operator/graph, so it is the full bounded
+            // rebuild.
+            operator_ = aleph::flow::build_laplacian_bounded(
+                graph_, aleph::flow::default_weight);
             u_ = aleph::sim::Section<double>::zeros(operator_.node_order);
             v_ = aleph::sim::Section<double>::zeros(operator_.node_order);
         }
@@ -296,6 +325,20 @@ public:
     // read-only. (The render φ→vcol path reads the displacement, not velocity.)
     [[nodiscard]] const aleph::sim::Section<double>& displacement() const noexcept {
         return u_;
+    }
+
+    // The wave operator Δ (bounded-support κ_R Laplacian), read-only. Tests diff
+    // its `matrix` byte-for-byte against a fresh `build_laplacian_bounded(graph)`
+    // to certify the localized rebuild is byte-exact.
+    [[nodiscard]] const aleph::flow::WeightedLaplacian& wave_operator() const noexcept {
+        return operator_;
+    }
+
+    // Number of κ_R edges recomputed on the LAST topology edit (0 if the last
+    // edit took the full-bounded fallback or was attribute-only). The localized
+    // win: this is O(touched) ≪ |E| on a large lattice.
+    [[nodiscard]] int last_recompute_count() const noexcept {
+        return recompute_count_;
     }
 
     // Advance the wave one symplectic-Euler sub-step (φ̈ = −c²Δφ) on the shared Δ
@@ -357,12 +400,108 @@ private:
         rebuild_backends_from_prev();
     }
 
-    // Re-derive the wave operator and re-project the field after a graph edit.
-    // Δ is rebuilt from the (already-committed) graph; `reproject` carries every
-    // surviving NodeId's (φ, φ̇) forward onto the new node_order and zeros any new
-    // node. The graph is the truth — this only rebuilds derived state.
+    // Re-derive the wave operator (full bounded rebuild) and re-project the field
+    // after a graph edit. Δ is rebuilt from the (already-committed) graph;
+    // `reproject` carries every surviving NodeId's (φ, φ̇) forward onto the new
+    // node_order and zeros any new node. The graph is the truth — this only
+    // rebuilds derived state. The FALLBACK rebuild: used by the un-lowerable error
+    // path and whenever the localized path is not applicable. Resets
+    // recompute_count_ to 0 (no localized recompute happened).
     void rebuild_operator_and_reproject() {
-        operator_ = aleph::flow::build_laplacian(graph_, aleph::flow::default_weight);
+        operator_ = aleph::flow::build_laplacian_bounded(
+            graph_, aleph::flow::default_weight);
+        u_.reproject(operator_.node_order);  // survivors keep φ,  new nodes 0
+        v_.reproject(operator_.node_order);  // survivors keep φ̇, new nodes 0
+        recompute_count_ = 0;
+    }
+
+    // Re-derive the wave operator on a STRUCTURAL edit via the LOCALIZED bounded
+    // rebuild (the asymptotic win). Decompose the rewrite (prev_graph_ → graph_)
+    // into the Mayer-Vietoris cover, seed the 2-hop dirty cover from R's mesh
+    // nodes plus the endpoints of the created/deleted Adjacent edges, and recompute
+    // only those κ_R edges (caching the rest from `operator_`). The result is
+    // BYTE-EXACT to a full build_laplacian_bounded(graph_) because κ_R(e) is a pure
+    // function of e's radius-R ball: a non-dirty edge's ball is unchanged, so its
+    // cached κ_R equals the full rebuild's bit-for-bit. Falls back to the full
+    // bounded rebuild when the op is not localizable or the dirty cover is too
+    // large to be worth it. After either path, reproject φ/φ̇ as usual.
+    void rebuild_operator_localized(const aleph::dpo::RewriteRecord& rec,
+                                    bool op_is_localizable) {
+        using aleph::types::NodeId;
+        using aleph::sheaf::OneSkeleton;
+
+        if (!op_is_localizable) {
+            rebuild_operator_and_reproject();  // full bounded fallback
+            return;
+        }
+
+        // preserved = current graph node ids minus the just-created ones (the
+        // image of the rule interface — the survivors decompose_rewrite keys on).
+        // created_nodes is small (a single AddObject creates one Mesh, one
+        // Material), so the linear membership check is cheap.
+        const auto is_created = [&](NodeId id) {
+            for (NodeId c : rec.created_nodes) {
+                if (c == id) return true;
+            }
+            return false;
+        };
+        aleph::containers::FlatSet<NodeId> preserved;
+        for (auto [id, node] : graph_.nodes()) {
+            (void)node;
+            if (!is_created(id)) preserved.insert(id);
+        }
+
+        auto [u, k, r] =
+            aleph::sheaf::decompose_rewrite(prev_graph_, graph_, preserved);
+        (void)u;
+        (void)k;
+
+        const OneSkeleton skel = OneSkeleton::from_graph(graph_);
+
+        // seed = R's NEWLY-CREATED mesh nodes ∪ endpoints of created/deleted
+        // Adjacent edges. R = preserved ∪ created, but the preserved interface
+        // is the WHOLE surviving graph for a pure delete, so seeding all of R's
+        // mesh nodes would mark every edge dirty and defeat localization. The
+        // genuinely-new region is R's mesh vertices that were just created; that,
+        // plus the endpoints of the created/deleted Adjacent edges (which name
+        // exactly where the coupling topology changed, and survive an edge-only
+        // delete), is the tight 2-hop seed that is still a sound over-approximation
+        // of where κ_R changed (κ_R(e) only moves within R hops of an edited edge).
+        std::vector<NodeId> seed;
+        const OneSkeleton r_skel = r.one_skeleton(graph_);
+        for (NodeId v : r_skel.vertices) {
+            if (is_created(v)) seed.push_back(v);
+        }
+        for (aleph::types::EdgeId eid : rec.created_edges) {
+            if (const aleph::types::Edge* e = graph_.edge(eid);
+                e != nullptr && e->kind == aleph::types::EdgeKind::Adjacent) {
+                seed.push_back(e->src);
+                seed.push_back(e->dst);
+            }
+        }
+        for (aleph::types::EdgeId eid : rec.deleted_edges) {
+            if (const aleph::types::Edge* e = prev_graph_.edge(eid);
+                e != nullptr && e->kind == aleph::types::EdgeKind::Adjacent) {
+                seed.push_back(e->src);
+                seed.push_back(e->dst);
+            }
+        }
+
+        const auto dirty = aleph::flow::two_hop_touched_edges(skel, seed);
+
+        // Localize only when the dirty cover is a small fraction of |E|; else the
+        // bounded rebuild is no slower and avoids the cache bookkeeping.
+        constexpr double kLocalFraction = 0.5;
+        recompute_count_ = 0;
+        if (static_cast<double>(dirty.size())
+            <= kLocalFraction * static_cast<double>(skel.edges.size())) {
+            operator_ = aleph::flow::build_laplacian_local(
+                graph_, operator_, dirty, aleph::flow::default_weight,
+                &recompute_count_);
+        } else {
+            operator_ = aleph::flow::build_laplacian_bounded(
+                graph_, aleph::flow::default_weight);
+        }
         u_.reproject(operator_.node_order);  // survivors keep φ,  new nodes 0
         v_.reproject(operator_.node_order);  // survivors keep φ̇, new nodes 0
     }
@@ -439,6 +578,7 @@ private:
     }
 
     aleph::graph::Graph            graph_;       // the single source of truth
+    aleph::graph::Graph            prev_graph_{}; // g_before snapshot (localized Δ rebuild)
     aleph::lowering::LoweredScene  prev_{};      // last lowered IR (incremental base)
     aleph::lowering::SwBuild       sw_{};        // SceneRT + face_source (raster pick)
     aleph::lowering::RenderScene   render_{};    // path-trace Scene + camera pose
@@ -447,6 +587,7 @@ private:
     aleph::sim::Section<double>    u_{};         // φ  (displacement) over operator_.node_order
     aleph::sim::Section<double>    v_{};         // φ̇ (velocity)     over operator_.node_order
     aleph::sim::WaveStepper        stepper_{};    // symplectic-Euler wave integrator
+    int                            recompute_count_ = 0;  // κ_R edges recomputed on the last edit
     bool                           sim_enabled_ = false;
     OrbitCamera                    cam_{};       // OWN orbit camera (headless)
     std::optional<aleph::types::NodeId> selection_{};  // current selection
