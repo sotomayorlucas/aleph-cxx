@@ -102,7 +102,8 @@ add_executable(aleph_tests
     sim/test_section.cpp
     sim/test_wave.cpp
     sim/test_diffuse.cpp
-    sim/test_helmholtz.cpp)
+    sim/test_helmholtz.cpp
+    sim/test_vector_field.cpp)
 target_include_directories(aleph_tests SYSTEM PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party)
 target_include_directories(aleph_tests PRIVATE
