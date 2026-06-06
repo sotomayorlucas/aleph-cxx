@@ -15,7 +15,7 @@ Two pieces — a cheap controller entry point + a shell-side throttle:
 ## 2. Components
 
 ### 2.1 `EditorController` (controller.cppm)
-- Factor the φ-gather (currently inline in `rebuild_backends_from_prev`:528-533) into `std::vector<double> gather_phi_entity() const` (returns the per-entity φ aligned to `prev_.entities`, or empty when `!sim_enabled_`).
+- Factor the φ-gather (currently inline in `rebuild_backends_from_prev`:528-533) into `std::vector<double> gather_phi_entity() const` — **pin the body byte-identically** (build_sw_scene indexes φ by entity `i`, so the three properties are load-bearing): size to `prev_.entities.size()` (NOT `u_.order.size()`); default each to `0.0` (the "φ=0 neutral white" contract for entities with no field entry); first-match-wins. I.e. `std::vector<double> phi(prev_.entities.size(), 0.0); for (i) { src = prev_.entities[i].source; for (j in u_.order) if (u_.order[j]==src) { phi[i]=u_.data[j]; break; } } return phi;`.
 - **`void rebake_view_sw()`** — the `sw_`-only re-bake:
 ```cpp
 void rebake_view_sw() {
@@ -28,20 +28,19 @@ void rebake_view_sw() {
 - **`[[nodiscard]] bool has_view_dependent_material() const`** — `true` iff any `prev_.entities[i].material.kind` is `Metal` or `Dielectric` (the only eye-dependent shades). (TexturedLambertian/Lambertian/Emissive → view-independent.)
 
 ### 2.2 Shell `run_live` (apps/aleph_edit/main.cpp)
-- A `bool view_dirty = false;` + a `steady_clock::time_point last_rebake` near the render-loop state.
+**Reuse the shell's existing `u32` ms clock — `win.ticks_ms()` — NOT a new `std::chrono`.** `run_live` already drives all timing off it (`last_input_ms`, `kIdleMs`, fade timing) and already computes `const u32 now = win.ticks_ms();` right before `rasterize` (~main.cpp:801). So:
+- A `bool view_dirty = false;` + `aleph::math::u32 last_rebake_ms = 0;` (init `0`, NOT `now` — guarantees the first orbit re-bakes on the first throttled frame, closing the first-frame-lag hole) near the render-loop state. `constexpr aleph::math::u32 kViewRebakeMs = 80;` (shell-local).
 - After the `.orbit(...)` (~742) and `.zoom(...)` (~747) mutations: `view_dirty = true;`.
-- In the render block, BEFORE `rasterize(...)`:
+- In the render block, using the already-computed `now` (BEFORE `rasterize`):
 ```cpp
-if (view_dirty && controller.has_view_dependent_material()) {
-    const auto now = std::chrono::steady_clock::now();
-    if (now - last_rebake >= std::chrono::milliseconds(kViewRebakeMs)) {
-        controller.rebake_view_sw();
-        last_rebake = now;
-        view_dirty = false;
-    }
+if (view_dirty && controller.has_view_dependent_material()
+        && (now - last_rebake_ms) >= kViewRebakeMs) {
+    controller.rebake_view_sw();
+    last_rebake_ms = now;
+    view_dirty = false;
 }
 ```
-(`kViewRebakeMs` a shell-local `constexpr int = 80`. `<chrono>` include. The wave-demo branch of `run_live` steps+rebakes every frame already, so the orbit re-bake is mainly the non-wave path — but the guard is harmless in both.)
+(No `<chrono>`; matches the codebase u32-ms idiom. The wave-demo branch's lattice is all-Lambertian → `has_view_dependent_material()==false` → the guard is fully gated off there, so it never double-rebakes against `step()`'s per-frame rebuild.)
 
 ## 3. Determinism / scope
 The controller is clock-free and deterministic; `rebake_view_sw()` is exactly the `sw_` half of the existing bake (byte-identical at the same eye). All wall-clock/throttle state is in `run_live` (interactive, untested, non-headless). Headless/wave PPMs + `same_face` + the 4c-i Lambert golden are unaffected. `--wave` byte-identity holds (wave φ-skips shade; `rebake_view_sw` φ-path matches `rebuild_backends_from_prev`'s).
@@ -50,12 +49,12 @@ The controller is clock-free and deterministic; `rebake_view_sw()` is exactly th
 No allocation/exceptions beyond the existing bake. `has_view_dependent_material` is a const scan. Empty scene → false → no re-bake.
 
 ## 5. Testing
-**Controller (`tests/edit/test_controller.cpp` or `test_mv_controller.cpp`):**
-- **`rebake_view_sw` == the full path's `sw_`:** after an edit, capture `sw_` (via `raster_scene()`); call `rebake_view_sw()`; assert the `sw_` faces are byte-identical (`same_face`-style) to `build_sw_scene(prev_, cam_.look_from())` — i.e. `rebake_view_sw` reproduces the sw bake exactly (no divergence from the factored-out path).
-- **`rebake_view_sw` leaves `render_`/`prim_source_` untouched:** mutate the orbit camera, call `rebake_view_sw()`, assert `render_scene()`'s primitive count / `prim_source_` are unchanged from before (it only re-baked `sw_`). (If `render_` identity is hard to assert, assert `prim_source_` is byte-unchanged — it's rebuilt only by the full path.)
-- **`has_view_dependent_material`:** a scene with a Metal (or Dielectric) entity → `true`; an all-Lambertian/Textured scene → `false`.
-- **Orbit changes Metal vcol but not Lambertian:** build a scene with a Metal sphere + a Lambertian sphere + a camera; bake; record a Metal face vcol and a Lambertian face vcol; move `cam_` (orbit); `rebake_view_sw()`; assert the Metal face vcol CHANGED and the Lambertian face vcol is byte-IDENTICAL (proves view-dependence is isolated to Metal/Dielectric, and the gate's rationale).
-- (The shell throttle is app-loop glue — not unit-tested; note it.)
+**Controller (`tests/edit/test_controller.cpp` or `test_mv_controller.cpp`).** Keep these as THIN integration checks of the new wiring — the per-pixel Metal/Dielectric/Lambert shading semantics are already pinned at the build_sw layer (`test_build_sw.cpp` make_material_scene + the metal/dielectric/golden oracles); do NOT restate shading thresholds here.
+- **`rebake_view_sw` == the full path's `sw_` (sim-OFF):** the controller exposes the IR via `c.lowered()` (no public `prev_`). After an edit, assert `c.raster_scene()` faces are `same_face`-byte-identical to `build_sw_scene(c.lowered(), c.camera().look_from())` (the eye-explicit overload). (sim-ON routes through `gather_phi_entity()` and can't be reconstructed without enabling sim — cover the sim-OFF case.)
+- **`rebake_view_sw` leaves `render_`/`prim_source_` untouched:** mutate the orbit camera, `rebake_view_sw()`, assert **`prim_source()` is byte-unchanged** (PRIMARY — it's rebuilt only by the full path, controller.cppm:545-549; `render_scene()` primitive identity is harder to diff).
+- **`has_view_dependent_material`:** a Metal (or Dielectric) entity → `true`; an all-Lambertian/Textured scene → `false`.
+- **Orbit threads the live eye (the genuinely new behaviour):** a scene with a Metal sphere + a Lambertian sphere + a camera; bake; record per-Metal-face and per-Lambertian-face vcol. Orbit by a **LARGE yaw** (`c.camera().orbit(400.0f, 0.0f)` ≈ 3.2 rad — yaw is unclamped, kOrbitSpeed=0.008) so the reflection moves unambiguously; `rebake_view_sw()`. Assert `max |vcol_new − vcol_old|` over ALL Metal faces exceeds a clear threshold (the eye reached the bake), AND every Lambertian face vcol is byte-IDENTICAL (`operator==` — the default branch never reads `V`). This proves the threading + the gate rationale, not the shading math.
+- (The shell throttle is app-loop glue under `#if ALEPH_HAVE_SDL2` — not unit-tested; note it.)
 **Visual:** two raster frames of the editor scene at DIFFERENT orbit yaw, side-by-side, showing the chrome highlight / sky-reflection has MOVED with the camera (vs the 4c-i frozen behaviour) → `docs/superpowers/artifacts/2026-06-06-live-orbit-tracking.png`. (Headless can't orbit interactively; render two frames by setting two camera poses + `rebake_view_sw()` each, or note it's an interactive behaviour demonstrated by the 2-pose montage.)
 
 ## 6. Cost / when it runs
@@ -66,5 +65,6 @@ No allocation/exceptions beyond the existing bake. `has_view_dependent_material`
 - *View-independent/dependent vcol split* — recompute only the eye-dependent term on orbit (avoid re-AO); the throttle + gate make the full sw re-bake acceptable at editor sizes for now.
 - *Per-frame (un-throttled) re-bake* — 12 Hz is smooth enough; per-frame would re-bake AO 60×/s for no visible gain.
 - *Re-baking the PT `render_`/BVH on orbit* — explicitly NOT done (view-independent; only consumed when idle).
+- *A rebake at the idle→path-trace transition* — NOT needed: the PT consumes `render_` (view-independent SoA/BVH, main.cpp:829) + the live orbit camera (`render_camera`, ~820), so a stale `sw_` never reaches the path-traced image; and `view_dirty` converges the final raster pose within `kViewRebakeMs` (80ms) ≪ `kIdleMs` (250ms before idle/PT kicks in).
 - *Threading the bake* — single-threaded is fine at editor sizes; a thread pool is a separate perf change.
 `kViewRebakeMs` is a shell `constexpr` tunable.
