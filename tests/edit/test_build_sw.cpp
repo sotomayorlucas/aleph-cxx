@@ -325,12 +325,31 @@ TEST_CASE("build_sw: sphere front face stays lit (no false self-shadow)") {
     // brighter than pure ambient (which would be the fully-shadowed floor low).
     aleph::math::f32 top_lum = 0.0f;
     aleph::math::f32 best_y = -1e30f;
+    Vec3 top_pt{};
     for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
         if (!(sw.face_source[i] == NodeId{1})) continue;  // sphere faces only
         const Vec3 ctr = face_centroid(sw.scene.faces[i]);
-        if (ctr.y > best_y) { best_y = ctr.y; top_lum = lum(sw.scene.faces[i].vcol[0]); }
+        if (ctr.y > best_y) {
+            best_y = ctr.y;
+            top_lum = lum(sw.scene.faces[i].vcol[0]);
+            top_pt = ctr;
+        }
     }
-    // ambient-only luminance for the sphere's albedo (no diffuse) = 3·0.45·albedo
+    // The sphere is CONVEX and `self` is skipped, so its outward hemisphere is
+    // unoccluded by other geometry (the floor is below, the light not an
+    // entity) => the sphere's own AO == 1. Assert that explicitly so the
+    // ambient baseline below is exactly `base_albedo·kAmbient` (AO doesn't
+    // darken it); if AO ever wrongly self-darkened the sphere this would catch it.
+    // Unit outward normal (the production caller normalizes before calling AO;
+    // onb_from_normal assumes |N|=1, so a raw (unnormalized) centre->surface
+    // vector would skew the tangent basis — normalize here too).
+    const Vec3 top_normal =
+        aleph::math::normalize(top_pt - Vec3{0.0f, 0.8f, 0.0f});  // sphere centre
+    const aleph::math::f32 sphere_ao =
+        aleph::lowering::detail::ambient_occlusion(top_pt, top_normal, ls.entities, NodeId{1});
+    CHECK(sphere_ao == doctest::Approx(1.0f));
+    // ambient-only luminance for the sphere's albedo (no diffuse), now ·ao==1:
+    // = 3·0.45·albedo (base_albedo·(kAmbient·ao) summed over channels).
     const aleph::math::f32 ambient_lum =
         (0.8f + 0.2f + 0.2f) * 0.45f;  // base_albedo·kAmbient summed over channels
     CHECK(top_lum > ambient_lum);  // diffuse survives -> the top is genuinely lit
@@ -364,4 +383,100 @@ TEST_CASE("build_sw: phi override still bypasses shadows/shade") {
     }
     CHECK(checked_sphere);
     CHECK(checked_floor);
+}
+
+// ── Per-vertex ambient occlusion ────────────────────────────────────────────
+//
+// AO darkens the AMBIENT term where a vertex's hemisphere is occluded by nearby
+// geometry. Distinct from the contact-shadow oracle (which needs a light): AO
+// darkens the ambient even with NO light, so these scenes carry no lights —
+// the only vcol darkening is AO. The key correctness point: the floor's
+// cross(u,v)=(0,−64,0) points DOWN; `ambient_occlusion` must reorient to the
+// world-up hemisphere internally, else AO samples below the floor and a face
+// under the sphere does NOT darken (the oracle would invert).
+
+namespace {
+
+// No-light AO scene: a sphere resting just above a tessellated floor at y=0.
+// With NO lights the ambient is the only term, so vcol darkening == AO. The
+// sphere centre is at (0,0.55,0) r=0.5 so its bottom (y=0.05) nearly touches
+// the floor — a floor face under it sees the sphere block much of its upward
+// hemisphere (within kAoDist=2), a far face sees an open hemisphere.
+aleph::lowering::LoweredScene make_ao_scene() {
+    using aleph::lowering::LoweredEntity;
+    aleph::lowering::LoweredScene ls;  // NO lights
+
+    LoweredEntity sphere;
+    sphere.source = NodeId{1};
+    sphere.world_geometry = SphereLocal{Vec3{0.0f, 0.55f, 0.0f}, 0.5f};
+    sphere.material.albedo = Vec3{0.8f, 0.2f, 0.2f};
+    ls.entities.push_back(sphere);
+
+    LoweredEntity floor;
+    floor.source = NodeId{2};
+    floor.world_geometry = QuadLocal{Vec3{-4.0f, 0.0f, -4.0f}, Vec3{8, 0, 0}, Vec3{0, 0, 8}};
+    floor.material.albedo = Vec3{0.7f, 0.7f, 0.7f};
+    ls.entities.push_back(floor);
+
+    return ls;
+}
+
+}  // namespace
+
+TEST_CASE("build_sw: AO darkens the floor under a sphere (no light)") {
+    const aleph::lowering::LoweredScene ls = make_ao_scene();
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls);
+
+    // Nearest-to-origin floor face (under the sphere) vs the farthest one.
+    aleph::math::f32 best_near = 1e30f, lum_near = 0.0f;
+    aleph::math::f32 best_far  = -1.0f, lum_far  = 0.0f;
+    bool found_near = false, found_far = false;
+    for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
+        if (!(sw.face_source[i] == NodeId{2})) continue;  // floor faces only
+        const Vec3 ctr = face_centroid(sw.scene.faces[i]);
+        const aleph::math::f32 r = std::sqrt(ctr.x * ctr.x + ctr.z * ctr.z);
+        if (r < best_near) { best_near = r; lum_near = lum(sw.scene.faces[i].vcol[0]); found_near = true; }
+        if (r > best_far && r > 4.0f) { best_far = r; lum_far = lum(sw.scene.faces[i].vcol[0]); found_far = true; }
+    }
+    REQUIRE(found_near);
+    REQUIRE(found_far);
+    // The floor under the sphere is AO-darkened; the far floor's hemisphere is
+    // open. If this INVERTS (near brighter), the world-up reorientation is wrong.
+    CHECK(lum_near < lum_far);
+}
+
+TEST_CASE("build_sw: a lone sphere is not self-darkened (AO == 1 everywhere)") {
+    using aleph::lowering::LoweredEntity;
+    aleph::lowering::LoweredScene ls;  // NO lights, NO floor — just the sphere
+    LoweredEntity sphere;
+    sphere.source = NodeId{1};
+    sphere.world_geometry = SphereLocal{Vec3{0.0f, 0.0f, 0.0f}, 1.0f};
+    sphere.material.albedo = Vec3{0.8f, 0.2f, 0.2f};
+    ls.entities.push_back(sphere);
+
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls);
+
+    // With no other geometry, every face's AO == 1 (self is skipped, convex).
+    // Each face's ambient seed is therefore exactly base_albedo·kAmbient·exposure,
+    // un-darkened. Compute the expected ambient luminance and check a face matches.
+    const aleph::math::f32 expect_ambient_lum =
+        (0.8f + 0.2f + 0.2f) * aleph::lowering::detail::kAmbient
+        * aleph::lowering::detail::kRasterExposure;  // 3·albedo·kAmbient·exposure, ao==1
+    bool checked = false;
+    for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
+        if (!(sw.face_source[i] == NodeId{1})) continue;
+        // Verify the AO factor for this vertex is exactly 1 (no occluders).
+        // Outward unit normal = normalize(v0 - centre); centre is the origin here.
+        const Vec3 v0 = sw.scene.faces[i].verts[0];
+        const Vec3 n0 = aleph::math::normalize(v0);
+        const aleph::math::f32 ao =
+            aleph::lowering::detail::ambient_occlusion(v0, n0, ls.entities, NodeId{1});
+        CHECK(ao == doctest::Approx(1.0f));
+        // A back-facing (unlit) vertex's vcol is the pure ambient seed (no
+        // diffuse with no lights) => exactly the no-AO ambient luminance.
+        CHECK(lum(sw.scene.faces[i].vcol[0]) == doctest::Approx(expect_ambient_lum));
+        checked = true;
+        break;
+    }
+    CHECK(checked);
 }
