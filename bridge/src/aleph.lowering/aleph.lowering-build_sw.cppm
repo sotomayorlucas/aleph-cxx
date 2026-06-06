@@ -206,8 +206,10 @@ inline constexpr aleph::math::f32 kAoDist  = 2.0f;  // local occlusion radius (w
 inline constexpr aleph::math::f32 kAoBias  = kShadowBias;  // reuse the shadow bias (2e-3)
 inline constexpr aleph::math::f32 kAoFloor = 0.15f; // AO never blacks the ambient below this
 // Hemisphere directions in TANGENT space (z=up): 1 straight up + a ring of 8 at
-// ~50° elevation. Each is unit (0.643²+0.766²=1; 0.455²+0.455²+0.766²=1).
-inline constexpr std::array<aleph::math::Vec3, kAoRays> kAoDirs = {
+// ~50° elevation (horizontal=sin40°, up=cos40°). The literals are 3-sig-fig, so
+// each is unit only to ~1.0002 — a <0.05% reach error over kAoDist, negligible
+// for a preview. (size_t cast: std::array's extent is unsigned; kAoRays is int.)
+inline constexpr std::array<aleph::math::Vec3, static_cast<std::size_t>(kAoRays)> kAoDirs = {
     aleph::math::Vec3{0.0f, 0.0f, 1.0f},
     aleph::math::Vec3{ 0.643f,  0.000f, 0.766f}, aleph::math::Vec3{ 0.455f,  0.455f, 0.766f},
     aleph::math::Vec3{ 0.000f,  0.643f, 0.766f}, aleph::math::Vec3{-0.455f,  0.455f, 0.766f},

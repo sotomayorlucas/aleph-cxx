@@ -340,7 +340,11 @@ TEST_CASE("build_sw: sphere front face stays lit (no false self-shadow)") {
     // entity) => the sphere's own AO == 1. Assert that explicitly so the
     // ambient baseline below is exactly `base_albedo·kAmbient` (AO doesn't
     // darken it); if AO ever wrongly self-darkened the sphere this would catch it.
-    const Vec3 top_normal = top_pt - Vec3{0.0f, 0.8f, 0.0f};  // sphere centre
+    // Unit outward normal (the production caller normalizes before calling AO;
+    // onb_from_normal assumes |N|=1, so a raw (unnormalized) centre->surface
+    // vector would skew the tangent basis — normalize here too).
+    const Vec3 top_normal =
+        aleph::math::normalize(top_pt - Vec3{0.0f, 0.8f, 0.0f});  // sphere centre
     const aleph::math::f32 sphere_ao =
         aleph::lowering::detail::ambient_occlusion(top_pt, top_normal, ls.entities, NodeId{1});
     CHECK(sphere_ao == doctest::Approx(1.0f));
@@ -462,9 +466,11 @@ TEST_CASE("build_sw: a lone sphere is not self-darkened (AO == 1 everywhere)") {
     for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
         if (!(sw.face_source[i] == NodeId{1})) continue;
         // Verify the AO factor for this vertex is exactly 1 (no occluders).
+        // Outward unit normal = normalize(v0 - centre); centre is the origin here.
         const Vec3 v0 = sw.scene.faces[i].verts[0];
+        const Vec3 n0 = aleph::math::normalize(v0);
         const aleph::math::f32 ao =
-            aleph::lowering::detail::ambient_occlusion(v0, v0, ls.entities, NodeId{1});
+            aleph::lowering::detail::ambient_occlusion(v0, n0, ls.entities, NodeId{1});
         CHECK(ao == doctest::Approx(1.0f));
         // A back-facing (unlit) vertex's vcol is the pure ambient seed (no
         // diffuse with no lights) => exactly the no-AO ambient luminance.
