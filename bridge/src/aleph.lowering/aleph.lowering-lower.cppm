@@ -43,11 +43,14 @@ import :importance;       // entity_importance (Ollivier-Ricci → per-Mesh impo
 //
 // No exceptions (aleph_flags_isa): all fallible paths return `std::expected`.
 //
-// NOTE: SPEC §4 partitions the IR types into `aleph.lowering:lowered`. That
-// partition is still an empty W1 stub, so the IR is defined here in `:lower`
-// (which the umbrella re-exports) to keep this translation unit self-contained
-// and compilable on its own. When `:lowered` is populated these definitions
-// move there and `:lower` imports them — the public names are unchanged.
+// NOTE: SPEC §4 partitions the IR types into `aleph.lowering:lowered`, which is
+// now ALSO fully populated. These IR structs (MaterialParams / LoweredEntity /
+// LoweredCamera / LoweredScene) are therefore DUAL-DEFINED — here in `:lower`
+// AND in `:lowered` — and the umbrella re-exports both. The two copies MUST stay
+// token-identical: editing only one (e.g. adding a field) makes gcc-16 fail with
+// "failed to read compiled module cluster: Bad file data". When you change any
+// IR struct, apply the identical edit to BOTH files. (A future cleanup could drop
+// these copies and `import :lowered`; not done — it is a separate IR refactor.)
 // ---------------------------------------------------------------------------
 
 export namespace aleph::lowering {

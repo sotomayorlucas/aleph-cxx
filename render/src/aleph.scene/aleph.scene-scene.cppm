@@ -62,6 +62,8 @@ inline MaterialHandle scene_add_emissive(Scene& s, aleph::math::Vec3 emit) {
 
 inline MaterialHandle scene_add_textured_lambertian(Scene& s, aleph::math::Vec3 albedo,
                                                       aleph::math::Vec2 uv_scale) {
+    // tex_id=0 is vestigial: the checker is procedural (no image), so the
+    // tex_id→Scene::textures path is unused (hook kept for future image textures).
     return MaterialHandle{MaterialKind::TexturedLambertian,
                           textured_lambertian_append(s.tex_lamb, albedo, 0u, uv_scale)};
 }

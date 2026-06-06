@@ -29,6 +29,9 @@ sample_textured_albedo(const aleph::scene::Scene& s,
     // Analytic procedural checker. uv_scale tiles the [0,1]² param face; the
     // cell parity selects HI/LO, base color is the material albedo. Pure-f32,
     // deterministic; matches the rasterizer's tex_checker_uv (same cell fn).
+    // Precondition: u,v ∈ [0,1] (hit_quad's α,β and hit_sphere's φ/2π,θ/π are
+    // bounded), so floor(u·sc) stays in a small non-negative int range — the
+    // cast is safe and the XOR parity is well-defined.
     const aleph::math::Vec2 sc = s.tex_lamb.uv_scale[mat_idx];
     const aleph::math::Vec3 a  = s.tex_lamb.albedo[mat_idx];
     const int cu = static_cast<int>(std::floor(u * sc.x));
