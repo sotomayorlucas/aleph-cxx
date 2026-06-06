@@ -1,33 +1,27 @@
-// Tier-1 gate for Mayer-Vietoris localization (physics slice 3).
+// Tier-1 gate for bounded-support curvature + exact MV localization (slice 3).
 //
-// GOAL (as specified): build_laplacian_local(g_after, prev, dirty, …) must
-// produce a Delta BIT-FOR-BIT identical to build_laplacian(g_after, …) (the
-// full rebuild) on a grid + add-node edits, by reusing cached curvatures for
-// non-dirty edges and recomputing only the 2-hop-dirty edges.
+// The HARD gate (now ACHIEVABLE): the localized bounded Laplacian Delta produced
+// by build_laplacian_local MUST equal the full build_laplacian_bounded Delta
+// BIT-FOR-BIT (==, not approx) on an arbitrary rewrite trace. This holds BY
+// CONSTRUCTION: the editor/sim curvature is the bounded-support Ollivier-Ricci
+// kappa_R(a, b) computed over the radius-R ball B_R(a, b) (R = kCurvRadius = 2),
+// so kappa_R(e) is a PURE FUNCTION of B_R(e). A non-dirty edge's ball is
+// unchanged across the edit, so its cached kappa_R == the full rebuild's kappa_R
+// bit-for-bit (same local node set, same sorted order, same local `n`, same
+// wasserstein_1) -> no global-`n` perturbation drift (the prior blocker under
+// the GLOBAL-support W_1). The dirty set is the R-hop ball of the edit.
 //
-// FINDING (BLOCKER — recorded honestly, NOT hidden by loosening a tolerance):
-// the byte-exact caching gate is UNACHIEVABLE under the current global-support
-// Ollivier-Ricci W_1. ricci_curvature_edge computes W_1 over the ENTIRE
-// connected component's support (build_state is global; the per-edge support
-// slice includes every finite-distance node). Adding a node GROWS that support
-// for EVERY edge in the component, so the Charnes-perturbed transportation
-// simplex sees a different-dimension problem and its f64 optimum drifts by
-// ~1e-10 (and can flip the sign of a near-zero kappa). The cached kappa (from
-// g_before's smaller support) is therefore a genuinely different f64 than the
-// full rebuild's kappa (g_after's larger support) for edges ARBITRARILY FAR
-// from the edit — so no BFS radius < "entire component" makes caching bit-exact
-// (and marking the whole component dirty == full rebuild, no win). See the spec
-// FOLLOW-UP (bounded-radius BFS support), which is the real fix.
-//
-// What this suite proves (the parts that ARE sound and load-bearing):
-//   1. ricci_curvature_edge factoring is behavior-preserving (existing
-//      ollivier_ricci / laplacian tests still pass byte-identically).
-//   2. DIRTY edges recomputed in g_after are BIT-EXACT to the full rebuild's
-//      kappa (the recompute path + canonical-order assembly are correct).
-//   3. The win counter targets exactly the dirty set: rc == dirty.size() < |E|.
-//   4. The localized Delta matches the full rebuild to ~1e-10 (approx), and the
-//      RESIDUAL byte error is measured and bounded — this is the documented
-//      blocker, not a passing gate.
+// What this suite proves:
+//   Task 1 — bounded curvature:
+//     * build_laplacian_bounded is deterministic (byte-identical run-to-run);
+//     * it is a valid graph Laplacian (symmetric, ones-in-kernel);
+//     * an interior edge's kappa_R(R=2) matches the GLOBAL ricci_curvature_edge
+//       within ~1e-6 (R=2 captures the local geometry; only perturbation-`n`
+//       differs).
+//   Task 2 — exact localization:
+//     * local.matrix.at(i,j) == full.matrix.at(i,j) for ALL i,j, BIT-EXACT,
+//       every kappa exact, rc == dirty.size() < |E|, on a single add AND a
+//       multi-edit trace (adds + a delete).
 
 #include "doctest.h"
 
@@ -44,9 +38,10 @@ import aleph.types;
 import aleph.sheaf;
 import aleph.math;
 
-using aleph::flow::build_laplacian;
+using aleph::flow::build_laplacian_bounded;
 using aleph::flow::build_laplacian_local;
 using aleph::flow::default_weight;
+using aleph::flow::ricci_curvature;
 using aleph::flow::two_hop_touched_edges;
 using aleph::flow::WeightedLaplacian;
 using aleph::graph::Graph;
@@ -96,129 +91,196 @@ Grid make_grid(std::size_t R) {
     return grid;
 }
 
-bool edge_in(const std::vector<std::pair<NodeId, NodeId>>& v,
-             std::pair<NodeId, NodeId>                      e) {
-    for (const auto& x : v)
-        if (x == e) return true;
-    return false;
+// Add one Mesh node adjacent to each node in `to`. Returns the new node id.
+NodeId add_object(Graph& g, const std::vector<NodeId>& to) {
+    static int   ctr = 0;
+    const NodeId c   = g.alloc_node_id();
+    g.insert_node(Mesh{c, std::string("add") + std::to_string(ctr++), 1});
+    for (const NodeId t : to) {
+        REQUIRE(g.add_edge(EdgeKind::Adjacent, c, t).has_value());
+    }
+    return c;
+}
+
+// Assert localized bounded Delta == full bounded Delta BIT-FOR-BIT, plus the
+// per-kappa exactness and the win counter. Returns dirty.size().
+std::size_t assert_local_eq_full_bounded(const Graph&               g_after,
+                                         const WeightedLaplacian&   prev,
+                                         const std::vector<NodeId>& seed) {
+    const WeightedLaplacian full =
+        build_laplacian_bounded(g_after, default_weight);
+    const OneSkeleton skel  = OneSkeleton::from_graph(g_after);
+    const auto        dirty = two_hop_touched_edges(skel, seed);
+
+    int                     rc = 0;
+    const WeightedLaplacian local =
+        build_laplacian_local(g_after, prev, dirty, default_weight, &rc);
+
+    // node order is a pure function of the id set.
+    REQUIRE(local.node_order == full.node_order);
+    REQUIRE(local.curvatures.size() == full.curvatures.size());
+    REQUIRE(local.matrix.rows() == full.matrix.rows());
+    REQUIRE(local.matrix.cols() == full.matrix.cols());
+
+    // THE GO/NO-GO: every matrix entry BIT-EXACT (==, not approx).
+    for (std::size_t i = 0; i < full.matrix.rows(); ++i) {
+        for (std::size_t j = 0; j < full.matrix.cols(); ++j) {
+            CHECK(local.matrix.at(i, j) == full.matrix.at(i, j));
+        }
+    }
+
+    // Every curvature BIT-EXACT.
+    for (const auto& [e, kf] : full.curvatures) {
+        const f64* kl = local.curvatures.get(e);
+        REQUIRE(kl != nullptr);
+        CHECK(*kl == kf);
+    }
+
+    // Win counter targets exactly the dirty set, strictly fewer than |E|.
+    CHECK(rc == static_cast<int>(dirty.size()));
+    CHECK(rc < static_cast<int>(full.curvatures.size()));
+    return dirty.size();
 }
 
 }  // namespace
 
-// The factoring of detail::ricci_curvature_edge out of the per-edge loop is
-// behavior-preserving: the recomputed (in g_after) kappa for every DIRTY edge
-// is BIT-EXACT to the full rebuild's kappa, and the node order / structure
-// matches. This is the correct, load-bearing half of the slice.
-TEST_CASE("mv-local: dirty-edge recompute is BIT-EXACT to full rebuild") {
-    Grid                    grid  = make_grid(5);
-    const WeightedLaplacian full0 = build_laplacian(grid.g, default_weight);
+// ── Task 1: bounded curvature ─────────────────────────────────────────────
 
-    // Add one Mesh node C adjacent to an interior node.
-    const NodeId interior = grid.ids[2][2];
-    const NodeId c        = grid.g.alloc_node_id();
-    grid.g.insert_node(Mesh{c, "C", 1});
-    REQUIRE(grid.g.add_edge(EdgeKind::Adjacent, c, interior).has_value());
+// build_laplacian_bounded is fully deterministic: same graph -> byte-identical
+// matrix and curvatures run-to-run.
+TEST_CASE("mv-local: build_laplacian_bounded is deterministic (byte-identical)") {
+    Grid grid = make_grid(5);
 
-    const WeightedLaplacian full1 = build_laplacian(grid.g, default_weight);
+    const WeightedLaplacian a = build_laplacian_bounded(grid.g, default_weight);
+    const WeightedLaplacian b = build_laplacian_bounded(grid.g, default_weight);
 
-    const OneSkeleton         skel1 = OneSkeleton::from_graph(grid.g);
-    const std::vector<NodeId> seed{c, interior};
-    const auto                dirty = two_hop_touched_edges(skel1, seed);
+    REQUIRE(a.node_order == b.node_order);
+    REQUIRE(a.matrix.rows() == b.matrix.rows());
+    REQUIRE(a.matrix.cols() == b.matrix.cols());
+    for (std::size_t i = 0; i < a.matrix.rows(); ++i)
+        for (std::size_t j = 0; j < a.matrix.cols(); ++j)
+            CHECK(a.matrix.at(i, j) == b.matrix.at(i, j));
 
-    int                     rc = 0;
-    const WeightedLaplacian local =
-        build_laplacian_local(grid.g, full0, dirty, default_weight, &rc);
-
-    // Structure: node order matches the full build exactly.
-    REQUIRE(local.node_order == full1.node_order);
-    REQUIRE(local.curvatures.size() == full1.curvatures.size());
-
-    // The win counter targets exactly the dirty set, strictly fewer than |E|.
-    CHECK(rc == static_cast<int>(dirty.size()));
-    CHECK(rc < static_cast<int>(full1.curvatures.size()));
-
-    // Every DIRTY edge's recomputed kappa is BIT-EXACT (==) to the full
-    // rebuild's kappa — proving ricci_curvature_edge reuses identical math.
-    for (const auto& e : dirty) {
-        const f64* kl = local.curvatures.get(e);
-        const f64* kf = full1.curvatures.get(e);
-        REQUIRE(kl != nullptr);
-        REQUIRE(kf != nullptr);
-        CHECK(*kl == *kf);  // bit-exact on the recompute path
+    REQUIRE(a.curvatures.size() == b.curvatures.size());
+    for (const auto& [e, ka] : a.curvatures) {
+        const f64* kb = b.curvatures.get(e);
+        REQUIRE(kb != nullptr);
+        CHECK(ka == *kb);
     }
 }
 
-// The 2-hop dirty set is a sound TOPOLOGICAL cover: every edge whose curvature
-// genuinely differs by more than fp-solver noise (1e-9) across the edit is
-// marked dirty. (Stale-not-dirty edges differ only at the ~1e-10 fp level — the
-// global-support W_1 drift documented in the file header, not a missed
-// topological change.)
-TEST_CASE("mv-local: 2-hop cover catches every >1e-9 curvature change") {
-    Grid                    grid  = make_grid(5);
-    const WeightedLaplacian full0 = build_laplacian(grid.g, default_weight);
+// The bounded Delta is still a valid graph Laplacian: symmetric and the all-ones
+// vector lies in its kernel (every row sums to 0).
+TEST_CASE("mv-local: build_laplacian_bounded is a valid Laplacian") {
+    Grid                    grid = make_grid(5);
+    const WeightedLaplacian lap =
+        build_laplacian_bounded(grid.g, default_weight);
 
-    const NodeId interior = grid.ids[2][2];
-    const NodeId c        = grid.g.alloc_node_id();
-    grid.g.insert_node(Mesh{c, "C", 1});
-    REQUIRE(grid.g.add_edge(EdgeKind::Adjacent, c, interior).has_value());
-
-    const WeightedLaplacian full1 = build_laplacian(grid.g, default_weight);
-    const OneSkeleton         skel1 = OneSkeleton::from_graph(grid.g);
-    const std::vector<NodeId> seed{c, interior};
-    const auto                dirty = two_hop_touched_edges(skel1, seed);
-
-    for (const auto& [e, k1] : full1.curvatures) {
-        const f64* k0 = full0.curvatures.get(e);
-        if (k0 == nullptr) {
-            // brand-new edge: must be dirty.
-            CHECK(edge_in(dirty, e));
-            continue;
-        }
-        // A >1e-9 change is a real topological change -> must be in the cover.
-        if (std::abs(*k0 - k1) > 1e-9) {
-            CHECK(edge_in(dirty, e));
-        }
-    }
+    CHECK(lap.is_symmetric(1e-12));
+    CHECK(lap.ones_in_kernel(1e-12));
 }
 
-// The localized Delta matches the full rebuild to ~1e-10 (approx). The residual
-// BYTE error is measured and bounded here — this records the BLOCKER (see file
-// header): under the global-support W_1, cached non-dirty kappa drifts ~1e-10
-// vs the full rebuild after a node-add, so the gate is approx-equal but NOT
-// bit-equal. We assert the measured bound (a regression guard), and explicitly
-// document that strict byte-equality FAILS (it is the go/no-go for the slice).
-TEST_CASE("mv-local: localized Delta == full to ~1e-10 (byte-exact BLOCKED)") {
-    Grid                    grid  = make_grid(5);
-    const WeightedLaplacian full0 = build_laplacian(grid.g, default_weight);
+// Locality fidelity: on a large grid, an INTERIOR edge's bounded kappa_R (R=2)
+// matches the GLOBAL ricci_curvature within ~1e-6. R=2 captures the local
+// geometry exactly (all support geodesics live in B_2); only the perturbation-`n`
+// (ball size vs global support) differs, a ~1e-10..1e-6 effect.
+TEST_CASE("mv-local: bounded kappa_R ~= global kappa on an interior edge") {
+    Grid grid = make_grid(9);
+
+    const WeightedLaplacian bounded =
+        build_laplacian_bounded(grid.g, default_weight);
+    const auto global = ricci_curvature(grid.g);
+
+    // An interior horizontal edge, far from every boundary (degree-4 both ends).
+    const NodeId                    a = grid.ids[4][4];
+    const NodeId                    b = grid.ids[4][5];
+    const std::pair<NodeId, NodeId> key =
+        (a < b) ? std::pair{a, b} : std::pair{b, a};
+
+    const f64* kb = bounded.curvatures.get(key);
+    const f64* kg = global.get(key);
+    REQUIRE(kb != nullptr);
+    REQUIRE(kg != nullptr);
+    CHECK(std::abs(*kb - *kg) < 1e-6);
+}
+
+// ── Task 2: exact localization (Tier-1 byte-EXACT — the go/no-go) ──────────
+
+// Single add: build_laplacian_local Delta == build_laplacian_bounded Delta
+// BIT-FOR-BIT, every kappa exact, rc == dirty.size() < |E|.
+TEST_CASE("mv-local: localized bounded Delta == full BIT-EXACT (single add)") {
+    Grid grid = make_grid(5);
+    const WeightedLaplacian prev =
+        build_laplacian_bounded(grid.g, default_weight);
 
     const NodeId interior = grid.ids[2][2];
-    const NodeId c        = grid.g.alloc_node_id();
-    grid.g.insert_node(Mesh{c, "C", 1});
-    REQUIRE(grid.g.add_edge(EdgeKind::Adjacent, c, interior).has_value());
+    const NodeId c        = add_object(grid.g, {interior});
 
-    const WeightedLaplacian full1 = build_laplacian(grid.g, default_weight);
-    const OneSkeleton         skel1 = OneSkeleton::from_graph(grid.g);
-    const std::vector<NodeId> seed{c, interior};
-    const auto                dirty = two_hop_touched_edges(skel1, seed);
+    const std::size_t ds = assert_local_eq_full_bounded(
+        grid.g, prev, std::vector<NodeId>{c, interior});
+    CHECK(ds > 0);
+}
 
-    int                     rc = 0;
-    const WeightedLaplacian local =
-        build_laplacian_local(grid.g, full0, dirty, default_weight, &rc);
+// Add touching TWO interior nodes (a 2-edge object) — still byte-exact.
+TEST_CASE("mv-local: localized bounded Delta == full BIT-EXACT (2-edge add)") {
+    Grid grid = make_grid(6);
+    const WeightedLaplacian prev =
+        build_laplacian_bounded(grid.g, default_weight);
 
-    REQUIRE(local.node_order == full1.node_order);
+    const NodeId n1 = grid.ids[2][2];
+    const NodeId n2 = grid.ids[3][3];
+    const NodeId c  = add_object(grid.g, {n1, n2});
 
-    // Approx-equality holds at 1e-9 (the existing flow-test tolerance).
-    CHECK(local.matrix.approx_eq(full1.matrix, 1e-9));
+    assert_local_eq_full_bounded(grid.g, prev,
+                                 std::vector<NodeId>{c, n1, n2});
+}
 
-    // Measure the residual byte error and assert a bound. This is the BLOCKER:
-    // if this were 0.0 the slice would be byte-exact; it is ~1e-10 because of
-    // the global-support W_1 drift, so strict bit-equality is impossible here.
-    f64 max_err = 0.0;
-    for (std::size_t i = 0; i < full1.matrix.rows(); ++i)
-        for (std::size_t j = 0; j < full1.matrix.cols(); ++j)
-            max_err = std::max(
-                max_err,
-                std::abs(local.matrix.at(i, j) - full1.matrix.at(i, j)));
-    CHECK(max_err < 1e-9);   // approx bound (regression guard)
-    CHECK(max_err > 0.0);    // documents that it is NOT byte-exact (the blocker)
+// Multi-edit trace: several adds followed by a delete, threading `prev` through
+// every step. Tier-1 byte-exact MUST hold at EVERY step (the cached kappa_R of
+// non-dirty edges is bit-identical to a fresh full bounded rebuild because their
+// ball is unchanged).
+TEST_CASE("mv-local: multi-edit trace stays BIT-EXACT (adds + a delete)") {
+    Grid              grid = make_grid(6);
+    WeightedLaplacian prev = build_laplacian_bounded(grid.g, default_weight);
+
+    // Step 1: add c1 on an interior node.
+    {
+        const NodeId to = grid.ids[2][2];
+        const NodeId c1 = add_object(grid.g, {to});
+        assert_local_eq_full_bounded(grid.g, prev, std::vector<NodeId>{c1, to});
+        prev = build_laplacian_bounded(grid.g, default_weight);
+    }
+
+    // Step 2: add c2 spanning two interior nodes.
+    NodeId c2 = NodeId{};
+    {
+        const NodeId t1 = grid.ids[3][3];
+        const NodeId t2 = grid.ids[3][4];
+        c2              = add_object(grid.g, {t1, t2});
+        assert_local_eq_full_bounded(grid.g, prev,
+                                     std::vector<NodeId>{c2, t1, t2});
+        prev = build_laplacian_bounded(grid.g, default_weight);
+    }
+
+    // Step 3: add c3 on another interior node.
+    {
+        const NodeId to = grid.ids[4][2];
+        const NodeId c3 = add_object(grid.g, {to});
+        assert_local_eq_full_bounded(grid.g, prev, std::vector<NodeId>{c3, to});
+        prev = build_laplacian_bounded(grid.g, default_weight);
+    }
+
+    // Step 4: DELETE c2 (cascade removes its incident edges). The seed for a
+    // delete is the endpoints of the removed edges that survive (its old
+    // neighbours) — captured BEFORE the delete.
+    {
+        const NodeId t1 = grid.ids[3][3];
+        const NodeId t2 = grid.ids[3][4];
+        grid.g.remove_node_cascade(c2);
+        // After cascade, c2 is gone; seed from its surviving old neighbours.
+        const std::size_t ds = assert_local_eq_full_bounded(
+            grid.g, prev, std::vector<NodeId>{t1, t2});
+        CHECK(ds > 0);
+        prev = build_laplacian_bounded(grid.g, default_weight);
+    }
 }

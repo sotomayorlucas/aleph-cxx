@@ -248,26 +248,35 @@ two_hop_touched_edges(const OneSkeleton&          skel,
     return dirty;
 }
 
-// Localized weighted Laplacian: reuse cached curvatures from `prev` for
-// non-dirty edges and recompute only the 2-hop-dirty edges, then reassemble
-// Delta in canonical skel.edges order. Byte-IDENTICAL to build_laplacian(
-// g_after, weight_fn): the fresh curvature map is built by inserting in the
-// SAME skel.edges order the full build uses, so assemble's diagonal += fp
-// summation order is identical, and a recomputed kappa reuses the identical
-// math (ricci_curvature_edge) so it is bit-exact to the full build's kappa.
+// Localized weighted Laplacian on the BOUNDED-support curvature kappa_R: reuse
+// cached kappa_R from `prev` for non-dirty edges and recompute only the
+// R-hop-dirty edges with ricci_curvature_edge_bounded, then reassemble Delta in
+// canonical skel.edges order.
+//
+// Byte-EXACT to build_laplacian_bounded(g_after, weight_fn) BY CONSTRUCTION:
+//   * kappa_R(e) is a pure function of the radius-R ball B_R(e); a non-dirty
+//     edge's ball is unchanged by the edit, so its cached kappa_R == the full
+//     rebuild's kappa_R bit-for-bit (same local node set, same sorted order,
+//     same local `n`, same wasserstein_1) -> no global-`n` perturbation drift;
+//   * a dirty edge is recomputed via the IDENTICAL bounded primitive the full
+//     build uses -> bit-exact;
+//   * the fresh curvature map is inserted in the SAME canonical skel.edges order
+//     the full build uses, so assemble's diagonal += fp summation order matches.
+//
+// No global build_state: each recompute builds its OWN local state over B_R(e)
+// (the asymptotic win — O(ball) per dirty edge).
 //
 // `dirty_edges` are the canonical-keyed edges to recompute (from
-// two_hop_touched_edges). On a cache miss for a non-dirty edge (a never-before-
-// seen survivor) we recompute as a safe fallback. `recompute_count` (if
-// non-null) is incremented once per recomputed edge -> the demonstrable win
-// (O(touched) << |E|).
+// two_hop_touched_edges with radius = kCurvRadius). On a cache miss for a
+// non-dirty edge (a never-before-seen survivor) we recompute as a safe fallback.
+// `recompute_count` (if non-null) is incremented once per recomputed edge ->
+// the demonstrable win (O(touched) << |E|).
 [[nodiscard]] inline WeightedLaplacian build_laplacian_local(
     const aleph::graph::Graph& g_after, const WeightedLaplacian& prev,
     const std::vector<std::pair<NodeId, NodeId>>& dirty_edges,
-    WeightFn weight_fn, int* recompute_count = nullptr) {
-    const OneSkeleton           skel = OneSkeleton::from_graph(g_after);
-    const detail::SkeletonState st   = detail::build_state(skel);
-    const std::size_t           n    = skel.vertices.size();
+    WeightFn weight_fn, int* recompute_count = nullptr,
+    int radius = detail::kCurvRadius) {
+    const OneSkeleton skel = OneSkeleton::from_graph(g_after);
 
     // Dirty set for O(1) membership (canonical edge key).
     aleph::containers::OrderedMap<std::pair<NodeId, NodeId>, bool> dirty_set;
@@ -276,18 +285,17 @@ two_hop_touched_edges(const OneSkeleton&          skel,
     }
 
     // FRESH curvature map, inserted in canonical skel.edges order (the SAME
-    // order ricci_curvature_from_skeleton uses) -> byte-identical assembly.
+    // order build_laplacian_bounded uses) -> byte-identical assembly.
     RicciMap curv;
     for (const auto& [a, b] : skel.edges) {
         // Mirror the full build: omit edges whose endpoints are absent.
-        if (detail::node_index_of(st, a) == n ||
-            detail::node_index_of(st, b) == n) {
+        if (!skel.contains_vertex(a) || !skel.contains_vertex(b)) {
             continue;
         }
         const std::pair<NodeId, NodeId> key{a, b};
         f64                             kappa;
         if (dirty_set.contains(key)) {
-            kappa = detail::ricci_curvature_edge(st, a, b);
+            kappa = detail::ricci_curvature_edge_bounded(skel, a, b, radius);
             if (recompute_count != nullptr) {
                 ++*recompute_count;
             }
@@ -297,7 +305,7 @@ two_hop_touched_edges(const OneSkeleton&          skel,
                 kappa = *cached;
             } else {
                 // Cache miss (survivor edge never seen) -> safe recompute.
-                kappa = detail::ricci_curvature_edge(st, a, b);
+                kappa = detail::ricci_curvature_edge_bounded(skel, a, b, radius);
                 if (recompute_count != nullptr) {
                     ++*recompute_count;
                 }
