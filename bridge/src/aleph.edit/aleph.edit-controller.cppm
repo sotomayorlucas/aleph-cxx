@@ -361,6 +361,27 @@ public:
     // the wrong eye). No-op-safe: a plain re-derive of both backends from `prev_`.
     void rebake_view() { rebuild_backends_from_prev(); }
 
+    // Re-bake ONLY sw_ at the current orbit eye (view-dependent Metal/Dielectric
+    // vcol tracks the camera). render_/BVH + prim_source_ are view-INDEPENDENT (the
+    // PT integrates the view via rays; only consumed when idle) — left untouched.
+    // Clock-free / deterministic: a pure re-bake at the current cam_.look_from().
+    void rebake_view_sw() {
+        if (sim_enabled_) { const std::vector<double> phi = gather_phi_entity();
+                            sw_ = aleph::lowering::build_sw_scene(prev_, cam_.look_from(), &phi); }
+        else              { sw_ = aleph::lowering::build_sw_scene(prev_, cam_.look_from()); }
+    }
+
+    // Only Metal/Dielectric vcol depends on the eye; Lambertian/TexturedLambertian/
+    // Emissive are view-independent (shade_face's default branch never reads V), so
+    // an all-Lambertian scene needs NO re-bake on orbit. True iff any entity is
+    // Metal or Dielectric.
+    [[nodiscard]] bool has_view_dependent_material() const {
+        for (const auto& e : prev_.entities)
+            if (e.material.kind == aleph::types::MaterialKind::Metal ||
+                e.material.kind == aleph::types::MaterialKind::Dielectric) return true;
+        return false;
+    }
+
     // ── Accessors ────────────────────────────────────────────────────────────
     [[nodiscard]] OrbitCamera&       camera()       noexcept { return cam_; }
     [[nodiscard]] const OrbitCamera& camera() const noexcept { return cam_; }
@@ -512,29 +533,32 @@ private:
         v_.reproject(operator_.node_order);  // survivors keep φ̇, new nodes 0
     }
 
+    // Gather a per-entity φ aligned to `prev_.entities` (each entity looked up in
+    // the field by its `source` NodeId), for the wave-sim build_sw_scene path.
+    // build_sw_scene indexes φ by entity `i`, so the three properties are load-
+    // bearing: sized to `prev_.entities.size()`; each defaulted to 0.0 (the
+    // "φ=0 neutral white" contract for entities with no field entry — e.g. a mesh
+    // with no Adjacent edge, so it is not a Δ vertex); first-match-wins.
+    [[nodiscard]] std::vector<double> gather_phi_entity() const {
+        std::vector<double> phi(prev_.entities.size(), 0.0);
+        for (std::size_t i = 0; i < prev_.entities.size(); ++i) {
+            const aleph::types::NodeId src = prev_.entities[i].source;
+            for (std::size_t j = 0; j < u_.order.size(); ++j)
+                if (u_.order[j] == src) { phi[i] = u_.data[j]; break; }
+        }
+        return phi;
+    }
+
     // Rebuild the rasterizer SceneRT (+ face_source), the path-trace Scene, and
     // the entity↔primitive map from the current `prev_` LoweredScene. Seam where
     // the lowered IR materializes into both renderer backends.
     void rebuild_backends_from_prev() {
-        // Software rasterizer faces + face→NodeId map (SPEC §3.1). When the wave
-        // sim is enabled, gather a per-entity φ aligned to `prev_.entities` (each
-        // entity looked up in the field by its `source` NodeId) and feed it so
-        // build_sw_scene colormaps φ into `vcol`. Entities with NO field entry —
-        // e.g. a mesh with no Adjacent edge, so it is not a Δ vertex — map to
-        // φ=0 (the colormap's neutral white), so the wave still colours the rest
-        // of the scene rather than vanishing for ALL entities. With sim OFF we
-        // pass nullptr and the build is BYTE-IDENTICAL to the no-physics path.
-        if (sim_enabled_) {
-            std::vector<double> phi_entity(prev_.entities.size(), 0.0);
-            for (std::size_t i = 0; i < prev_.entities.size(); ++i) {
-                const aleph::types::NodeId src = prev_.entities[i].source;
-                for (std::size_t j = 0; j < u_.order.size(); ++j)
-                    if (u_.order[j] == src) { phi_entity[i] = u_.data[j]; break; }
-            }
-            sw_ = aleph::lowering::build_sw_scene(prev_, cam_.look_from(), &phi_entity);
-        } else {
-            sw_ = aleph::lowering::build_sw_scene(prev_, cam_.look_from());
-        }
+        // Software rasterizer faces + face→NodeId map (SPEC §3.1): the view-
+        // dependent half, factored into `rebake_view_sw()` (so an orbit can re-bake
+        // ONLY sw_ at the live eye without rebuilding the view-independent render_/
+        // BVH). Net behaviour here is unchanged — sw_ is baked at cam_.look_from()
+        // exactly as before.
+        rebake_view_sw();
         // Path-trace SoA/BVH scene + camera pose (camera pose is also mirrored by
         // the orbit camera, which the shell drives; we keep the IR camera for the
         // render bundle but pick/render use the orbit camera's pose).
