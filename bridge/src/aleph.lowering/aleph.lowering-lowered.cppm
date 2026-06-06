@@ -53,6 +53,7 @@ struct MaterialParams {
     math::f32           fuzz{0.0f};
     math::f32           ior{1.5f};
     math::Vec3          emit{0.0f, 0.0f, 0.0f};
+    math::f32           uv_scale{4.0f};
 };
 
 // Rec. 709 relative luminance of an emission radiance. Used by the light-table

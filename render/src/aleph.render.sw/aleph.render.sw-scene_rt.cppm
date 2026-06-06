@@ -46,6 +46,18 @@ inline aleph::math::u32 tex_checker(aleph::math::f32 u, aleph::math::f32 v) noex
     return ((cu ^ cv) & 1) ? 0xFFE0E0E0u : 0xFF303030u;
 }
 
+// Parity checker (visual slice 4c-ii). Shares the cell function with the PT's
+// `sample_textured_albedo` so the floor's tiles align between backends. The two
+// ARGB levels decode (via rast_scan's `argb_to_linear`, a plain byte/255 — NO
+// sRGB) to HI=1.0 (0xFF byte) and LO=128/255≈0.502 (0x80 byte); the PT mirrors
+// these as `kCheckerHi`/`kCheckerLo`. `u,v` arrive already scaled by uv_scale
+// (baked into the quad UVs), so this is the raw `((⌊u⌋^⌊v⌋)&1)` cell.
+inline aleph::math::u32 tex_checker_uv(aleph::math::f32 u, aleph::math::f32 v) noexcept {
+    const int cu = static_cast<int>(std::floor(u));
+    const int cv = static_cast<int>(std::floor(v));
+    return ((cu ^ cv) & 1) ? 0xFFFFFFFFu : 0xFF808080u;   // HI=1.0, LO=128/255
+}
+
 inline aleph::math::u32 tex_brick(aleph::math::f32 u, aleph::math::f32 v) noexcept {
     const int row = static_cast<int>(std::floor(v));
     const aleph::math::f32 u_off = (row & 1) ? 1.0f : 0.0f;

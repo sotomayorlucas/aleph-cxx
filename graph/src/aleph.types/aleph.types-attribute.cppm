@@ -6,10 +6,11 @@ export module aleph.types:attribute;
 export namespace aleph::types {
 
 enum class MaterialKind : std::uint8_t {
-    Lambertian = 0,
-    Metal      = 1,
-    Dielectric = 2,
-    Emissive   = 3,
+    Lambertian         = 0,
+    Metal              = 1,
+    Dielectric         = 2,
+    Emissive           = 3,
+    TexturedLambertian = 4,
 };
 
 enum class LightKind : std::uint8_t {

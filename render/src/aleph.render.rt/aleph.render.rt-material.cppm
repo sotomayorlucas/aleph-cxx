@@ -12,6 +12,11 @@ import :sampling;
 
 export namespace aleph::render::rt {
 
+// Procedural checker levels (single source of truth: the LO byte 0x80 under the
+// renderer's plain byte/255 decode). HI = argb_to_linear(0xFF), LO = 0x80/255.
+inline constexpr aleph::math::f32 kCheckerHi = 1.0f;
+inline constexpr aleph::math::f32 kCheckerLo = 128.0f / 255.0f;
+
 struct ScatterResult {
     aleph::math::Ray  scattered;
     aleph::math::Vec3 attenuation;
@@ -21,14 +26,17 @@ struct ScatterResult {
 sample_textured_albedo(const aleph::scene::Scene& s,
                         std::uint32_t mat_idx,
                         aleph::math::f32 u, aleph::math::f32 v) noexcept {
-    const std::uint32_t tex_id  = s.tex_lamb.tex_id[mat_idx];
-    const aleph::math::Vec2 uvs = s.tex_lamb.uv_scale[mat_idx];
-    // Image type lives in aleph::io. Use the io module's bilinear sampler if it
-    // exists; otherwise a simple stub that returns gray.
-    // For Phase 2 simplicity, return a fixed gray here. (Texture sampling can
-    // be wired up in apps/aleph_rt when we set up the 'earth' scene.)
-    (void)s; (void)mat_idx; (void)u; (void)v; (void)tex_id; (void)uvs;
-    return aleph::math::Vec3{0.5f, 0.5f, 0.5f};
+    // Analytic procedural checker. uv_scale tiles the [0,1]² param face; the
+    // cell parity selects HI/LO, base color is the material albedo. Pure-f32,
+    // deterministic; matches the rasterizer's tex_checker_uv (same cell fn).
+    // Precondition: u,v ∈ [0,1] (hit_quad's α,β and hit_sphere's φ/2π,θ/π are
+    // bounded), so floor(u·sc) stays in a small non-negative int range — the
+    // cast is safe and the XOR parity is well-defined.
+    const aleph::math::Vec2 sc = s.tex_lamb.uv_scale[mat_idx];
+    const aleph::math::Vec3 a  = s.tex_lamb.albedo[mat_idx];
+    const int cu = static_cast<int>(std::floor(u * sc.x));
+    const int cv = static_cast<int>(std::floor(v * sc.y));
+    return a * (((cu ^ cv) & 1) ? kCheckerHi : kCheckerLo);
 }
 
 inline aleph::math::f32 schlick_reflectance(aleph::math::f32 cosine,

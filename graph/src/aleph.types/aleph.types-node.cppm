@@ -40,6 +40,7 @@ struct Material {    // physical params; `emit` is a RENDERABLE property, not "t
     math::f32    fuzz{0};
     math::f32    ior{1.5f};
     math::Vec3   emit{0, 0, 0};
+    math::f32    uv_scale{4.0f};
 };
 struct Light {       // an EXPLICIT sampling source in its own right (kept as a node)
     NodeId      id{};

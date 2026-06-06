@@ -60,10 +60,12 @@ inline MaterialHandle scene_add_emissive(Scene& s, aleph::math::Vec3 emit) {
     return MaterialHandle{MaterialKind::Emissive, emissive_append(s.emis, emit)};
 }
 
-inline MaterialHandle scene_add_textured_lambertian(Scene& s, std::uint32_t tex_id,
+inline MaterialHandle scene_add_textured_lambertian(Scene& s, aleph::math::Vec3 albedo,
                                                       aleph::math::Vec2 uv_scale) {
+    // tex_id=0 is vestigial: the checker is procedural (no image), so the
+    // tex_id→Scene::textures path is unused (hook kept for future image textures).
     return MaterialHandle{MaterialKind::TexturedLambertian,
-                          textured_lambertian_append(s.tex_lamb, tex_id, uv_scale)};
+                          textured_lambertian_append(s.tex_lamb, albedo, 0u, uv_scale)};
 }
 
 inline Handle32 scene_add_sphere(Scene& s, aleph::math::Vec3 center, aleph::math::f32 r,

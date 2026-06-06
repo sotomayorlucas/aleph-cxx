@@ -86,6 +86,8 @@ add_material(aleph::scene::Scene& s, const MaterialParams& m) {
             return aleph::scene::scene_add_dielectric(s, m.ior);
         case aleph::types::MaterialKind::Emissive:
             return aleph::scene::scene_add_emissive(s, m.emit);
+        case aleph::types::MaterialKind::TexturedLambertian:
+            return aleph::scene::scene_add_textured_lambertian(s, m.albedo, {m.uv_scale, m.uv_scale});
     }
     // Unreachable for a valid IR; keep total and deterministic.
     return aleph::scene::scene_add_lambertian(s, m.albedo);
