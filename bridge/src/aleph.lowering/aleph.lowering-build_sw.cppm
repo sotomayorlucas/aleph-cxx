@@ -217,6 +217,17 @@ inline constexpr std::array<aleph::math::Vec3, static_cast<std::size_t>(kAoRays)
     aleph::math::Vec3{ 0.000f, -0.643f, 0.766f}, aleph::math::Vec3{ 0.455f, -0.455f, 0.766f},
 };
 
+// --- directional sky ambient + sun tint ------------------------------------
+//
+// Hemispheric sky ambient (replaces the flat grey kAmbient). Channel-sum zenith=1.47,
+// horizon=1.19; the uniform-hemisphere mean (a=0.5) is ~0.443 ≈ the old 0.45 in aggregate.
+// The redistribution is the feature: up-faces read brighter/cooler, horizon-faces dimmer.
+inline constexpr aleph::math::Vec3 kSkyZenith  = {0.43f, 0.48f, 0.56f}; // up-facing (cool, bright)
+inline constexpr aleph::math::Vec3 kSkyHorizon = {0.38f, 0.39f, 0.42f}; // side-facing (neutral, dimmer)
+// Soft warm half-bounce fill from the dominant light (fake sun GI). A fill, not a key.
+inline constexpr aleph::math::Vec3 kSunColor    = {0.55f, 0.42f, 0.28f}; // warm tint (scaled by w·strength)
+inline constexpr aleph::math::f32  kSunStrength = 0.12f;                 // fill weight (max lum add ≈ 0.05)
+
 // Centre of a light's geometry — its effective point-light position for the
 // preview. Quad centre = q + (u+v)/2; tri centre = centroid; sphere = centre.
 [[nodiscard]] inline aleph::math::Vec3
@@ -233,6 +244,44 @@ light_center(const aleph::types::GeometryPayload& g) noexcept {
             }
         },
         g);
+}
+
+// Hemispheric sky ambient sampled by the WORLD-UP-reoriented normal. The quad/tri
+// normal sign is arbitrary (the floor's cross(u,v)=(0,-64,0) points DOWN), so flip to
+// the upper hemisphere — same reorientation AO uses. Known preview simplification: a
+// closed convex surface (sphere) thus reads its BOTTOM as bright as its TOP.
+[[nodiscard]] inline aleph::math::Vec3 sky_ambient(aleph::math::Vec3 N) noexcept {
+    using aleph::math::Vec3;
+    const Vec3 N_up = (aleph::math::dot(N, Vec3{0.0f, 1.0f, 0.0f}) < 0.0f) ? N * -1.0f : N;
+    const aleph::math::f32 a = std::clamp(N_up.y, 0.0f, 1.0f);  // std:: + FLOAT literals
+    return aleph::math::lerp(kSkyHorizon, kSkyZenith, a);
+}
+
+// Soft warm fill from the dominant light — a cheap half-Lambert wrap (fake sun GI).
+// On two-sided geometry (quads/tris, arbitrary winding) uses |dot| so warmth depends
+// on lighting, not winding (matches the direct-light |N·L|); on a sphere uses signed
+// dot so only the lit hemisphere warms. Wrap is 0 at nd=-1, 0.5 at the terminator.
+[[nodiscard]] inline aleph::math::Vec3
+sun_tint(aleph::math::Vec3 point, aleph::math::Vec3 N,
+         const std::vector<LoweredEntity>& lights, bool two_sided) noexcept {
+    using aleph::math::Vec3;
+    // Primary light = max emissive luminance; STRICT '>' so the lowest index wins ties.
+    aleph::math::f32 best = -1.0f;
+    const LoweredEntity* primary = nullptr;
+    for (const LoweredEntity& L : lights) {
+        const aleph::math::f32 s = L.material.emit.x + L.material.emit.y + L.material.emit.z;
+        if (s > best) { best = s; primary = &L; }
+    }
+    if (primary == nullptr) return Vec3{0.0f, 0.0f, 0.0f};
+    // Guard BEFORE normalize (aleph::math::normalize has no zero-guard -> NaN).
+    const Vec3 d = light_center(primary->world_geometry) - point;
+    const aleph::math::f32 dist2 = aleph::math::dot(d, d);
+    if (dist2 < 1e-6f) return Vec3{0.0f, 0.0f, 0.0f};
+    const Vec3 L = d * (1.0f / std::sqrt(dist2));
+    const aleph::math::f32 nd = two_sided ? std::fabs(aleph::math::dot(N, L))
+                                          : aleph::math::dot(N, L);
+    const aleph::math::f32 w = std::max(0.0f, 0.5f * nd + 0.5f);
+    return kSunColor * (kSunStrength * w);   // Vec3 * f32 (scale) — no hadamard here
 }
 
 // --- occlusion primitives --------------------------------------------------
@@ -435,7 +484,8 @@ shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
     // its own shadow `vis` multiply, the disjoint addend — no double-darkening).
     // Pass the RAW signed N; `ambient_occlusion` does its own world-up reorientation.
     const aleph::math::f32 ao = ambient_occlusion(point, N, occluders, self);
-    aleph::math::Vec3 lit = base_albedo * (kAmbient * ao) + self_emit;
+    const aleph::math::Vec3 amb = sky_ambient(N) + sun_tint(point, N, lights, two_sided);
+    aleph::math::Vec3 lit = aleph::math::hadamard(base_albedo, amb) * ao + self_emit;
     for (const LoweredEntity& L : lights) {
         const aleph::math::Vec3 d = light_center(L.world_geometry) - point;
         const aleph::math::f32 dist_sq = aleph::math::dot(d, d);
