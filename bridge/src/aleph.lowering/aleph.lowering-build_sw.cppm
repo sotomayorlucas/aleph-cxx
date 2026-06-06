@@ -136,10 +136,6 @@ colormap_diverging(double v, double scale) noexcept {
 // order => deterministic (SPEC §7). No shadows / GI / bounces — that is the
 // path tracer's job; here we only need the scene to read as lit while moving.
 
-// Ambient floor so faces facing away from every light read dim, not pure black
-// (stands in for the sky/indirect light the path tracer integrates).
-inline constexpr aleph::math::f32 kAmbient = 0.45f;
-
 // `material.emit` is an AREA-LIGHT radiance tuned for the path tracer (which
 // integrates it over solid angle + bounces). Driving a flat point-light model
 // with it directly over-brightens, so scale it to a sane preview intensity.
@@ -219,8 +215,8 @@ inline constexpr std::array<aleph::math::Vec3, static_cast<std::size_t>(kAoRays)
 
 // --- directional sky ambient + sun tint ------------------------------------
 //
-// Hemispheric sky ambient (replaces the flat grey kAmbient). Channel-sum zenith=1.47,
-// horizon=1.19; the uniform-hemisphere mean (a=0.5) is ~0.443 ≈ the old 0.45 in aggregate.
+// Hemispheric sky ambient (replaces the prior flat grey 0.45 ambient). Channel-sum
+// zenith=1.47, horizon=1.19; the uniform-hemisphere mean (a=0.5) is ~0.443 ≈ the old 0.45.
 // The redistribution is the feature: up-faces read brighter/cooler, horizon-faces dimmer.
 inline constexpr aleph::math::Vec3 kSkyZenith  = {0.43f, 0.48f, 0.56f}; // up-facing (cool, bright)
 inline constexpr aleph::math::Vec3 kSkyHorizon = {0.38f, 0.39f, 0.42f}; // side-facing (neutral, dimmer)
