@@ -1,4 +1,5 @@
 module;
+#include <cmath>
 #include <cstddef>
 #include <expected>
 #include <numbers>
@@ -139,6 +140,9 @@ struct HelmholtzOperator {
         if (source.size() != n) {
             return std::nullopt;
         }
+        if (n == 0) {  // empty field — avoid 0/0 in the PSD mean (cf. WaveStepper EmptyField)
+            return std::nullopt;
+        }
         if (factor.kind == HelmholtzFactor::Kind::Psd) {
             // The flow's solve requires the RHS in range(Δ); project out the
             // constant (kernel) component. Applied UNCONDITIONALLY; return the
@@ -155,6 +159,9 @@ struct HelmholtzOperator {
             return flow.solve(std::span<const f64>(projected.data(), projected.size()));
         }
         // Indefinite: solve against the fresh BK factor of Δ − k²I.
+        if (!factor.bk) {  // invariant (make() pairs Indefinite with a factor); guard the deref
+            return std::nullopt;
+        }
         return factor.bk->solve(source);
     }
 
