@@ -338,7 +338,7 @@ TEST_CASE("build_sw: sphere front face stays lit (no false self-shadow)") {
     // The sphere is CONVEX and `self` is skipped, so its outward hemisphere is
     // unoccluded by other geometry (the floor is below, the light not an
     // entity) => the sphere's own AO == 1. Assert that explicitly so the
-    // ambient baseline below is exactly `base_albedo·kAmbient` (AO doesn't
+    // ambient seed below is exactly hadamard(base_albedo, sky+sun) (AO doesn't
     // darken it); if AO ever wrongly self-darkened the sphere this would catch it.
     // Unit outward normal (the production caller normalizes before calling AO;
     // onb_from_normal assumes |N|=1, so a raw (unnormalized) centre->surface
@@ -348,11 +348,13 @@ TEST_CASE("build_sw: sphere front face stays lit (no false self-shadow)") {
     const aleph::math::f32 sphere_ao =
         aleph::lowering::detail::ambient_occlusion(top_pt, top_normal, ls.entities, NodeId{1});
     CHECK(sphere_ao == doctest::Approx(1.0f));
-    // ambient-only luminance for the sphere's albedo (no diffuse), now ·ao==1:
-    // = 3·0.45·albedo (base_albedo·(kAmbient·ao) summed over channels).
-    const aleph::math::f32 ambient_lum =
-        (0.8f + 0.2f + 0.2f) * 0.45f;  // base_albedo·kAmbient summed over channels
-    CHECK(top_lum > ambient_lum);  // diffuse survives -> the top is genuinely lit
+    // The lit top must exceed its OWN ambient seed (sky + sun, AO==1, exposed).
+    // Sphere (two_sided=false); the shadow scene's sphere albedo is {0.8,0.2,0.2}.
+    const Vec3 amb_top = aleph::lowering::detail::sky_ambient(top_normal)
+        + aleph::lowering::detail::sun_tint(top_pt, top_normal, ls.lights, /*two_sided=*/false);
+    const Vec3 seed_top = aleph::math::hadamard(Vec3{0.8f, 0.2f, 0.2f}, amb_top)
+        * aleph::lowering::detail::kRasterExposure;
+    CHECK(top_lum > lum(seed_top));  // direct light survives -> the top is genuinely lit
 }
 
 TEST_CASE("build_sw: phi override still bypasses shadows/shade") {
@@ -457,11 +459,8 @@ TEST_CASE("build_sw: a lone sphere is not self-darkened (AO == 1 everywhere)") {
     const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls);
 
     // With no other geometry, every face's AO == 1 (self is skipped, convex).
-    // Each face's ambient seed is therefore exactly base_albedo·kAmbient·exposure,
-    // un-darkened. Compute the expected ambient luminance and check a face matches.
-    const aleph::math::f32 expect_ambient_lum =
-        (0.8f + 0.2f + 0.2f) * aleph::lowering::detail::kAmbient
-        * aleph::lowering::detail::kRasterExposure;  // 3·albedo·kAmbient·exposure, ao==1
+    // Each face's ambient seed is therefore exactly hadamard(albedo, sky)·exposure,
+    // un-darkened and direction-dependent. Recompute per-face and check a match.
     bool checked = false;
     for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
         if (!(sw.face_source[i] == NodeId{1})) continue;
@@ -473,10 +472,120 @@ TEST_CASE("build_sw: a lone sphere is not self-darkened (AO == 1 everywhere)") {
             aleph::lowering::detail::ambient_occlusion(v0, n0, ls.entities, NodeId{1});
         CHECK(ao == doctest::Approx(1.0f));
         // A back-facing (unlit) vertex's vcol is the pure ambient seed (no
-        // diffuse with no lights) => exactly the no-AO ambient luminance.
-        CHECK(lum(sw.scene.faces[i].vcol[0]) == doctest::Approx(expect_ambient_lum));
+        // diffuse with no lights). Directional ambient: the expected lum depends
+        // on this face's own normal. No lights -> sun_tint=0; AO==1; centre at
+        // origin so n0 == shade_face's N.
+        const Vec3 amb = aleph::lowering::detail::sky_ambient(n0);
+        const Vec3 expect =
+            aleph::math::hadamard(sphere.material.albedo, amb)
+            * aleph::lowering::detail::kRasterExposure;
+        CHECK(lum(sw.scene.faces[i].vcol[0]) == doctest::Approx(lum(expect)));
         checked = true;
         break;
     }
     CHECK(checked);
+}
+
+// ── Directional sky ambient (hemispheric) ───────────────────────────────────
+//
+// The flat grey ambient (previously a constant 0.45) is replaced by a hemispheric sky term
+// (cool/bright at the zenith, neutral/dimmer at the horizon) sampled by the
+// world-up-reoriented normal. With NO lights the ambient IS the sky term, so a
+// neutral sphere's vcol reads the sky gradient directly: an up-facing (top)
+// face must be both brighter AND bluer than an equator (horizon) face.
+
+namespace {
+
+// Neutral-albedo sphere at the origin, NO lights -> ambient is sky only.
+// Albedo.z>0 is REQUIRED: the blue-fraction oracle measures albedo.z·amb.z; a
+// zero-blue (red) albedo collapses it to 0>0 (spurious fail).
+aleph::lowering::LoweredScene make_sky_scene() {
+    using aleph::lowering::LoweredEntity;
+    aleph::lowering::LoweredScene ls;  // NO lights -> ambient is sky only
+    LoweredEntity sphere;
+    sphere.source = NodeId{1};
+    sphere.world_geometry = SphereLocal{Vec3{0.0f, 0.0f, 0.0f}, 1.0f};
+    sphere.material.albedo = Vec3{0.7f, 0.7f, 0.7f};   // neutral: albedo.z>0
+    ls.entities.push_back(sphere);
+    return ls;
+}
+
+}  // namespace
+
+TEST_CASE("build_sw: hemispheric sky ambient — up-faces are brighter and bluer") {
+    const aleph::lowering::LoweredScene ls = make_sky_scene();
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls);
+
+    // Sphere normal at a face = normalize(centroid - centre); centre is the origin.
+    // Pick the most up-facing (top, N.y->+1 -> zenith) and a near-equator face
+    // (|N.y| smallest -> horizon). Compare top vs EQUATOR (NOT bottom: the world-up
+    // flip makes bottom==top).
+    aleph::math::f32 top_ny = -1.0f, eq_ny = 2.0f;
+    Vec3 top_c{}, eq_c{};
+    bool found_top = false, found_eq = false;
+    for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
+        const Vec3 c = face_centroid(sw.scene.faces[i]);
+        const Vec3 N = aleph::math::normalize(c);  // centre at origin
+        if (N.y > top_ny) { top_ny = N.y; top_c = sw.scene.faces[i].vcol[0]; found_top = true; }
+        if (std::fabs(N.y) < eq_ny) { eq_ny = std::fabs(N.y); eq_c = sw.scene.faces[i].vcol[0]; found_eq = true; }
+    }
+    REQUIRE(found_top);
+    REQUIRE(found_eq);
+    // Brighter (albedo-agnostic) AND bluer (needs albedo.z>0) at the zenith.
+    CHECK(lum(top_c) > lum(eq_c));
+    CHECK(top_c.z / lum(top_c) > eq_c.z / lum(eq_c));
+}
+
+// ── Directional sun tint (warm half-Lambert fill) ───────────────────────────
+//
+// A soft warm fill wraps from the dominant light's direction. On a SPHERE
+// (two_sided=false) a shadowed-hemisphere vertex (dot(N,L)<=0) skips the direct
+// light, so its vcol is ambient-only — sky + sun_tint. Among equator vertices
+// (same N.y => identical sky_ambient, so the vertical gradient cancels), the
+// one more toward the light gets the larger warm wrap and reads warmer (higher
+// red fraction). A quad/tri would be two_sided=true (ndl=|ndl0|) and leak ~2.6×
+// neutral direct light onto the away face, swamping the warm-fraction signal.
+
+TEST_CASE("build_sw: sun tint warms the equator vertices facing the light") {
+    using aleph::lowering::LoweredEntity;
+    aleph::lowering::LoweredScene ls;
+    LoweredEntity sphere;
+    sphere.source = NodeId{1};
+    sphere.world_geometry = SphereLocal{Vec3{0.0f, 0.0f, 0.0f}, 1.0f};
+    sphere.material.albedo = Vec3{0.7f, 0.7f, 0.7f};   // neutral
+    ls.entities.push_back(sphere);
+    LoweredEntity light;                               // off to +X
+    light.source = NodeId{100};
+    light.world_geometry = QuadLocal{Vec3{5.0f, -0.5f, -0.5f}, Vec3{0, 1, 0}, Vec3{0, 0, 1}};
+    light.material.emit = Vec3{3.0f, 3.0f, 3.0f};
+    ls.lights.push_back(light);
+
+    const aleph::lowering::SwBuild sw = aleph::lowering::build_sw_scene(ls);
+    const Vec3 Lc = Vec3{5.0f, 0.0f, 0.0f};  // light centre (for dot(N,L) classification)
+
+    // Classify by the SHADED vertex's OWN normal (verts[0]), NOT the face
+    // centroid: vcol[0] is baked at verts[0], whose ring may differ from the
+    // centroid's. Gating on n0 keeps both chosen vertices on the SAME equator
+    // ring (identical sky_ambient.y -> the vertical gradient cancels), isolating
+    // the sun-tint signal. Among shadowed (dot(n0,L)<=0 -> direct light skipped
+    // on the two_sided=false sphere) near-equator vertices (|n0.y|<0.15), pick
+    // the one most-toward the light (max dot, grazing) and most-away (min dot).
+    aleph::math::f32 toward_dot = -2.0f, away_dot = 2.0f;
+    Vec3 toward_c{}, away_c{};
+    bool found_t = false, found_a = false;
+    for (std::size_t i = 0; i < sw.scene.faces.size(); ++i) {
+        const Vec3 v0 = sw.scene.faces[i].verts[0];
+        const Vec3 n0 = aleph::math::normalize(v0);          // centre at origin
+        if (std::fabs(n0.y) > 0.15f) continue;               // equator ring only
+        const Vec3 L = aleph::math::normalize(Lc - v0);
+        const aleph::math::f32 nl = aleph::math::dot(n0, L);
+        if (nl > 0.0f) continue;                             // shadowed side only
+        if (nl > toward_dot) { toward_dot = nl; toward_c = sw.scene.faces[i].vcol[0]; found_t = true; }
+        if (nl < away_dot)   { away_dot   = nl; away_c   = sw.scene.faces[i].vcol[0]; found_a = true; }
+    }
+    REQUIRE(found_t);
+    REQUIRE(found_a);
+    REQUIRE(toward_dot <= 0.0f);   // both genuinely shadowed -> ambient-only vcol
+    // The vertex more toward the light gets the larger warm wrap -> higher red fraction.
+    CHECK(toward_c.x / lum(toward_c) > away_c.x / lum(away_c));
 }
