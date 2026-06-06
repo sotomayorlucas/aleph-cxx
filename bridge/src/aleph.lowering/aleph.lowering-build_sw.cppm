@@ -262,7 +262,8 @@ sun_tint(aleph::math::Vec3 point, aleph::math::Vec3 N,
          const std::vector<LoweredEntity>& lights, bool two_sided) noexcept {
     using aleph::math::Vec3;
     // Primary light = max emissive luminance; STRICT '>' so the lowest index wins ties.
-    aleph::math::f32 best = -1.0f;
+    // best=0 (not -1) so a zero-emit entry never qualifies — a dark "light" gives no fill.
+    aleph::math::f32 best = 0.0f;
     const LoweredEntity* primary = nullptr;
     for (const LoweredEntity& L : lights) {
         const aleph::math::f32 s = L.material.emit.x + L.material.emit.y + L.material.emit.z;

@@ -488,7 +488,7 @@ TEST_CASE("build_sw: a lone sphere is not self-darkened (AO == 1 everywhere)") {
 
 // ── Directional sky ambient (hemispheric) ───────────────────────────────────
 //
-// The flat grey ambient (kAmbient=0.45) is replaced by a hemispheric sky term
+// The flat grey ambient (previously a constant 0.45) is replaced by a hemispheric sky term
 // (cool/bright at the zenith, neutral/dimmer at the horizon) sampled by the
 // world-up-reoriented normal. With NO lights the ambient IS the sky term, so a
 // neutral sphere's vcol reads the sky gradient directly: an up-facing (top)
