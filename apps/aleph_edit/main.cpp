@@ -169,11 +169,26 @@ InitialScene build_initial_graph() {
                                Vec3{0.0f, 0.0f, 2.0f}};
     g.insert_node(std::move(light));
 
+    // Per-object identity Transforms so each mesh is independently posable
+    // (transform_of finds them; SetTransform/translate_selected move just one).
+    const NodeId xf_sphere = g.alloc_node_id();
+    g.insert_node(Transform{xf_sphere, 0, LocalTransform{Mat4::identity()}});
+    const NodeId xf_metal = g.alloc_node_id();
+    g.insert_node(Transform{xf_metal, 0, LocalTransform{Mat4::identity()}});
+    const NodeId xf_glass = g.alloc_node_id();
+    g.insert_node(Transform{xf_glass, 0, LocalTransform{Mat4::identity()}});
+    const NodeId xf_floor = g.alloc_node_id();
+    g.insert_node(Transform{xf_floor, 0, LocalTransform{Mat4::identity()}});
+
     (void)g.add_edge(EdgeKind::Contains,   s.root, cam_id);
-    (void)g.add_edge(EdgeKind::Contains,   s.root, s.sphere);
-    (void)g.add_edge(EdgeKind::Contains,   s.root, metal_sphere);
-    (void)g.add_edge(EdgeKind::Contains,   s.root, glass_sphere);
-    (void)g.add_edge(EdgeKind::Contains,   s.root, s.floor);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, xf_sphere);
+    (void)g.add_edge(EdgeKind::Contains,   xf_sphere, s.sphere);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, xf_metal);
+    (void)g.add_edge(EdgeKind::Contains,   xf_metal, metal_sphere);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, xf_glass);
+    (void)g.add_edge(EdgeKind::Contains,   xf_glass, glass_sphere);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, xf_floor);
+    (void)g.add_edge(EdgeKind::Contains,   xf_floor, s.floor);
     (void)g.add_edge(EdgeKind::Contains,   s.root, light_id);
     (void)g.add_edge(EdgeKind::References, s.sphere, sphere_mat);
     (void)g.add_edge(EdgeKind::References, metal_sphere, metal_mat);
