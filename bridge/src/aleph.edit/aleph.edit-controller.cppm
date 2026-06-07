@@ -151,6 +151,26 @@ public:
         selection_ = sel;
     }
 
+    // ── transform_of(mesh) -> controlling Transform ─────────────────────────
+    // Scan Contains edges into `mesh`; return the first source that is a
+    // Transform node (each object owns exactly one such parent in the editor's
+    // graph). `nullopt` if the node has no Transform parent. Pure const query.
+    [[nodiscard]] std::optional<aleph::types::NodeId>
+    transform_of(aleph::types::NodeId mesh) const noexcept {
+        for (auto [eid, e] : graph_.edges()) {
+            (void)eid;
+            if (e.kind == aleph::types::EdgeKind::Contains && e.dst == mesh) {
+                const aleph::types::Node* src = graph_.node(e.src);
+                if (src != nullptr
+                    && aleph::types::kind_of(*src)
+                           == aleph::types::NodeKind::Transform) {
+                    return e.src;
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
     // ── Viewport (SPEC §3.2) ──────────────────────────────────────────────────
     // The controller owns the image size used by `pick(px,py)` and the orbit
     // camera's projection, so a 2-arg pixel pick suffices (the shell sets the

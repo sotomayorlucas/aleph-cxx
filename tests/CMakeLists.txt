@@ -99,6 +99,7 @@ add_executable(aleph_tests
     edit/test_controller.cpp
     edit/test_sim_controller.cpp
     edit/test_mv_controller.cpp
+    edit/test_translate.cpp
     sim/test_section.cpp
     sim/test_wave.cpp
     sim/test_diffuse.cpp
