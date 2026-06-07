@@ -885,6 +885,10 @@ int run_live(bool wave_demo = false) {
         bool clicked_pick = false;
         bool key_add_obj = false, key_add_light = false, key_delete = false;
         bool key_kick = false;
+        int nudge_dx = 0;   // -1 left, +1 right (camera right axis)
+        int nudge_dz = 0;   // -1 toward camera, +1 away (camera forward axis)
+        int nudge_dy = 0;   // -1 down, +1 up (world Y)
+        bool nudge_fast = false;
 
         for (std::size_t i = 0; i < static_cast<std::size_t>(nev); ++i) {
             const auto& e = evbuf[i];
@@ -898,6 +902,13 @@ int run_live(bool wave_demo = false) {
                     else if (e.key == 'l') key_add_light = true;
                     else if (e.key == 'x') key_delete = true;
                     else if (e.key == 'k') key_kick = true;
+                    else if (e.key == aleph::window::key::Left)  nudge_dx = -1;
+                    else if (e.key == aleph::window::key::Right) nudge_dx = +1;
+                    else if (e.key == aleph::window::key::Up)    nudge_dz = +1;
+                    else if (e.key == aleph::window::key::Down)  nudge_dz = -1;
+                    else if (e.key == 'q') nudge_dy = -1;
+                    else if (e.key == 'e') nudge_dy = +1;
+                    if (e.shift) nudge_fast = true;
                     break;
                 case aleph::window::Event::Kind::MouseDown:
                     if (e.button == 1) { left_down = true; clicked_pick = true; }
@@ -949,6 +960,27 @@ int run_live(bool wave_demo = false) {
         // Wave: ping the selected node (or the seed if nothing is selected).
         if (wave_demo && key_kick) {
             (void)controller.kick(controller.selected().value_or(kick_seed), 1.5);
+        }
+
+        // Arrow/Q-E nudge: move the selected object along camera-relative ground
+        // axes (←/→ = camera right, ↑/↓ = camera forward on XZ) and world Y (Q/E).
+        if (controller.selected().has_value()
+            && (nudge_dx != 0 || nudge_dz != 0 || nudge_dy != 0)) {
+            const Vec3 eye = controller.camera().look_from();
+            const Vec3 tgt = controller.camera().look_at();
+            Vec3 fwd{tgt.x - eye.x, 0.0f, tgt.z - eye.z};     // project to ground
+            const f32 fl = std::sqrt(fwd.x * fwd.x + fwd.z * fwd.z);
+            if (fl > 1e-5f) { fwd.x /= fl; fwd.z /= fl; }
+            else            { fwd = Vec3{0.0f, 0.0f, -1.0f}; } // looking straight down
+            const Vec3 right{ -fwd.z, 0.0f, fwd.x };           // cross(fwd, +Y)
+            const f32 step = (nudge_fast ? 0.5f : 0.1f);
+            const Vec3 delta{
+                (right.x * static_cast<f32>(nudge_dx)
+                 + fwd.x * static_cast<f32>(nudge_dz)) * step,
+                static_cast<f32>(nudge_dy) * step,
+                (right.z * static_cast<f32>(nudge_dx)
+                 + fwd.z * static_cast<f32>(nudge_dz)) * step};
+            (void)controller.translate_selected(delta);
         }
 
         // ── Pick on a fresh left-click. ───────────────────────────────────────
