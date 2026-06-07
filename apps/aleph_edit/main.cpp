@@ -69,6 +69,10 @@ using aleph::types::NodeId;
 // reused verbatim. UI overlays stay at 1× (drawn after the downsample).
 constexpr int kSSAA = 2;
 
+// Selection silhouette ring colour (linear). Drawn into the SSAA buffer; the
+// box-downsample then anti-aliases it.
+constexpr Vec3 kSelectionColor{1.0f, 0.55f, 0.1f};
+
 // ── The initial scene graph (the truth the controller takes ownership of) ────
 //
 //   root Transform (identity)
@@ -828,8 +832,9 @@ int run_live(bool wave_demo = false) {
     std::vector<f32> ss_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
     aleph::render::common::Film ss_film{ss_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
 
-    // Selection-outline scratch: a throwaway colour film + a depth buffer that
-    // receive a raster pass of ONLY the selected entity's faces (coverage).
+    // Selection-outline scratch: a depth buffer that receives a raster pass of
+    // ONLY the selected entity's faces (coverage). `sel_film` is required by the
+    // rasterize API but its colour output is unused — only `sel_depth` is read.
     std::vector<Vec3> sel_px(static_cast<std::size_t>(kSSAA) * kSSAA * W * H);
     std::vector<f32>  sel_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
     aleph::render::common::Film sel_film{sel_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
@@ -1102,8 +1107,10 @@ int run_live(bool wave_demo = false) {
                     aleph::render::sw::rasterize(
                         sel_scene, orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
                         sel_film, sel_depth, pool);
+                    // radius = kSSAA → a ~1-display-pixel ring after the kSSAA
+                    // box-downsample.
                     aleph::render::sw::draw_selection_outline(
-                        ss_film, sel_depth, kSSAA, Vec3{1.0f, 0.55f, 0.1f});
+                        ss_film, sel_depth, /*radius=*/kSSAA, kSelectionColor);
                 }
             }
             aleph::render::sw::downsample_box(ss_film, film, kSSAA);
