@@ -49,24 +49,31 @@ public:
                       "aleph::window::key constants must match SDL keycodes");
         int n = 0;
         SDL_Event ev;
-        const SDL_Keymod mod = SDL_GetModState();
-        const bool sh = (mod & KMOD_SHIFT) != 0;
-        const bool ct = (mod & KMOD_CTRL)  != 0;
-        const bool al = (mod & KMOD_ALT)   != 0;
+        // Global modifier snapshot — used for non-keyboard events (mouse/quit),
+        // which carry no per-event modifier state. Key events instead read the
+        // modifiers recorded WITH the event (ev.key.keysym.mod) so a Shift held
+        // at keydown time is honoured even if released later in the same batch.
+        const SDL_Keymod gmod = SDL_GetModState();
+        const bool g_shift = (gmod & KMOD_SHIFT) != 0;
+        const bool g_ctrl  = (gmod & KMOD_CTRL)  != 0;
+        const bool g_alt   = (gmod & KMOD_ALT)   != 0;
         while (n < static_cast<int>(out.size()) && SDL_PollEvent(&ev)) {
             Event& e = out[static_cast<std::span<Event>::size_type>(n)];
             e = Event{};
-            e.shift = sh; e.ctrl = ct; e.alt = al;
+            e.shift = g_shift; e.ctrl = g_ctrl; e.alt = g_alt;
             switch (ev.type) {
                 case SDL_QUIT:           e.kind = Event::Kind::Quit; ++n; break;
                 case SDL_KEYDOWN:
-                    e.kind = Event::Kind::KeyDown;
-                    e.key  = static_cast<int>(ev.key.keysym.sym);
+                case SDL_KEYUP: {
+                    const auto km = static_cast<SDL_Keymod>(ev.key.keysym.mod);
+                    e.shift = (km & KMOD_SHIFT) != 0;
+                    e.ctrl  = (km & KMOD_CTRL)  != 0;
+                    e.alt   = (km & KMOD_ALT)   != 0;
+                    e.kind  = (ev.type == SDL_KEYDOWN) ? Event::Kind::KeyDown
+                                                       : Event::Kind::KeyUp;
+                    e.key   = static_cast<int>(ev.key.keysym.sym);
                     ++n; break;
-                case SDL_KEYUP:
-                    e.kind = Event::Kind::KeyUp;
-                    e.key  = static_cast<int>(ev.key.keysym.sym);
-                    ++n; break;
+                }
                 case SDL_MOUSEBUTTONDOWN:
                     e.kind = Event::Kind::MouseDown;
                     e.button = ev.button.button;
