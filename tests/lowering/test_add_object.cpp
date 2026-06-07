@@ -416,7 +416,7 @@ TEST_CASE("lowering: AddObject mints a per-object Transform parent for the mesh"
             owning_xf = e.src; mesh_has_xf_parent = true;
         }
     }
-    CHECK(mesh_has_xf_parent);
+    REQUIRE(mesh_has_xf_parent);
 
     // ...and THAT Transform must be Contained by the original parent (root).
     bool xf_under_parent = false;

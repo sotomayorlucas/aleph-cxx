@@ -14,8 +14,9 @@
 //       - SetMaterial  — retarget the `Material` a `Mesh` References, replacing
 //                        that Material node's normalized params.
 //   * STRUCTURAL ops (W5) — transactional create/delete of nodes+edges:
-//       - AddObject   — create a Mesh + Material, wired by a Mesh—References→
-//                       Material edge and a parent Transform—Contains→Mesh edge.
+//       - AddObject   — create a per-object Transform + Mesh + Material, wired
+//                       parent—Contains→Transform—Contains→Mesh and
+//                       Mesh—References→Material.
 //       - AddLight    — create a Light node, Contained by a parent Transform.
 //       - DeleteObject{NodeId} — delete a Mesh and cascade its incident edges
 //                       (its References→Material and parent Contains→Mesh).
@@ -105,18 +106,20 @@ struct SetMaterial {
 // fails `validate_all` is never committed, so a graph invariant can never be
 // transiently broken (SPEC §5: no partial effects).
 
-// Add a renderable object: create a `Mesh` carrying `geometry` (LOCAL space —
-// lowering composes its world transform from the existing hierarchy) plus a
-// `Material` carrying `params`, then wire BOTH edges that make the object whole
-// and invariant-valid: `Mesh —References→ Material` (so `MaterialReferenced`
-// holds — the very anti-dangling property `lower()` relies on) and `parent
-// —Contains→ Mesh` (so the mesh is reachable by the transform DFS and actually
-// lowers). `parent` MUST name an existing `Transform`; otherwise the op fails
-// with a structured error and the graph is unchanged. New node ids are minted
-// deterministically in the post-state; the `RewriteRecord` reports them
-// (created_nodes = [mesh, material]) along with the two created edge ids.
+// Add a renderable object: create a per-object `Transform` (identity pose) + a
+// `Mesh` carrying `geometry` (LOCAL space — lowering composes world from the
+// hierarchy) + a `Material` carrying `params`, then wire the three edges that
+// make the object whole and invariant-valid: `Mesh —References→ Material` (so
+// `MaterialReferenced` holds — the very anti-dangling property `lower()` relies
+// on), `parent —Contains→ Transform` (so the per-object transform is reachable
+// by the DFS), and `Transform —Contains→ Mesh` (so the object is independently
+// posable via SetTransform). `parent` MUST name an existing `Transform`;
+// otherwise the op fails with a structured error and the graph is unchanged.
+// New node ids are minted deterministically in the post-state; the
+// `RewriteRecord` reports them (created_nodes = [transform, mesh, material])
+// plus the three created edge ids.
 struct AddObject {
-    types::NodeId          parent{};                         // an existing Transform to Contain the mesh
+    types::NodeId          parent{};                         // an existing Transform to Contain the new per-object Transform (and transitively the mesh)
     types::GeometryPayload geometry{types::SphereLocal{}};   // LOCAL geometry payload
     MaterialParams         material{};                       // normalized material for the new Material node
 };
