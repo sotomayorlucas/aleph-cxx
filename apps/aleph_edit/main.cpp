@@ -73,9 +73,15 @@ constexpr int kSSAA = 2;
 //
 //   root Transform (identity)
 //     ├─Contains─▶ Camera (looks at the origin)
-//     ├─Contains─▶ Mesh (SphereLocal) ─References─▶ Material (Lambertian red)
-//     ├─Contains─▶ Mesh (QuadLocal floor) ─References─▶ Material (TexturedLambertian checker)
+//     ├─Contains─▶ Transform (identity) ─Contains─▶ Mesh sphere ─References─▶ Material (Lambertian red)
+//     ├─Contains─▶ Transform (identity) ─Contains─▶ Mesh metal  ─References─▶ Material (Metal)
+//     ├─Contains─▶ Transform (identity) ─Contains─▶ Mesh glass  ─References─▶ Material (Dielectric)
+//     ├─Contains─▶ Transform (identity) ─Contains─▶ Mesh floor  ─References─▶ Material (TexturedLambertian checker)
 //     └─Contains─▶ Light (Area, overhead quad)
+//
+// Each mesh gets its OWN identity Transform (root → Transform → Mesh) so it is
+// independently posable: `transform_of` finds it and SetTransform/
+// translate_selected move just that object, not the whole scene.
 //
 // Lowers cleanly (a Camera + valid References), so the controller is
 // immediately pickable and renderable. `roots` collects the node ids the shell
