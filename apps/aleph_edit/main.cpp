@@ -828,6 +828,13 @@ int run_live(bool wave_demo = false) {
     std::vector<f32> ss_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
     aleph::render::common::Film ss_film{ss_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
 
+    // Selection-outline scratch: a throwaway colour film + a depth buffer that
+    // receive a raster pass of ONLY the selected entity's faces (coverage).
+    std::vector<Vec3> sel_px(static_cast<std::size_t>(kSSAA) * kSSAA * W * H);
+    std::vector<f32>  sel_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
+    aleph::render::common::Film sel_film{sel_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
+    aleph::render::sw::SceneRT sel_scene;   // rebuilt per frame from the selection
+
     // Hybrid-mode state. We path-trace progressively (accumulate spp) only after
     // the input has been idle for kIdleMs; any event resets to raster.
     constexpr u32 kIdleMs   = 250;
@@ -1073,6 +1080,32 @@ int run_live(bool wave_demo = false) {
             aleph::render::sw::rasterize(controller.raster_scene(),
                                          orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
                                          ss_film, ss_depth, pool);
+
+            // Selection silhouette: raster only the selected entity's faces into a
+            // zero-cleared depth buffer (coverage), then ring it. X-ray by design
+            // (depth starts at 0 => shows through occluders so you never lose the
+            // selection). Drawn at SSAA so the downsample anti-aliases the ring.
+            if (controller.selected().has_value()) {
+                const auto& full = controller.raster_scene();
+                const auto& fsrc = controller.face_source();
+                const aleph::types::NodeId sel = *controller.selected();
+                sel_scene.faces.clear();
+                for (std::size_t i = 0; i < full.faces.size() && i < fsrc.size(); ++i) {
+                    if (fsrc[i] == sel) {
+                        aleph::render::sw::Face f = full.faces[i];
+                        f.lightmap_id = 0xFFFFFFFFu;   // drop lightmap (coverage only)
+                        sel_scene.faces.push_back(f);
+                    }
+                }
+                if (!sel_scene.faces.empty()) {
+                    std::fill(sel_depth.begin(), sel_depth.end(), 0.0f);
+                    aleph::render::sw::rasterize(
+                        sel_scene, orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
+                        sel_film, sel_depth, pool);
+                    aleph::render::sw::draw_selection_outline(
+                        ss_film, sel_depth, kSSAA, Vec3{1.0f, 0.55f, 0.1f});
+                }
+            }
             aleph::render::sw::downsample_box(ss_film, film, kSSAA);
 
             // UI panel: selection + a material color slider that emits SetMaterial.
