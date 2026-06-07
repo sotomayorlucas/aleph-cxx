@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>    // std::optional, std::nullopt
+#include <variant>     // std::get (aleph::types::Node variant)
 #include <span>        // std::span (poll_events)
 #include <string>
 #include <string_view>
@@ -1119,7 +1120,7 @@ int run_live(bool wave_demo = false) {
             const bool ui_mouse_pressed = left_down && !prev_left;
             aleph::editor::ui_begin(ui, &film, mouse_x, mouse_y, left_down,
                                     ui_mouse_pressed);
-            aleph::editor::ui_panel(ui, W - 250, 50, 240, 210, "EDITOR");
+            aleph::editor::ui_panel(ui, W - 250, 50, 240, 260, "EDITOR");
 
             char line[96];
             if (controller.selected().has_value()) {
@@ -1143,6 +1144,23 @@ int run_live(bool wave_demo = false) {
                                     wave_demo ? "K KICK  X DELETE  DRAG ORBIT"
                                               : "X DELETE  DRAG ORBIT",
                                     Vec3{0.85f, 0.85f, 0.9f});
+            aleph::editor::ui_label(ui, W - 242, 246,
+                                    "ARROWS MOVE  Q/E UP-DN  SHIFT FAST",
+                                    Vec3{0.7f, 0.7f, 0.7f});
+            if (controller.selected().has_value()) {
+                if (auto tid = controller.transform_of(*controller.selected())) {
+                    const aleph::types::Node* tn = controller.graph().node(*tid);
+                    const aleph::math::Mat4& tm =
+                        std::get<aleph::types::Transform>(*tn).local.m;
+                    char off[48];
+                    std::snprintf(off, sizeof(off), "OFFSET %.2f %.2f %.2f",
+                                  static_cast<double>(tm(0, 3)),
+                                  static_cast<double>(tm(1, 3)),
+                                  static_cast<double>(tm(2, 3)));
+                    aleph::editor::ui_label(ui, W - 242, 262, off,
+                                            Vec3{0.9f, 0.8f, 0.5f});
+                }
+            }
             aleph::editor::ui_end(ui);
 
             // If the slider moved a real selection's color, emit a SetMaterial Op.
