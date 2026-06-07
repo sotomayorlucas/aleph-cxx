@@ -502,12 +502,13 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                     });
 
             } else if constexpr (std::is_same_v<T, AddObject>) {
-                // Create Mesh + Material + the two edges that make the object
-                // whole and invariant-valid (References + parent Contains).
+                // Create a per-object Transform + Mesh + Material and the edges
+                // that make the object whole and invariant-valid (parent→
+                // Transform→Mesh, Mesh→Material).
                 // Validate the parent (exists + is a Transform) up front so a bad
                 // parent fails BEFORE any snapshot work; the snapshot then mints
                 // the new ids, copies survivors, rebuilds surviving edges, and
-                // adds the two new edges — all-or-nothing.
+                // adds the new edges — all-or-nothing.
                 const aleph::types::Node* parent = g.node(o.parent);
                 if (parent == nullptr) {
                     return std::unexpected(OpError::NodeNotFound);
@@ -522,6 +523,16 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                         // Survivors first (ids preserved), then fast-forward the
                         // allocator so new ids are collision-free.
                         detail::clone_nodes(g, post);
+
+                        // Per-object Transform (identity) so the object is
+                        // independently posable: parent ─Contains→ Transform
+                        // ─Contains→ Mesh. (Transform→Transform→Mesh is
+                        // invariant-legal; lowering composes nested Transforms.)
+                        const aleph::types::NodeId xf_id = post.alloc_node_id();
+                        post.insert_node(aleph::types::Node{aleph::types::Transform{
+                            xf_id, 0,
+                            aleph::types::LocalTransform{aleph::math::Mat4::identity()}}});
+                        rec.created_nodes.push_back(xf_id);
 
                         const aleph::types::NodeId mesh_id = post.alloc_node_id();
                         aleph::types::Mesh mesh{};
@@ -552,9 +563,15 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                         }
                         rec.created_edges.push_back(*ref);
 
-                        // parent —Contains→ Mesh (makes the mesh lower).
+                        // parent —Contains→ Transform —Contains→ Mesh.
+                        auto pcon = post.add_edge(aleph::types::EdgeKind::Contains,
+                                                  o.parent, xf_id);
+                        if (!pcon.has_value()) {
+                            return std::unexpected(OpError::EdgeTypeMismatch);
+                        }
+                        rec.created_edges.push_back(*pcon);
                         auto con = post.add_edge(aleph::types::EdgeKind::Contains,
-                                                 o.parent, mesh_id);
+                                                 xf_id, mesh_id);
                         if (!con.has_value()) {
                             return std::unexpected(OpError::EdgeTypeMismatch);
                         }

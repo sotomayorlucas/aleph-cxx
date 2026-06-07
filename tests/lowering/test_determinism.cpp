@@ -269,8 +269,18 @@ TEST_CASE("lowering: lower -> edit(AddObject) -> lower has a deterministic, cons
         aleph::lowering::AddObject{s.root, SphereLocal{Vec3{0, 2, 0}, 0.5f}, mp};
     auto applied = aleph::lowering::apply_op(s.g, op);
     REQUIRE(applied.has_value());
-    REQUIRE(applied->created_nodes.size() == 2);  // [mesh, material]
-    const NodeId new_mesh = applied->created_nodes.front();
+    REQUIRE(applied->created_nodes.size() == 3);  // [per-object Transform, mesh, material]
+    NodeId new_mesh{};
+    {
+        bool found = false;
+        for (const NodeId id : applied->created_nodes) {
+            const Node* n = s.g.node(id);
+            if (n != nullptr && kind_of(*n) == NodeKind::Mesh) {
+                new_mesh = id; found = true;
+            }
+        }
+        REQUIRE(found);
+    }
 
     // ── re-lower AFTER the edit, TWICE ───────────────────────────────────────
     auto after1 = aleph::lowering::lower(s.g);
