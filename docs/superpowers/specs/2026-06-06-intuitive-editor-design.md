@@ -147,6 +147,15 @@ tiene exactamente un Transform padre vía Contains**. Esto es lo que la Pieza 2 
 
 **Qué hace:** dibuja una silueta anti-aliased alrededor del objeto seleccionado.
 
+> **NOTA as-built (2026-06-07):** el mecanismo que se implementó NO es el `id_out` de
+> abajo, sino un **segundo pase de rasterizado** de solo las caras del objeto
+> seleccionado en un depth scratch limpio (cobertura = `depth>0`) + una función pura
+> `aleph::render::sw::draw_selection_outline`. Esto evita tocar el rasterizer caliente
+> compartido (`rast_scan_textured` + sus tests) — riesgo mucho menor, mismo resultado
+> (silueta anti-aliased, x-ray). Ver el plan (`2026-06-06-intuitive-editor.md`, Tareas
+> 7-8) y `apps/aleph_edit/main.cpp` (`run_live`). El diseño `id_out` de abajo queda como
+> registro histórico.
+
 **Render (`render/src/aleph.render.sw/`):**
 
 - `rasterize(...)` (público en `aleph.render.sw-rasterize.cppm`) gana un parámetro
