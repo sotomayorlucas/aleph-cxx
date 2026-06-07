@@ -189,6 +189,9 @@ public:
             return std::unexpected(aleph::lowering::OpError::KindMismatch);
         }
         const aleph::types::Node* node = graph_.node(*tid);
+        if (node == nullptr) {
+            return std::unexpected(aleph::lowering::OpError::NodeNotFound);
+        }
         const aleph::math::Mat4 cur =
             std::get<aleph::types::Transform>(*node).local.m;
         const aleph::math::Mat4 nxt =

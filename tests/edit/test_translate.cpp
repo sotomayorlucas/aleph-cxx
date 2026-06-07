@@ -129,7 +129,7 @@ TEST_CASE("transform_of returns the controlling Transform of a mesh") {
 
 TEST_CASE("translate_selected moves only the selected object's Transform") {
     TwoXf s = make_one_object();
-    const NodeId xf = s.xf, mesh = s.mesh;
+    const NodeId xf = s.xf, mesh = s.mesh, root = s.root;
     EditorController ctl{std::move(s.g)};
 
     // No selection -> no-op success (nothing moves).
@@ -153,4 +153,12 @@ TEST_CASE("translate_selected moves only the selected object's Transform") {
     CHECK(m(0, 3) == doctest::Approx(1.0f));   // translation column (m[12..14])
     CHECK(m(1, 3) == doctest::Approx(2.0f));
     CHECK(m(2, 3) == doctest::Approx(0.0f));
+
+    // The root Transform is untouched — only the per-object Transform moved.
+    const auto* rootn = ctl.graph().node(root);
+    REQUIRE(rootn != nullptr);
+    const Mat4& rm = std::get<Transform>(*rootn).local.m;
+    CHECK(rm(0, 3) == doctest::Approx(0.0f));
+    CHECK(rm(1, 3) == doctest::Approx(0.0f));
+    CHECK(rm(2, 3) == doctest::Approx(0.0f));
 }
