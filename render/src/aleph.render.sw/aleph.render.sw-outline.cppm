@@ -1,4 +1,5 @@
 module;
+#include <cassert>
 #include <span>
 #include <cstddef>
 
@@ -22,6 +23,8 @@ inline void draw_selection_outline(aleph::render::common::Film& fb,
                                    int radius,
                                    aleph::math::Vec3 color) noexcept {
     const int W = fb.width, H = fb.height;
+    assert(sel_depth.size() >= static_cast<std::size_t>(W)
+                                * static_cast<std::size_t>(H));
     auto covered = [&](int x, int y) noexcept -> bool {
         return sel_depth[static_cast<std::size_t>(y) * static_cast<std::size_t>(W)
                          + static_cast<std::size_t>(x)] > 0.0f;
