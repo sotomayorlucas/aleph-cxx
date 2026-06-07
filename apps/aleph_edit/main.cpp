@@ -867,6 +867,9 @@ int run_live(bool wave_demo = false) {
     bool          view_dirty     = false;
     u32           last_rebake_ms = 0;
     constexpr u32 kViewRebakeMs  = 80;
+    constexpr f32 kNudgeStep     = 0.1f;   // world units per arrow tap
+    constexpr f32 kNudgeStepFast = 0.5f;   // with Shift held
+    constexpr f32 kNudgeFwdEps   = 1e-5f;  // degenerate (straight-down) camera guard
 
     // The selected mesh's editable albedo (the UI color sliders bind to this and
     // emit a SetMaterial when changed). Seeded from the picked node's lowered
@@ -886,7 +889,7 @@ int run_live(bool wave_demo = false) {
         bool key_add_obj = false, key_add_light = false, key_delete = false;
         bool key_kick = false;
         int nudge_dx = 0;   // -1 left, +1 right (camera right axis)
-        int nudge_dz = 0;   // -1 toward camera, +1 away (camera forward axis)
+        int nudge_dz = 0;   // -1 toward camera eye, +1 toward look target (camera forward on ground)
         int nudge_dy = 0;   // -1 down, +1 up (world Y)
         bool nudge_fast = false;
 
@@ -908,7 +911,8 @@ int run_live(bool wave_demo = false) {
                     else if (e.key == aleph::window::key::Down)  nudge_dz = -1;
                     else if (e.key == 'q') nudge_dy = -1;
                     else if (e.key == 'e') nudge_dy = +1;
-                    if (e.shift) nudge_fast = true;
+                    if (e.shift && (nudge_dx != 0 || nudge_dz != 0 || nudge_dy != 0))
+                        nudge_fast = true;
                     break;
                 case aleph::window::Event::Kind::MouseDown:
                     if (e.button == 1) { left_down = true; clicked_pick = true; }
@@ -970,10 +974,10 @@ int run_live(bool wave_demo = false) {
             const Vec3 tgt = controller.camera().look_at();
             Vec3 fwd{tgt.x - eye.x, 0.0f, tgt.z - eye.z};     // project to ground
             const f32 fl = std::sqrt(fwd.x * fwd.x + fwd.z * fwd.z);
-            if (fl > 1e-5f) { fwd.x /= fl; fwd.z /= fl; }
-            else            { fwd = Vec3{0.0f, 0.0f, -1.0f}; } // looking straight down
+            if (fl > kNudgeFwdEps) { fwd.x /= fl; fwd.z /= fl; }
+            else                   { fwd = Vec3{0.0f, 0.0f, -1.0f}; } // looking straight down
             const Vec3 right{ -fwd.z, 0.0f, fwd.x };           // cross(fwd, +Y)
-            const f32 step = (nudge_fast ? 0.5f : 0.1f);
+            const f32 step = (nudge_fast ? kNudgeStepFast : kNudgeStep);
             const Vec3 delta{
                 (right.x * static_cast<f32>(nudge_dx)
                  + fwd.x * static_cast<f32>(nudge_dz)) * step,
@@ -981,6 +985,7 @@ int run_live(bool wave_demo = false) {
                 (right.z * static_cast<f32>(nudge_dx)
                  + fwd.z * static_cast<f32>(nudge_dz)) * step};
             (void)controller.translate_selected(delta);
+            invalidate();   // keep raster fresh after the nudge (matches SetMaterial)
         }
 
         // ── Pick on a fresh left-click. ───────────────────────────────────────
