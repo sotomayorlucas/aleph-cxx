@@ -83,6 +83,7 @@ add_executable(aleph_tests
     render/test_sw_downsample.cpp
     render/test_grouped_nee.cpp
     render/test_adaptive_spp.cpp
+    render/test_sw_outline.cpp
     lowering/test_lower_minimal.cpp
     lowering/test_transform_hierarchy.cpp
     lowering/test_build_render_scene.cpp
@@ -99,6 +100,7 @@ add_executable(aleph_tests
     edit/test_controller.cpp
     edit/test_sim_controller.cpp
     edit/test_mv_controller.cpp
+    edit/test_translate.cpp
     sim/test_section.cpp
     sim/test_wave.cpp
     sim/test_diffuse.cpp

@@ -14,8 +14,9 @@
 //       - SetMaterial  — retarget the `Material` a `Mesh` References, replacing
 //                        that Material node's normalized params.
 //   * STRUCTURAL ops (W5) — transactional create/delete of nodes+edges:
-//       - AddObject   — create a Mesh + Material, wired by a Mesh—References→
-//                       Material edge and a parent Transform—Contains→Mesh edge.
+//       - AddObject   — create a per-object Transform + Mesh + Material, wired
+//                       parent—Contains→Transform—Contains→Mesh and
+//                       Mesh—References→Material.
 //       - AddLight    — create a Light node, Contained by a parent Transform.
 //       - DeleteObject{NodeId} — delete a Mesh and cascade its incident edges
 //                       (its References→Material and parent Contains→Mesh).
@@ -105,18 +106,20 @@ struct SetMaterial {
 // fails `validate_all` is never committed, so a graph invariant can never be
 // transiently broken (SPEC §5: no partial effects).
 
-// Add a renderable object: create a `Mesh` carrying `geometry` (LOCAL space —
-// lowering composes its world transform from the existing hierarchy) plus a
-// `Material` carrying `params`, then wire BOTH edges that make the object whole
-// and invariant-valid: `Mesh —References→ Material` (so `MaterialReferenced`
-// holds — the very anti-dangling property `lower()` relies on) and `parent
-// —Contains→ Mesh` (so the mesh is reachable by the transform DFS and actually
-// lowers). `parent` MUST name an existing `Transform`; otherwise the op fails
-// with a structured error and the graph is unchanged. New node ids are minted
-// deterministically in the post-state; the `RewriteRecord` reports them
-// (created_nodes = [mesh, material]) along with the two created edge ids.
+// Add a renderable object: create a per-object `Transform` (identity pose) + a
+// `Mesh` carrying `geometry` (LOCAL space — lowering composes world from the
+// hierarchy) + a `Material` carrying `params`, then wire the three edges that
+// make the object whole and invariant-valid: `Mesh —References→ Material` (so
+// `MaterialReferenced` holds — the very anti-dangling property `lower()` relies
+// on), `parent —Contains→ Transform` (so the per-object transform is reachable
+// by the DFS), and `Transform —Contains→ Mesh` (so the object is independently
+// posable via SetTransform). `parent` MUST name an existing `Transform`;
+// otherwise the op fails with a structured error and the graph is unchanged.
+// New node ids are minted deterministically in the post-state; the
+// `RewriteRecord` reports them (created_nodes = [transform, mesh, material])
+// plus the three created edge ids.
 struct AddObject {
-    types::NodeId          parent{};                         // an existing Transform to Contain the mesh
+    types::NodeId          parent{};                         // an existing Transform to Contain the new per-object Transform (and transitively the mesh)
     types::GeometryPayload geometry{types::SphereLocal{}};   // LOCAL geometry payload
     MaterialParams         material{};                       // normalized material for the new Material node
 };
@@ -502,12 +505,13 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                     });
 
             } else if constexpr (std::is_same_v<T, AddObject>) {
-                // Create Mesh + Material + the two edges that make the object
-                // whole and invariant-valid (References + parent Contains).
+                // Create a per-object Transform + Mesh + Material and the edges
+                // that make the object whole and invariant-valid (parent→
+                // Transform→Mesh, Mesh→Material).
                 // Validate the parent (exists + is a Transform) up front so a bad
                 // parent fails BEFORE any snapshot work; the snapshot then mints
                 // the new ids, copies survivors, rebuilds surviving edges, and
-                // adds the two new edges — all-or-nothing.
+                // adds the new edges — all-or-nothing.
                 const aleph::types::Node* parent = g.node(o.parent);
                 if (parent == nullptr) {
                     return std::unexpected(OpError::NodeNotFound);
@@ -522,6 +526,16 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                         // Survivors first (ids preserved), then fast-forward the
                         // allocator so new ids are collision-free.
                         detail::clone_nodes(g, post);
+
+                        // Per-object Transform (identity) so the object is
+                        // independently posable: parent ─Contains→ Transform
+                        // ─Contains→ Mesh. (Transform→Transform→Mesh is
+                        // invariant-legal; lowering composes nested Transforms.)
+                        const aleph::types::NodeId xf_id = post.alloc_node_id();
+                        post.insert_node(aleph::types::Node{aleph::types::Transform{
+                            xf_id, 0,
+                            aleph::types::LocalTransform{aleph::math::Mat4::identity()}}});
+                        rec.created_nodes.push_back(xf_id);
 
                         const aleph::types::NodeId mesh_id = post.alloc_node_id();
                         aleph::types::Mesh mesh{};
@@ -552,9 +566,15 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                         }
                         rec.created_edges.push_back(*ref);
 
-                        // parent —Contains→ Mesh (makes the mesh lower).
+                        // parent —Contains→ Transform —Contains→ Mesh.
+                        auto pcon = post.add_edge(aleph::types::EdgeKind::Contains,
+                                                  o.parent, xf_id);
+                        if (!pcon.has_value()) {
+                            return std::unexpected(OpError::EdgeTypeMismatch);
+                        }
+                        rec.created_edges.push_back(*pcon);
                         auto con = post.add_edge(aleph::types::EdgeKind::Contains,
-                                                 o.parent, mesh_id);
+                                                 xf_id, mesh_id);
                         if (!con.has_value()) {
                             return std::unexpected(OpError::EdgeTypeMismatch);
                         }

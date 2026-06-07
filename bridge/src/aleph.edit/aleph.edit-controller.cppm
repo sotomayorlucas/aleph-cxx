@@ -151,6 +151,56 @@ public:
         selection_ = sel;
     }
 
+    // ── transform_of(node) -> controlling Transform ─────────────────────────
+    // Scan Contains edges into `node`; return the first source that is a
+    // Transform node (each object owns exactly one such parent in the editor's
+    // graph). `nullopt` if the node has no Transform parent. Passing a non-Mesh
+    // id is well-defined: returns nullopt if no Transform parent exists. Pure
+    // const query.
+    [[nodiscard]] std::optional<aleph::types::NodeId>
+    transform_of(aleph::types::NodeId node) const noexcept {
+        for (auto [eid, e] : graph_.edges()) {
+            (void)eid;
+            if (e.kind == aleph::types::EdgeKind::Contains && e.dst == node) {
+                const aleph::types::Node* src = graph_.node(e.src);
+                if (src != nullptr
+                    && aleph::types::kind_of(*src)
+                           == aleph::types::NodeKind::Transform) {
+                    return e.src;
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
+    // ── translate_selected(world_delta) ─────────────────────────────────────
+    // Move ONLY the selected object by `world_delta` (world units): resolve its
+    // controlling Transform, pre-multiply a translation onto its local pose, and
+    // emit a SetTransform through apply() (which re-lowers + rebuilds). No
+    // selection => no-op success. A selected mesh without a Transform parent =>
+    // OpError::KindMismatch (should not happen once every object owns one).
+    // Because the root Transform is identity, left-multiplying translate(d)
+    // shifts the object by exactly `d` in world space.
+    [[nodiscard]] std::expected<void, aleph::lowering::OpError>
+    translate_selected(aleph::math::Vec3 world_delta) {
+        if (!selection_.has_value()) return {};
+        const std::optional<aleph::types::NodeId> tid = transform_of(*selection_);
+        if (!tid.has_value()) {
+            return std::unexpected(aleph::lowering::OpError::KindMismatch);
+        }
+        const aleph::types::Node* node = graph_.node(*tid);
+        if (node == nullptr) {
+            return std::unexpected(aleph::lowering::OpError::NodeNotFound);
+        }
+        const aleph::math::Mat4 cur =
+            std::get<aleph::types::Transform>(*node).local.m;
+        const aleph::math::Mat4 nxt =
+            aleph::math::Mat4::translate(world_delta) * cur;
+        return apply(aleph::lowering::Op{
+            aleph::lowering::SetTransform{*tid,
+                aleph::types::LocalTransform{nxt}}});
+    }
+
     // ── Viewport (SPEC §3.2) ──────────────────────────────────────────────────
     // The controller owns the image size used by `pick(px,py)` and the orbit
     // camera's projection, so a 2-arg pixel pick suffices (the shell sets the

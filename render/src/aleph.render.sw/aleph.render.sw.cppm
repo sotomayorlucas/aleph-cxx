@@ -7,3 +7,4 @@ export import :lightmap;
 export import :primitives;
 export import :rasterize;
 export import :downsample;
+export import :outline;

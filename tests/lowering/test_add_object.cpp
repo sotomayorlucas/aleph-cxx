@@ -378,3 +378,52 @@ TEST_CASE("lowering: AddObject then AddLight compose; counts grow consistently")
     REQUIRE(seed2 != nullptr);
     CHECK(freeze_entity(*seed2) == seed_image);
 }
+
+// AddObject must mint a PER-OBJECT Transform so the new mesh is independently
+// posable: parent ─Contains→ Transform ─Contains→ Mesh (not parent→Mesh direct).
+TEST_CASE("lowering: AddObject mints a per-object Transform parent for the mesh") {
+    Seed s = make_seed();
+
+    aleph::lowering::AddObject add{};
+    add.parent   = s.root;
+    add.geometry = SphereLocal{Vec3{3, 0, 0}, 0.5f};
+    add.material = aleph::lowering::MaterialParams{};  // default Lambertian
+    aleph::lowering::Op op = add;
+    auto applied = aleph::lowering::apply_op(s.g, op);
+    REQUIRE(applied.has_value());
+
+    // The added Mesh is the created node of kind Mesh.
+    const aleph::dpo::RewriteRecord& rec = *applied;
+    NodeId new_mesh{};
+    bool found_mesh = false;
+    for (const NodeId id : rec.created_nodes) {
+        const Node* n = s.g.node(id);
+        if (n != nullptr && kind_of(*n) == NodeKind::Mesh) {
+            new_mesh = id; found_mesh = true;
+        }
+    }
+    REQUIRE(found_mesh);
+
+    // Walk UP one Contains edge from the mesh: its parent must be a Transform...
+    NodeId owning_xf{};
+    bool mesh_has_xf_parent = false;
+    for (auto [eid, e] : s.g.edges()) {
+        (void)eid;
+        if (e.kind == EdgeKind::Contains && e.dst == new_mesh) {
+            const Node* src = s.g.node(e.src);
+            REQUIRE(src != nullptr);
+            CHECK(kind_of(*src) == NodeKind::Transform);
+            owning_xf = e.src; mesh_has_xf_parent = true;
+        }
+    }
+    REQUIRE(mesh_has_xf_parent);
+
+    // ...and THAT Transform must be Contained by the original parent (root).
+    bool xf_under_parent = false;
+    for (auto [eid, e] : s.g.edges()) {
+        (void)eid;
+        if (e.kind == EdgeKind::Contains && e.src == s.root && e.dst == owning_xf)
+            xf_under_parent = true;
+    }
+    CHECK(xf_under_parent);
+}

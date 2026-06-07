@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>    // std::optional, std::nullopt
+#include <variant>     // std::get (aleph::types::Node variant)
 #include <span>        // std::span (poll_events)
 #include <string>
 #include <string_view>
@@ -69,13 +70,23 @@ using aleph::types::NodeId;
 // reused verbatim. UI overlays stay at 1× (drawn after the downsample).
 constexpr int kSSAA = 2;
 
+// Selection silhouette ring colour (linear). Drawn into the SSAA buffer; the
+// box-downsample then anti-aliases it.
+constexpr Vec3 kSelectionColor{1.0f, 0.55f, 0.1f};
+
 // ── The initial scene graph (the truth the controller takes ownership of) ────
 //
 //   root Transform (identity)
 //     ├─Contains─▶ Camera (looks at the origin)
-//     ├─Contains─▶ Mesh (SphereLocal) ─References─▶ Material (Lambertian red)
-//     ├─Contains─▶ Mesh (QuadLocal floor) ─References─▶ Material (TexturedLambertian checker)
+//     ├─Contains─▶ Transform (identity) ─Contains─▶ Mesh sphere ─References─▶ Material (Lambertian red)
+//     ├─Contains─▶ Transform (identity) ─Contains─▶ Mesh metal  ─References─▶ Material (Metal)
+//     ├─Contains─▶ Transform (identity) ─Contains─▶ Mesh glass  ─References─▶ Material (Dielectric)
+//     ├─Contains─▶ Transform (identity) ─Contains─▶ Mesh floor  ─References─▶ Material (TexturedLambertian checker)
 //     └─Contains─▶ Light (Area, overhead quad)
+//
+// Each mesh gets its OWN identity Transform (root → Transform → Mesh) so it is
+// independently posable: `transform_of` finds it and SetTransform/
+// translate_selected move just that object, not the whole scene.
 //
 // Lowers cleanly (a Camera + valid References), so the controller is
 // immediately pickable and renderable. `roots` collects the node ids the shell
@@ -169,11 +180,26 @@ InitialScene build_initial_graph() {
                                Vec3{0.0f, 0.0f, 2.0f}};
     g.insert_node(std::move(light));
 
+    // Per-object identity Transforms so each mesh is independently posable
+    // (transform_of finds them; SetTransform/translate_selected move just one).
+    const NodeId xf_sphere = g.alloc_node_id();
+    g.insert_node(Transform{xf_sphere, 0, LocalTransform{Mat4::identity()}});
+    const NodeId xf_metal = g.alloc_node_id();
+    g.insert_node(Transform{xf_metal, 0, LocalTransform{Mat4::identity()}});
+    const NodeId xf_glass = g.alloc_node_id();
+    g.insert_node(Transform{xf_glass, 0, LocalTransform{Mat4::identity()}});
+    const NodeId xf_floor = g.alloc_node_id();
+    g.insert_node(Transform{xf_floor, 0, LocalTransform{Mat4::identity()}});
+
     (void)g.add_edge(EdgeKind::Contains,   s.root, cam_id);
-    (void)g.add_edge(EdgeKind::Contains,   s.root, s.sphere);
-    (void)g.add_edge(EdgeKind::Contains,   s.root, metal_sphere);
-    (void)g.add_edge(EdgeKind::Contains,   s.root, glass_sphere);
-    (void)g.add_edge(EdgeKind::Contains,   s.root, s.floor);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, xf_sphere);
+    (void)g.add_edge(EdgeKind::Contains,   xf_sphere, s.sphere);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, xf_metal);
+    (void)g.add_edge(EdgeKind::Contains,   xf_metal, metal_sphere);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, xf_glass);
+    (void)g.add_edge(EdgeKind::Contains,   xf_glass, glass_sphere);
+    (void)g.add_edge(EdgeKind::Contains,   s.root, xf_floor);
+    (void)g.add_edge(EdgeKind::Contains,   xf_floor, s.floor);
     (void)g.add_edge(EdgeKind::Contains,   s.root, light_id);
     (void)g.add_edge(EdgeKind::References, s.sphere, sphere_mat);
     (void)g.add_edge(EdgeKind::References, metal_sphere, metal_mat);
@@ -807,6 +833,14 @@ int run_live(bool wave_demo = false) {
     std::vector<f32> ss_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
     aleph::render::common::Film ss_film{ss_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
 
+    // Selection-outline scratch: a depth buffer that receives a raster pass of
+    // ONLY the selected entity's faces (coverage). `sel_film` is required by the
+    // rasterize API but its colour output is unused — only `sel_depth` is read.
+    std::vector<Vec3> sel_px(static_cast<std::size_t>(kSSAA) * kSSAA * W * H);
+    std::vector<f32>  sel_depth(static_cast<std::size_t>(kSSAA) * kSSAA * W * H, 0.0f);
+    aleph::render::common::Film sel_film{sel_px.data(), kSSAA * W, kSSAA * H, kSSAA * W};
+    aleph::render::sw::SceneRT sel_scene;   // rebuilt per frame from the selection
+
     // Hybrid-mode state. We path-trace progressively (accumulate spp) only after
     // the input has been idle for kIdleMs; any event resets to raster.
     constexpr u32 kIdleMs   = 250;
@@ -846,6 +880,9 @@ int run_live(bool wave_demo = false) {
     bool          view_dirty     = false;
     u32           last_rebake_ms = 0;
     constexpr u32 kViewRebakeMs  = 80;
+    constexpr f32 kNudgeStep     = 0.1f;   // world units per arrow tap
+    constexpr f32 kNudgeStepFast = 0.5f;   // with Shift held
+    constexpr f32 kNudgeFwdEps   = 1e-5f;  // degenerate (straight-down) camera guard
 
     // The selected mesh's editable albedo (the UI color sliders bind to this and
     // emit a SetMaterial when changed). Seeded from the picked node's lowered
@@ -864,6 +901,10 @@ int run_live(bool wave_demo = false) {
         bool clicked_pick = false;
         bool key_add_obj = false, key_add_light = false, key_delete = false;
         bool key_kick = false;
+        int nudge_dx = 0;   // -1 left, +1 right (camera right axis)
+        int nudge_dz = 0;   // -1 toward camera eye, +1 toward look target (camera forward on ground)
+        int nudge_dy = 0;   // -1 down, +1 up (world Y)
+        bool nudge_fast = false;
 
         for (std::size_t i = 0; i < static_cast<std::size_t>(nev); ++i) {
             const auto& e = evbuf[i];
@@ -877,6 +918,14 @@ int run_live(bool wave_demo = false) {
                     else if (e.key == 'l') key_add_light = true;
                     else if (e.key == 'x') key_delete = true;
                     else if (e.key == 'k') key_kick = true;
+                    else if (e.key == aleph::window::key::Left)  nudge_dx = -1;
+                    else if (e.key == aleph::window::key::Right) nudge_dx = +1;
+                    else if (e.key == aleph::window::key::Up)    nudge_dz = +1;
+                    else if (e.key == aleph::window::key::Down)  nudge_dz = -1;
+                    else if (e.key == 'q') nudge_dy = -1;
+                    else if (e.key == 'e') nudge_dy = +1;
+                    if (e.shift && (nudge_dx != 0 || nudge_dz != 0 || nudge_dy != 0))
+                        nudge_fast = true;
                     break;
                 case aleph::window::Event::Kind::MouseDown:
                     if (e.button == 1) { left_down = true; clicked_pick = true; }
@@ -928,6 +977,28 @@ int run_live(bool wave_demo = false) {
         // Wave: ping the selected node (or the seed if nothing is selected).
         if (wave_demo && key_kick) {
             (void)controller.kick(controller.selected().value_or(kick_seed), 1.5);
+        }
+
+        // Arrow/Q-E nudge: move the selected object along camera-relative ground
+        // axes (←/→ = camera right, ↑/↓ = camera forward on XZ) and world Y (Q/E).
+        if (controller.selected().has_value()
+            && (nudge_dx != 0 || nudge_dz != 0 || nudge_dy != 0)) {
+            const Vec3 eye = controller.camera().look_from();
+            const Vec3 tgt = controller.camera().look_at();
+            Vec3 fwd{tgt.x - eye.x, 0.0f, tgt.z - eye.z};     // project to ground
+            const f32 fl = std::sqrt(fwd.x * fwd.x + fwd.z * fwd.z);
+            if (fl > kNudgeFwdEps) { fwd.x /= fl; fwd.z /= fl; }
+            else                   { fwd = Vec3{0.0f, 0.0f, -1.0f}; } // looking straight down
+            const Vec3 right{ -fwd.z, 0.0f, fwd.x };           // cross(fwd, +Y)
+            const f32 step = (nudge_fast ? kNudgeStepFast : kNudgeStep);
+            const Vec3 delta{
+                (right.x * static_cast<f32>(nudge_dx)
+                 + fwd.x * static_cast<f32>(nudge_dz)) * step,
+                static_cast<f32>(nudge_dy) * step,
+                (right.z * static_cast<f32>(nudge_dx)
+                 + fwd.z * static_cast<f32>(nudge_dz)) * step};
+            (void)controller.translate_selected(delta);
+            invalidate();   // keep raster fresh after the nudge (matches SetMaterial)
         }
 
         // ── Pick on a fresh left-click. ───────────────────────────────────────
@@ -1015,13 +1086,41 @@ int run_live(bool wave_demo = false) {
             aleph::render::sw::rasterize(controller.raster_scene(),
                                          orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
                                          ss_film, ss_depth, pool);
+
+            // Selection silhouette: raster only the selected entity's faces into a
+            // zero-cleared depth buffer (coverage), then ring it. X-ray by design
+            // (depth starts at 0 => shows through occluders so you never lose the
+            // selection). Drawn at SSAA so the downsample anti-aliases the ring.
+            if (controller.selected().has_value()) {
+                const auto& full = controller.raster_scene();
+                const auto& fsrc = controller.face_source();
+                const aleph::types::NodeId sel = *controller.selected();
+                sel_scene.faces.clear();
+                for (std::size_t i = 0; i < full.faces.size() && i < fsrc.size(); ++i) {
+                    if (fsrc[i] == sel) {
+                        aleph::render::sw::Face f = full.faces[i];
+                        f.lightmap_id = 0xFFFFFFFFu;   // drop lightmap (coverage only)
+                        sel_scene.faces.push_back(f);
+                    }
+                }
+                if (!sel_scene.faces.empty()) {
+                    std::fill(sel_depth.begin(), sel_depth.end(), 0.0f);
+                    aleph::render::sw::rasterize(
+                        sel_scene, orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
+                        sel_film, sel_depth, pool);
+                    // radius = kSSAA → a ~1-display-pixel ring after the kSSAA
+                    // box-downsample.
+                    aleph::render::sw::draw_selection_outline(
+                        ss_film, sel_depth, /*radius=*/kSSAA, kSelectionColor);
+                }
+            }
             aleph::render::sw::downsample_box(ss_film, film, kSSAA);
 
             // UI panel: selection + a material color slider that emits SetMaterial.
             const bool ui_mouse_pressed = left_down && !prev_left;
             aleph::editor::ui_begin(ui, &film, mouse_x, mouse_y, left_down,
                                     ui_mouse_pressed);
-            aleph::editor::ui_panel(ui, W - 250, 50, 240, 210, "EDITOR");
+            aleph::editor::ui_panel(ui, W - 250, 50, 240, 260, "EDITOR");
 
             char line[96];
             if (controller.selected().has_value()) {
@@ -1045,6 +1144,28 @@ int run_live(bool wave_demo = false) {
                                     wave_demo ? "K KICK  X DELETE  DRAG ORBIT"
                                               : "X DELETE  DRAG ORBIT",
                                     Vec3{0.85f, 0.85f, 0.9f});
+            aleph::editor::ui_label(ui, W - 242, 246,
+                                    "ARROWS MOVE  Q/E UP-DN  SHIFT FAST",
+                                    Vec3{0.7f, 0.7f, 0.7f});
+            if (controller.selected().has_value()) {
+                if (auto tid = controller.transform_of(*controller.selected())) {
+                    const aleph::types::Node* tn = controller.graph().node(*tid);
+                    // transform_of guarantees a Transform-kind node, but node()
+                    // is a nullable lookup — guard before the deref (as
+                    // translate_selected does).
+                    if (tn != nullptr) {
+                        const aleph::math::Mat4& tm =
+                            std::get<aleph::types::Transform>(*tn).local.m;
+                        char off[48];
+                        std::snprintf(off, sizeof(off), "OFFSET %.2f %.2f %.2f",
+                                      static_cast<double>(tm(0, 3)),
+                                      static_cast<double>(tm(1, 3)),
+                                      static_cast<double>(tm(2, 3)));
+                        aleph::editor::ui_label(ui, W - 242, 262, off,
+                                                Vec3{0.9f, 0.8f, 0.5f});
+                    }
+                }
+            }
             aleph::editor::ui_end(ui);
 
             // If the slider moved a real selection's color, emit a SetMaterial Op.
