@@ -151,15 +151,17 @@ public:
         selection_ = sel;
     }
 
-    // ── transform_of(mesh) -> controlling Transform ─────────────────────────
-    // Scan Contains edges into `mesh`; return the first source that is a
+    // ── transform_of(node) -> controlling Transform ─────────────────────────
+    // Scan Contains edges into `node`; return the first source that is a
     // Transform node (each object owns exactly one such parent in the editor's
-    // graph). `nullopt` if the node has no Transform parent. Pure const query.
+    // graph). `nullopt` if the node has no Transform parent. Passing a non-Mesh
+    // id is well-defined: returns nullopt if no Transform parent exists. Pure
+    // const query.
     [[nodiscard]] std::optional<aleph::types::NodeId>
-    transform_of(aleph::types::NodeId mesh) const noexcept {
+    transform_of(aleph::types::NodeId node) const noexcept {
         for (auto [eid, e] : graph_.edges()) {
             (void)eid;
-            if (e.kind == aleph::types::EdgeKind::Contains && e.dst == mesh) {
+            if (e.kind == aleph::types::EdgeKind::Contains && e.dst == node) {
                 const aleph::types::Node* src = graph_.node(e.src);
                 if (src != nullptr
                     && aleph::types::kind_of(*src)
