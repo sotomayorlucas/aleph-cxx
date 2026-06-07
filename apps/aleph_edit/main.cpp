@@ -1150,15 +1150,20 @@ int run_live(bool wave_demo = false) {
             if (controller.selected().has_value()) {
                 if (auto tid = controller.transform_of(*controller.selected())) {
                     const aleph::types::Node* tn = controller.graph().node(*tid);
-                    const aleph::math::Mat4& tm =
-                        std::get<aleph::types::Transform>(*tn).local.m;
-                    char off[48];
-                    std::snprintf(off, sizeof(off), "OFFSET %.2f %.2f %.2f",
-                                  static_cast<double>(tm(0, 3)),
-                                  static_cast<double>(tm(1, 3)),
-                                  static_cast<double>(tm(2, 3)));
-                    aleph::editor::ui_label(ui, W - 242, 262, off,
-                                            Vec3{0.9f, 0.8f, 0.5f});
+                    // transform_of guarantees a Transform-kind node, but node()
+                    // is a nullable lookup — guard before the deref (as
+                    // translate_selected does).
+                    if (tn != nullptr) {
+                        const aleph::math::Mat4& tm =
+                            std::get<aleph::types::Transform>(*tn).local.m;
+                        char off[48];
+                        std::snprintf(off, sizeof(off), "OFFSET %.2f %.2f %.2f",
+                                      static_cast<double>(tm(0, 3)),
+                                      static_cast<double>(tm(1, 3)),
+                                      static_cast<double>(tm(2, 3)));
+                        aleph::editor::ui_label(ui, W - 242, 262, off,
+                                                Vec3{0.9f, 0.8f, 0.5f});
+                    }
                 }
             }
             aleph::editor::ui_end(ui);
