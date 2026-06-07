@@ -3,6 +3,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <variant>
 
 import aleph.math;       // Vec3, Mat4
 import aleph.types;      // NodeId, Transform, Mesh, Material, geometry payloads
@@ -124,4 +125,32 @@ TEST_CASE("transform_of returns the controlling Transform of a mesh") {
 
     // A node with no Transform parent (the root itself) yields nullopt.
     CHECK_FALSE(ctl.transform_of(root).has_value());
+}
+
+TEST_CASE("translate_selected moves only the selected object's Transform") {
+    TwoXf s = make_one_object();
+    const NodeId xf = s.xf, mesh = s.mesh;
+    EditorController ctl{std::move(s.g)};
+
+    // No selection -> no-op success (nothing moves).
+    {
+        auto r = ctl.translate_selected(Vec3{1.0f, 0.0f, 0.0f});
+        CHECK(r.has_value());
+        const auto* node = ctl.graph().node(xf);
+        REQUIRE(node != nullptr);
+        const Mat4& m = std::get<Transform>(*node).local.m;
+        CHECK(m(0, 3) == doctest::Approx(0.0f));
+    }
+
+    // Select the mesh and nudge +X by 1.0, then +Y by 2.0 (accumulates).
+    ctl.select(mesh);
+    REQUIRE(ctl.translate_selected(Vec3{1.0f, 0.0f, 0.0f}).has_value());
+    REQUIRE(ctl.translate_selected(Vec3{0.0f, 2.0f, 0.0f}).has_value());
+
+    const auto* node = ctl.graph().node(xf);
+    REQUIRE(node != nullptr);
+    const Mat4& m = std::get<Transform>(*node).local.m;
+    CHECK(m(0, 3) == doctest::Approx(1.0f));   // translation column (m[12..14])
+    CHECK(m(1, 3) == doctest::Approx(2.0f));
+    CHECK(m(2, 3) == doctest::Approx(0.0f));
 }
