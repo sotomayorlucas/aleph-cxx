@@ -44,11 +44,19 @@ public:
     Window& operator=(const Window&) = delete;
 
     int poll_events(std::span<Event> out) noexcept {
+        static_assert(key::Right == SDLK_RIGHT && key::Left == SDLK_LEFT
+                   && key::Down  == SDLK_DOWN  && key::Up   == SDLK_UP,
+                      "aleph::window::key constants must match SDL keycodes");
         int n = 0;
         SDL_Event ev;
+        const SDL_Keymod mod = SDL_GetModState();
+        const bool sh = (mod & KMOD_SHIFT) != 0;
+        const bool ct = (mod & KMOD_CTRL)  != 0;
+        const bool al = (mod & KMOD_ALT)   != 0;
         while (n < static_cast<int>(out.size()) && SDL_PollEvent(&ev)) {
             Event& e = out[static_cast<std::span<Event>::size_type>(n)];
             e = Event{};
+            e.shift = sh; e.ctrl = ct; e.alt = al;
             switch (ev.type) {
                 case SDL_QUIT:           e.kind = Event::Kind::Quit; ++n; break;
                 case SDL_KEYDOWN:
