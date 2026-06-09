@@ -44,3 +44,22 @@ TEST_CASE("RollingMean: wraparound keeps only the newest capacity samples") {
     }
     CHECK(rm.mean() == doctest::Approx(7.0f));
 }
+
+TEST_CASE("frame_dirty: all-false -> clean; any single signal -> dirty") {
+    using aleph::editor::FrameSignals;
+    using aleph::editor::frame_dirty;
+
+    CHECK_FALSE(frame_dirty(FrameSignals{}));
+
+    bool FrameSignals::* const flags[] = {
+        &FrameSignals::had_input,         &FrameSignals::op_applied,
+        &FrameSignals::sim_stepping,      &FrameSignals::crossfade_active,
+        &FrameSignals::pt_accumulating,   &FrameSignals::view_rebake_pending,
+        &FrameSignals::selection_changed, &FrameSignals::first_frame,
+    };
+    for (const auto flag : flags) {
+        FrameSignals s{};
+        s.*flag = true;
+        CHECK(frame_dirty(s));
+    }
+}
