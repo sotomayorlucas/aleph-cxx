@@ -19,7 +19,8 @@
 //                       Mesh—References→Material.
 //       - AddLight    — create a Light node, Contained by a parent Transform.
 //       - DeleteObject{NodeId} — delete a Mesh and cascade its incident edges
-//                       (its References→Material and parent Contains→Mesh).
+//                       plus its exclusive Material(s) and its now-childless
+//                       per-object Transform (never a root — one level only).
 //       - ApplyRule{const dpo::Rule*, dpo::Match} — replay a DPO rewrite.
 //
 // ── ALL-OR-NOTHING (SPEC §5) ────────────────────────────────────────────────
@@ -136,15 +137,24 @@ struct AddLight {
     types::GeometryPayload geometry{types::QuadLocal{}};     // LOCAL geometry payload
 };
 
-// Delete an object: remove the named `Mesh` and CASCADE every incident edge
-// (its `References→Material` and the parent `Contains→Mesh`), exactly as the
-// `remove_object` DPO rule does. The referenced Material is left in place
-// (possibly orphaned, which is invariant-valid: `MaterialReferenced` constrains
-// MESHES, not materials) — deleting it is a separate gesture. `target` MUST name
-// an existing `Mesh`. The `RewriteRecord` reports deleted_nodes = [mesh] and the
-// pre-state ids of the cascaded edges. After re-lowering there are NO dangling
-// handles (SPEC §8.7): the mesh's entity simply vanishes from `entities` /
-// `handle_map`; survivors keep their ids.
+// Delete an object: remove the named `Mesh` and CASCADE the orphaned remains of
+// its AddObject footprint, in ONE transaction. The DELETE-SET, computed over the
+// pre-state graph, is:
+//   * the target Mesh itself;
+//   * every Material ONLY this mesh References (no other node has a References
+//     edge to it) — a Material SHARED with another mesh survives untouched;
+//   * the mesh's controlling per-object Transform, iff the mesh was its ONLY
+//     Contains child AND that Transform itself has an incoming Contains edge
+//     (the NON-ROOT guard: a root or shared/structural Transform is never
+//     deleted).
+// ONE level only — no recursion, no upward cascade beyond that Transform (e.g.
+// a Texture referenced by a cascaded Material is left in place). Every edge
+// incident to ANY delete-set node is cascaded, exactly as the `remove_object`
+// DPO rule does for the mesh's own edges. `target` MUST name an existing
+// `Mesh`. The `RewriteRecord` reports deleted_nodes = the whole delete-set and
+// the pre-state ids of every cascaded edge. After re-lowering there are NO
+// dangling handles (SPEC §8.7): the mesh's entity simply vanishes from
+// `entities` / `handle_map`; survivors keep their ids.
 struct DeleteObject {
     types::NodeId target{};   // the MESH to remove (with its incident edges)
 };
@@ -626,9 +636,13 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                     });
 
             } else if constexpr (std::is_same_v<T, DeleteObject>) {
-                // Remove a Mesh and cascade its incident edges (References→
-                // Material and parent Contains→Mesh), like the `remove_object`
-                // DPO rule. Validate target (exists + is a Mesh) up front.
+                // Remove a Mesh and CASCADE the orphaned remains of its
+                // AddObject footprint: every incident edge, every Material ONLY
+                // this mesh References (a shared Material survives), and its
+                // controlling per-object Transform iff the mesh was its only
+                // Contains child AND the Transform has an incoming Contains
+                // edge (the NON-ROOT guard) — one level only, no recursion.
+                // Validate target (exists + is a Mesh) up front.
                 const aleph::types::Node* mesh = g.node(o.target);
                 if (mesh == nullptr) {
                     return std::unexpected(OpError::NodeNotFound);
@@ -636,26 +650,100 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                 if (aleph::types::kind_of(*mesh) != aleph::types::NodeKind::Mesh) {
                     return std::unexpected(OpError::KindMismatch);
                 }
+
+                // ── the DELETE-SET, computed over the PRE-state graph ────────
+                // [mesh] ∪ [exclusive Materials] ∪ [childless controlling
+                // Transform]. It stays tiny (a handful of ids), so a vector +
+                // linear membership test is the right size of machinery.
+                std::vector<aleph::types::NodeId> doomed;
+                doomed.push_back(o.target);
+                const auto is_doomed = [&doomed](aleph::types::NodeId id) noexcept {
+                    for (const aleph::types::NodeId d : doomed) {
+                        if (d == id) return true;
+                    }
+                    return false;
+                };
+
+                // Exclusive Material(s): a Material the target References that
+                // NO OTHER node References. A shared Material survives.
+                for (auto [eid, e] : g.edges()) {
+                    (void)eid;
+                    if (e.kind != aleph::types::EdgeKind::References
+                        || e.src != o.target) {
+                        continue;
+                    }
+                    const aleph::types::Node* m = g.node(e.dst);
+                    if (m == nullptr
+                        || aleph::types::kind_of(*m)
+                               != aleph::types::NodeKind::Material) {
+                        continue;
+                    }
+                    bool shared = false;
+                    for (auto [eid2, e2] : g.edges()) {
+                        (void)eid2;
+                        if (e2.kind == aleph::types::EdgeKind::References
+                            && e2.dst == e.dst && e2.src != o.target) {
+                            shared = true;
+                            break;
+                        }
+                    }
+                    if (!shared && !is_doomed(e.dst)) doomed.push_back(e.dst);
+                }
+
+                // Controlling Transform: a Contains-parent of the mesh that is
+                // a Transform, has NO other Contains child (the mesh was its
+                // only one), and has an incoming Contains edge itself — the
+                // NON-ROOT guard (a root or shared/structural Transform is
+                // never cascaded).
+                for (auto [eid, e] : g.edges()) {
+                    (void)eid;
+                    if (e.kind != aleph::types::EdgeKind::Contains
+                        || e.dst != o.target) {
+                        continue;
+                    }
+                    const aleph::types::Node* p = g.node(e.src);
+                    if (p == nullptr
+                        || aleph::types::kind_of(*p)
+                               != aleph::types::NodeKind::Transform) {
+                        continue;
+                    }
+                    bool other_child = false;
+                    for (auto [eid2, e2] : g.edges()) {
+                        (void)eid2;
+                        if (e2.kind == aleph::types::EdgeKind::Contains
+                            && e2.src == e.src && e2.dst != o.target) {
+                            other_child = true;
+                            break;
+                        }
+                    }
+                    if (other_child) continue;
+                    if (!detail::has_incoming_contains(g, e.src)) continue;
+                    if (!is_doomed(e.src)) doomed.push_back(e.src);
+                }
+
                 return detail::commit_structural(
                     g,
                     [&](aleph::graph::Graph& post, aleph::dpo::RewriteRecord& rec)
                         -> std::expected<void, OpError> {
-                        // Copy every node EXCEPT the target (preserving survivor
-                        // ids), then fast-forward (no new ids minted, but keeps
-                        // the allocator consistent with the dpo::apply recipe).
+                        // Copy every node NOT in the delete-set (preserving
+                        // survivor ids), then fast-forward (no new ids minted,
+                        // but keeps the allocator consistent with the
+                        // dpo::apply recipe).
                         for (auto [nid, node] : g.nodes()) {
-                            if (nid == o.target) continue;
+                            if (is_doomed(nid)) continue;
                             aleph::types::Node copy = node;
                             post.insert_node(copy);
                         }
                         detail::fast_forward_node_alloc(post);
-                        rec.deleted_nodes.push_back(o.target);
+                        for (const aleph::types::NodeId d : doomed) {
+                            rec.deleted_nodes.push_back(d);
+                        }
 
                         // Reconstruct edges, skipping (cascading away) every edge
-                        // incident to the deleted mesh; report their PRE-state ids
-                        // (matching dpo::apply's deletion-id convention).
+                        // incident to ANY delete-set node; report their PRE-state
+                        // ids (matching dpo::apply's deletion-id convention).
                         for (auto [eid, e] : g.edges()) {
-                            if (e.src == o.target || e.dst == o.target) {
+                            if (is_doomed(e.src) || is_doomed(e.dst)) {
                                 rec.deleted_edges.push_back(eid);
                                 continue;
                             }
