@@ -12,10 +12,13 @@ import :sampling;
 
 export namespace aleph::render::rt {
 
-// Procedural checker levels (single source of truth: the LO byte 0x80 under the
-// renderer's plain byte/255 decode). HI = argb_to_linear(0xFF), LO = 0x80/255.
+// Procedural checker levels (single source of truth: the LO byte 0x80 under
+// the raster's sRGB texel decode). HI = srgb_decode_byte(0xFF) = 1.0 exactly;
+// LO = srgb_decode_byte(0x80) = ((128/255+0.055)/1.055)^2.4 computed in double
+// and rounded once to f32 — bit-identical to the raster's decode LUT entry
+// (pinned by a doctest), so both backends shade the same linear checker.
 inline constexpr aleph::math::f32 kCheckerHi = 1.0f;
-inline constexpr aleph::math::f32 kCheckerLo = 128.0f / 255.0f;
+inline constexpr aleph::math::f32 kCheckerLo = 0.215860501f;
 
 struct ScatterResult {
     aleph::math::Ray  scattered;

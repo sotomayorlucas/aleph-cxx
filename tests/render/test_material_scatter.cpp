@@ -59,6 +59,16 @@ TEST_CASE("sample_textured_albedo: analytic checker (HI/LO cells, adjacency)") {
     CHECK(sample_textured_albedo(s, m.idx, 0.5f, 0.5f) == lo);
 }
 
+// Raster<->PT parity anchor: the PT's analytic checker levels must equal the
+// raster's sRGB decode of the checker texel bytes (0x80 / 0xFF) BIT-EXACTLY,
+// or the two backends drift on every textured floor.
+TEST_CASE("checker constants: kCheckerHi/Lo == sRGB decode of bytes 0xFF/0x80") {
+    using aleph::render::common::srgb_decode_byte;
+    CHECK(kCheckerHi == srgb_decode_byte(0xFF));   // == 1.0f exactly
+    CHECK(kCheckerLo == srgb_decode_byte(0x80));   // == 0.215860501f exactly
+    CHECK(kCheckerLo == 0.215860501f);             // the f32 of ((128/255+0.055)/1.055)^2.4
+}
+
 TEST_CASE("scatter TexturedLambertian: attenuation == sample_textured_albedo") {
     Scene s;
     const Vec3 albedo{0.2f, 0.4f, 0.6f};

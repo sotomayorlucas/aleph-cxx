@@ -8,6 +8,7 @@ module;
 export module aleph.render.sw:lightmap;
 
 import aleph.math;
+import aleph.render.common;
 import :scene_rt;
 
 export namespace aleph::render::sw {
@@ -119,7 +120,9 @@ inline void bake_lightmap_face(Lightmap& lm,
                 if (!blocked) lit += intensity * cos_theta / dist_sq;
             }
             lit = std::clamp(lit, 0.0f, 1.0f);
-            const aleph::math::u8 b = static_cast<aleph::math::u8>(lit * 255.0f);
+            // Encode with the sRGB OETF — the exact inverse of the sampler's
+            // decode (rast_scan's argb_to_linear), so bake bytes round-trip.
+            const aleph::math::u8 b = aleph::render::common::byte_from_linear(lit);
             lm.texels[j * lm.w + i] = 0xFF000000u
                                       | (static_cast<aleph::math::u32>(b) << 16)
                                       | (static_cast<aleph::math::u32>(b) <<  8)
