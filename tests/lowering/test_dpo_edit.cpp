@@ -195,11 +195,15 @@ TEST_CASE("lowering: apply_op(DeleteObject) re-lowers to a valid Scene, no dangl
     REQUIRE(applied.has_value());
 
     // (c) the post-edit GRAPH satisfies every invariant (the single truth holds).
-    //     The mesh is gone; the Material is now unreferenced but still a valid
-    //     node, and MaterialReferenced only constrains Meshes — so validate_all
-    //     holds. (max_in_degree = SIZE_MAX: structural edits aren't degree-gated.)
+    //     The mesh is gone, and the CASCADE also reclaimed its exclusively-
+    //     referenced Material (no other mesh References it — leaving it would
+    //     leak a node per delete). The root Transform is NEVER cascaded: it
+    //     still Contains the camera + light, and it has no Contains parent (the
+    //     non-root guard). (max_in_degree = SIZE_MAX: not degree-gated.)
     CHECK(aleph::graph::validate_all(s.g, static_cast<std::size_t>(-1)).has_value());
     CHECK(s.g.node(s.mesh) == nullptr);  // the mesh is actually gone
+    CHECK(s.g.node(s.mat) == nullptr);   // exclusive Material cascaded away
+    CHECK(s.g.node(s.root) != nullptr);  // root Transform survives (non-root guard)
 
     // (a) re-lowering succeeds -> a VALID Scene (not a LowerError).
     auto after = aleph::lowering::lower(s.g);
@@ -353,4 +357,236 @@ TEST_CASE("lowering: a DeleteObject on a missing node is a no-op (graph + loweri
     const std::vector<std::byte> img_after = freeze(*after);
     REQUIRE(img_after.size() == img_before.size());
     CHECK(img_after == img_before);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (5) DeleteObject cascade: a SHARED Material survives; the per-object Transform
+//     (now childless) does not.
+// ─────────────────────────────────────────────────────────────────────────────
+// Two meshes, EACH under its own per-object Transform (the AddObject topology),
+// both Referencing ONE shared Material. Deleting mesh1 must reclaim mesh1's
+// dedicated Transform but spare the Material (mesh2 still References it) and
+// everything of mesh2's.
+TEST_CASE("lowering: DeleteObject cascade spares a shared Material, reclaims the per-object Transform") {
+    Graph g;
+
+    const NodeId root = g.alloc_node_id();
+    g.insert_node(Transform{root, 0, LocalTransform{aleph::math::Mat4::identity()}});
+
+    const NodeId cam = g.alloc_node_id();
+    Camera c{cam, std::string("sensor0")};
+    c.look_from = Vec3{0, 0, 5};
+    c.look_at   = Vec3{0, 0, 0};
+    c.up        = Vec3{0, 1, 0};
+    c.vfov_deg  = 40.0f;
+    g.insert_node(std::move(c));
+
+    const NodeId xf1 = g.alloc_node_id();
+    g.insert_node(Transform{xf1, 1, LocalTransform{aleph::math::Mat4::identity()}});
+    const NodeId mesh1 = g.alloc_node_id();
+    Mesh m1{mesh1, std::string("s1"), 0};
+    m1.geometry = SphereLocal{Vec3{-2, 0, 0}, 1.0f};
+    g.insert_node(std::move(m1));
+
+    const NodeId xf2 = g.alloc_node_id();
+    g.insert_node(Transform{xf2, 2, LocalTransform{aleph::math::Mat4::identity()}});
+    const NodeId mesh2 = g.alloc_node_id();
+    Mesh m2{mesh2, std::string("s2"), 0};
+    m2.geometry = SphereLocal{Vec3{2, 0, 0}, 1.0f};
+    g.insert_node(std::move(m2));
+
+    // ONE Material, shared by both meshes.
+    const NodeId mat = g.alloc_node_id();
+    Material shared{mat, MaterialKind::Lambertian};
+    shared.albedo = Vec3{0.5f, 0.5f, 0.5f};
+    shared.emit   = Vec3{0, 0, 0};
+    g.insert_node(std::move(shared));
+
+    (void)g.add_edge(EdgeKind::Contains,   root,  cam);
+    (void)g.add_edge(EdgeKind::Contains,   root,  xf1);
+    (void)g.add_edge(EdgeKind::Contains,   xf1,   mesh1);
+    (void)g.add_edge(EdgeKind::Contains,   root,  xf2);
+    (void)g.add_edge(EdgeKind::Contains,   xf2,   mesh2);
+    (void)g.add_edge(EdgeKind::References, mesh1, mat);
+    (void)g.add_edge(EdgeKind::References, mesh2, mat);
+
+    aleph::lowering::Op op = aleph::lowering::DeleteObject{mesh1};
+    auto applied = aleph::lowering::apply_op(g, op);
+    REQUIRE(applied.has_value());
+
+    CHECK(g.node(mesh1) == nullptr);  // the target mesh is gone
+    CHECK(g.node(xf1)   == nullptr);  // its childless dedicated Transform cascaded
+    CHECK(g.node(mat)   != nullptr);  // the SHARED Material survives
+    CHECK(g.node(mesh2) != nullptr);  // the sibling object is untouched...
+    CHECK(g.node(xf2)   != nullptr);  // ...including its own Transform
+    CHECK(g.node(root)  != nullptr);
+
+    // mesh2's References edge to the shared Material is intact.
+    bool ref2_intact = false;
+    for (auto [eid, e] : g.edges()) {
+        (void)eid;
+        if (e.kind == EdgeKind::References && e.src == mesh2 && e.dst == mat) {
+            ref2_intact = true;
+        }
+    }
+    CHECK(ref2_intact);
+
+    CHECK(aleph::graph::validate_all(g, static_cast<std::size_t>(-1)).has_value());
+    auto after = aleph::lowering::lower(g);
+    REQUIRE(after.has_value());
+    CHECK(after->entities.size() == 1);  // exactly the surviving mesh2
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (6) DeleteObject cascade: a MULTI-CHILD Transform survives (a sibling mesh
+//     keeps it alive); only the mesh + its exclusive Material go.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("lowering: DeleteObject spares a multi-child Transform; sibling intact") {
+    Graph g;
+
+    const NodeId root = g.alloc_node_id();
+    g.insert_node(Transform{root, 0, LocalTransform{aleph::math::Mat4::identity()}});
+
+    const NodeId cam = g.alloc_node_id();
+    Camera c{cam, std::string("sensor0")};
+    c.look_from = Vec3{0, 0, 5};
+    c.look_at   = Vec3{0, 0, 0};
+    c.up        = Vec3{0, 1, 0};
+    c.vfov_deg  = 40.0f;
+    g.insert_node(std::move(c));
+
+    // ONE Transform with TWO mesh children (each with its own Material).
+    const NodeId xf = g.alloc_node_id();
+    g.insert_node(Transform{xf, 1, LocalTransform{aleph::math::Mat4::identity()}});
+
+    const NodeId mesh_a = g.alloc_node_id();
+    Mesh ma{mesh_a, std::string("a"), 0};
+    ma.geometry = SphereLocal{Vec3{-1, 0, 0}, 0.5f};
+    g.insert_node(std::move(ma));
+    const NodeId mat_a = g.alloc_node_id();
+    Material mta{mat_a, MaterialKind::Lambertian};
+    mta.albedo = Vec3{1, 0, 0};
+    mta.emit   = Vec3{0, 0, 0};
+    g.insert_node(std::move(mta));
+
+    const NodeId mesh_b = g.alloc_node_id();
+    Mesh mb{mesh_b, std::string("b"), 0};
+    mb.geometry = SphereLocal{Vec3{1, 0, 0}, 0.5f};
+    g.insert_node(std::move(mb));
+    const NodeId mat_b = g.alloc_node_id();
+    Material mtb{mat_b, MaterialKind::Lambertian};
+    mtb.albedo = Vec3{0, 1, 0};
+    mtb.emit   = Vec3{0, 0, 0};
+    g.insert_node(std::move(mtb));
+
+    (void)g.add_edge(EdgeKind::Contains,   root,   cam);
+    (void)g.add_edge(EdgeKind::Contains,   root,   xf);
+    (void)g.add_edge(EdgeKind::Contains,   xf,     mesh_a);
+    (void)g.add_edge(EdgeKind::Contains,   xf,     mesh_b);
+    (void)g.add_edge(EdgeKind::References, mesh_a, mat_a);
+    (void)g.add_edge(EdgeKind::References, mesh_b, mat_b);
+
+    aleph::lowering::Op op = aleph::lowering::DeleteObject{mesh_a};
+    auto applied = aleph::lowering::apply_op(g, op);
+    REQUIRE(applied.has_value());
+
+    CHECK(g.node(mesh_a) == nullptr);  // the target mesh is gone
+    CHECK(g.node(mat_a)  == nullptr);  // its exclusive Material cascaded
+    CHECK(g.node(xf)     != nullptr);  // the Transform SURVIVES: mesh_b keeps it
+    CHECK(g.node(mesh_b) != nullptr);
+    CHECK(g.node(mat_b)  != nullptr);
+
+    // mesh_b is still wired: xf —Contains→ mesh_b and mesh_b —References→ mat_b.
+    bool contains_b = false, refs_b = false;
+    for (auto [eid, e] : g.edges()) {
+        (void)eid;
+        if (e.kind == EdgeKind::Contains   && e.src == xf     && e.dst == mesh_b) contains_b = true;
+        if (e.kind == EdgeKind::References && e.src == mesh_b && e.dst == mat_b)  refs_b = true;
+    }
+    CHECK(contains_b);
+    CHECK(refs_b);
+
+    CHECK(aleph::graph::validate_all(g, static_cast<std::size_t>(-1)).has_value());
+    auto after = aleph::lowering::lower(g);
+    REQUIRE(after.has_value());
+    CHECK(after->entities.size() == 1);  // only mesh_b lowers
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (7) RewriteRecord completeness: a cascading delete reports the WHOLE delete-set
+//     ({mesh, transform, material}) in deleted_nodes, and deleted_edges covers
+//     EVERY pre-state edge incident to any of them — nothing more, nothing less.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("lowering: cascading DeleteObject reports the full delete-set in the RewriteRecord") {
+    Graph g;
+
+    const NodeId root = g.alloc_node_id();
+    g.insert_node(Transform{root, 0, LocalTransform{aleph::math::Mat4::identity()}});
+
+    const NodeId cam = g.alloc_node_id();
+    Camera c{cam, std::string("sensor0")};
+    c.look_from = Vec3{0, 0, 5};
+    c.look_at   = Vec3{0, 0, 0};
+    c.up        = Vec3{0, 1, 0};
+    c.vfov_deg  = 40.0f;
+    g.insert_node(std::move(c));
+
+    // The canonical AddObject footprint: root → xf → mesh → mat (exclusive).
+    const NodeId xf = g.alloc_node_id();
+    g.insert_node(Transform{xf, 1, LocalTransform{aleph::math::Mat4::identity()}});
+    const NodeId mesh = g.alloc_node_id();
+    Mesh m{mesh, std::string("s"), 0};
+    m.geometry = SphereLocal{Vec3{0, 0, 0}, 1.0f};
+    g.insert_node(std::move(m));
+    const NodeId mat = g.alloc_node_id();
+    Material mt{mat, MaterialKind::Lambertian};
+    mt.albedo = Vec3{1, 0, 0};
+    mt.emit   = Vec3{0, 0, 0};
+    g.insert_node(std::move(mt));
+
+    (void)g.add_edge(EdgeKind::Contains, root, cam);    // survivor edge
+    (void)g.add_edge(EdgeKind::Contains, root, xf);     // incident to xf   -> deleted
+    (void)g.add_edge(EdgeKind::Contains, xf,   mesh);   // incident to both -> deleted
+    (void)g.add_edge(EdgeKind::References, mesh, mat);  // incident to both -> deleted
+
+    // Pre-compute the EXPECTED deleted-edge id set: every pre-state edge incident
+    // to any member of the delete-set {mesh, xf, mat}.
+    std::vector<EdgeId> expected_edges;
+    for (auto [eid, e] : g.edges()) {
+        const bool incident = e.src == mesh || e.dst == mesh
+                           || e.src == xf   || e.dst == xf
+                           || e.src == mat  || e.dst == mat;
+        if (incident) expected_edges.push_back(eid);
+    }
+    REQUIRE(expected_edges.size() == 3);  // root→xf, xf→mesh, mesh→mat
+
+    aleph::lowering::Op op = aleph::lowering::DeleteObject{mesh};
+    auto applied = aleph::lowering::apply_op(g, op);
+    REQUIRE(applied.has_value());
+    const aleph::dpo::RewriteRecord& rec = *applied;
+
+    // deleted_nodes == exactly {mesh, xf, mat} (as a SET — order not pinned).
+    REQUIRE(rec.deleted_nodes.size() == 3);
+    auto deleted_node = [&](NodeId id) {
+        for (NodeId d : rec.deleted_nodes) if (d == id) return true;
+        return false;
+    };
+    CHECK(deleted_node(mesh));
+    CHECK(deleted_node(xf));
+    CHECK(deleted_node(mat));
+
+    // deleted_edges == exactly the pre-computed incident set (as a SET).
+    REQUIRE(rec.deleted_edges.size() == expected_edges.size());
+    auto deleted_edge = [&](EdgeId id) {
+        for (EdgeId d : rec.deleted_edges) if (d == id) return true;
+        return false;
+    };
+    for (EdgeId id : expected_edges) CHECK(deleted_edge(id));
+
+    // Nothing was created, and the survivors (root, cam + their edge) are intact.
+    CHECK(rec.created_nodes.empty());
+    CHECK(rec.created_edges.empty());
+    CHECK(g.node_count() == 2);
+    CHECK(g.edge_count() == 1);
+    CHECK(aleph::graph::validate_all(g, static_cast<std::size_t>(-1)).has_value());
 }

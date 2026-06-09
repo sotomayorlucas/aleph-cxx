@@ -379,6 +379,59 @@ TEST_CASE("lowering: AddObject then AddLight compose; counts grow consistently")
     CHECK(freeze_entity(*seed2) == seed_image);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// AddObject then DeleteObject ROUND-TRIPS to baseline: DeleteObject CASCADES the
+// minted per-object Transform (now childless) and the minted Material (this mesh
+// was its only referrer), so the graph returns EXACTLY to its pre-add node/edge
+// counts — no leak — and a re-lower is byte-identical to the pre-add lowering.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("lowering: AddObject then DeleteObject round-trips graph + lowering to baseline") {
+    Seed s = make_seed();
+
+    const std::size_t nodes0 = s.g.node_count();
+    const std::size_t edges0 = s.g.edge_count();
+    auto before = aleph::lowering::lower(s.g);
+    REQUIRE(before.has_value());
+    const std::vector<std::byte> img_before = aleph_test_freeze::freeze(*before);
+
+    // AddObject mints Transform + Mesh + Material and three wiring edges.
+    aleph::lowering::AddObject add{};
+    add.parent   = s.root;
+    add.geometry = SphereLocal{Vec3{3, 0, 0}, 0.5f};
+    add.material = aleph::lowering::MaterialParams{};  // default Lambertian
+    aleph::lowering::Op op = add;
+    auto applied = aleph::lowering::apply_op(s.g, op);
+    REQUIRE(applied.has_value());
+    REQUIRE(s.g.node_count() == nodes0 + 3);
+    REQUIRE(s.g.edge_count() == edges0 + 3);
+
+    // Find the minted Mesh in created_nodes BY KIND (never by position).
+    NodeId minted{};
+    bool found = false;
+    for (const NodeId id : applied->created_nodes) {
+        const Node* n = s.g.node(id);
+        if (n != nullptr && kind_of(*n) == NodeKind::Mesh) { minted = id; found = true; }
+    }
+    REQUIRE(found);
+
+    // DeleteObject must reclaim the WHOLE AddObject footprint (mesh + childless
+    // per-object Transform + exclusive Material), not just the mesh.
+    aleph::lowering::Op del = aleph::lowering::DeleteObject{minted};
+    auto deleted = aleph::lowering::apply_op(s.g, del);
+    REQUIRE(deleted.has_value());
+
+    // Counts return EXACTLY to baseline (no node/edge leak); invariants hold.
+    CHECK(s.g.node_count() == nodes0);
+    CHECK(s.g.edge_count() == edges0);
+    CHECK(aleph::graph::validate_all(s.g, static_cast<std::size_t>(-1)).has_value());
+
+    // Re-lowering is byte-identical to the pre-add lowering: the round trip is
+    // observationally a no-op on the derived IR.
+    auto after = aleph::lowering::lower(s.g);
+    REQUIRE(after.has_value());
+    CHECK(aleph_test_freeze::freeze(*after) == img_before);
+}
+
 // AddObject must mint a PER-OBJECT Transform so the new mesh is independently
 // posable: parent ─Contains→ Transform ─Contains→ Mesh (not parent→Mesh direct).
 TEST_CASE("lowering: AddObject mints a per-object Transform parent for the mesh") {
