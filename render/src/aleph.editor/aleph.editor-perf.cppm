@@ -35,6 +35,28 @@ struct RollingMean {
     }
 };
 
+// The shell-observable reasons the next frame must actually be re-rendered.
+// When ALL signals are false the previously presented frame is still exact,
+// so the shell may re-present the cached back surface and sleep (frame
+// pacing) instead of re-running the render pipeline.
+struct FrameSignals {
+    bool had_input{false};            // any window event arrived this frame
+    bool op_applied{false};           // a graph Op ran (add/delete/kick/nudge)
+    bool sim_stepping{false};         // wave/sim mode: step() runs every frame
+    bool crossfade_active{false};     // raster<->PT fade ramping (alpha < 1)
+    bool pt_accumulating{false};      // path trace still converging
+    bool view_rebake_pending{false};  // throttled view-dependent rebake queued
+    bool selection_changed{false};    // a pick/select happened this frame
+    bool first_frame{false};          // nothing has been presented yet
+};
+
+// True if ANY signal demands a re-render.
+constexpr bool frame_dirty(FrameSignals s) noexcept {
+    return s.had_input || s.op_applied || s.sim_stepping || s.crossfade_active
+        || s.pt_accumulating || s.view_rebake_pending || s.selection_changed
+        || s.first_frame;
+}
+
 // One frame's per-phase durations (ms) as measured by the shell — the
 // run_live phases in loop order. Phases that did not run this frame stay 0.
 struct PhaseTimes {
