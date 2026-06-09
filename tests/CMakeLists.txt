@@ -125,7 +125,8 @@ if(ALEPH_HAVE_SDL2)
     target_sources(aleph_tests PRIVATE
         window/test_window_init.cpp
         editor/test_orbit.cpp
-        editor/test_pick.cpp)
+        editor/test_pick.cpp
+        render/test_editor_perf.cpp)
     target_link_libraries(aleph_tests PRIVATE aleph_window aleph_editor)
 endif()
 
