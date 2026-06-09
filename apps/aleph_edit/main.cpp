@@ -342,7 +342,7 @@ Mat4 orbit_mvp(const aleph::edit::OrbitCamera& cam, int w, int h) noexcept {
     return proj * view;
 }
 
-// Write a Film (linear Vec3) as a gamma-2.0 binary PPM. Returns false on a file
+// Write a Film (linear Vec3) as an sRGB-encoded binary PPM. Returns false on a file
 // error so the headless path can report and exit non-zero.
 bool write_ppm(const char* path, const aleph::render::common::Film& film) {
     std::FILE* f = std::fopen(path, "wb");
@@ -1214,7 +1214,7 @@ int run_live(bool wave_demo = false) {
                     ? src[i]
                     : aleph::math::lerp(fade_from[i], src[i], alpha);
                 presented[i] = lin;
-                wpx[y * wp + x] = aleph::render::common::tonemap_argb8888_gamma2(lin);
+                wpx[y * wp + x] = aleph::render::common::tonemap_argb8888_srgb(lin);
             }
         }
         win.present();

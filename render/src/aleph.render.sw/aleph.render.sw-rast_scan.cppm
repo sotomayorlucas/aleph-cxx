@@ -17,10 +17,14 @@ export namespace aleph::render::sw {
 
 namespace detail {
 
+// Texel decode: true sRGB EOTF per channel (a 256-entry LUT read — exact and
+// hot-loop cheap). The inverse of byte_from_linear's OETF, so texture bytes
+// and bake-encoded lightmap bytes round-trip exactly through the present.
 inline aleph::math::Vec3 argb_to_linear(aleph::math::u32 argb) noexcept {
-    const aleph::math::f32 r = static_cast<aleph::math::f32>((argb >> 16) & 0xFFu) / 255.0f;
-    const aleph::math::f32 g = static_cast<aleph::math::f32>((argb >>  8) & 0xFFu) / 255.0f;
-    const aleph::math::f32 b = static_cast<aleph::math::f32>( argb        & 0xFFu) / 255.0f;
+    using aleph::render::common::srgb_decode_byte;
+    const aleph::math::f32 r = srgb_decode_byte(static_cast<std::uint8_t>((argb >> 16) & 0xFFu));
+    const aleph::math::f32 g = srgb_decode_byte(static_cast<std::uint8_t>((argb >>  8) & 0xFFu));
+    const aleph::math::f32 b = srgb_decode_byte(static_cast<std::uint8_t>( argb        & 0xFFu));
     return aleph::math::Vec3{r, g, b};
 }
 

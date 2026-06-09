@@ -152,7 +152,7 @@ int main(int /*argc*/, char** /*argv*/) {
         for (int y = 0; y < H; ++y) {
             for (int x = 0; x < W; ++x) {
                 const aleph::math::Vec3 lin = film.pixels[y * film.stride_pixels + x];
-                wpx[y * wp + x] = aleph::render::common::tonemap_argb8888_gamma2(lin);
+                wpx[y * wp + x] = aleph::render::common::tonemap_argb8888_srgb(lin);
             }
         }
         win.present();
