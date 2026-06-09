@@ -32,10 +32,18 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
                                 ScreenVert v0, ScreenVert v1, ScreenVert v2,
                                 TexSampleFn tex,
                                 const Lightmap* lm,
+                                bool two_sided,
                                 int y_clip_min, int y_clip_max) noexcept {
     const aleph::math::f32 signed_area =
         (v1.x - v0.x) * (v2.y - v0.y) - (v1.y - v0.y) * (v2.x - v0.x);
-    if (signed_area < 0.0f) return;
+    if (signed_area < 0.0f) {
+        if (!two_sided) return;  // one-sided: back-face cull (CW-front winding)
+        // Two-sided back face: re-wind to CW BEFORE any gradient/edge setup.
+        // uv/colour/inv_w ride inside ScreenVert, so the swap carries them; the
+        // swapped triangle's signed area is exactly -signed_area > 0 (nothing
+        // below reads signed_area, so no recompute is needed).
+        std::swap(v1, v2);
+    }
 
     if (v0.y > v1.y) std::swap(v0, v1);
     if (v1.y > v2.y) std::swap(v1, v2);

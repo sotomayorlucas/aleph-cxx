@@ -32,6 +32,9 @@ struct Face {
     std::array<aleph::math::Vec3, 4> vcol{
         aleph::math::Vec3{1.0f, 1.0f, 1.0f}, aleph::math::Vec3{1.0f, 1.0f, 1.0f},
         aleph::math::Vec3{1.0f, 1.0f, 1.0f}, aleph::math::Vec3{1.0f, 1.0f, 1.0f}};
+    // true => rast_scan re-winds (renders) back-facing triangles instead of
+    // culling them; false (default) keeps today's CW-front back-face cull.
+    bool two_sided = false;
 };
 
 struct SceneRT {
