@@ -25,6 +25,7 @@
 
 #include <algorithm>   // std::fill, std::clamp, std::max
 #include <array>       // std::array (SDL event buffer)
+#include <chrono>      // std::chrono::milliseconds (idle frame pacing)
 #include <cmath>       // std::sqrt, std::abs (wave-field heatmap)
 #include <cstddef>
 #include <cstdint>
@@ -911,6 +912,14 @@ int run_live(bool wave_demo = false) {
                                rm_outline{}, rm_downsample{}, rm_ui{},
                                rm_present{};
 
+    // ── Frame dirty-flag + pacing ────────────────────────────────────────────
+    // When nothing observable changed, re-present the cached back surface (it
+    // keeps the last tonemapped frame) and sleep kIdleSleepMs instead of
+    // re-rendering — events still poll at ~250 Hz, CPU drops to near zero.
+    constexpr int kIdleSleepMs = 4;
+    bool first_frame = true;            // nothing presented yet -> must render
+    bool idle_frame_presented = false;  // the IDLE-tagged frame is on screen
+
     while (running) {
         const aleph::math::u64 tp_frame0 = win.perf_counter();
         aleph::editor::PhaseTimes pt{};
@@ -923,6 +932,7 @@ int run_live(bool wave_demo = false) {
         int nudge_dz = 0;   // -1 toward camera eye, +1 toward look target (camera forward on ground)
         int nudge_dy = 0;   // -1 down, +1 up (world Y)
         bool nudge_fast = false;
+        bool op_applied = false;   // any Op ran this frame (dirty signal)
 
         for (std::size_t i = 0; i < static_cast<std::size_t>(nev); ++i) {
             const auto& e = evbuf[i];
@@ -976,6 +986,7 @@ int run_live(bool wave_demo = false) {
             add.geometry = aleph::types::SphereLocal{Vec3{0.0f, 0.5f, 0.0f}, 0.5f};
             add.material = lambertian(Vec3{0.3f, 0.6f, 0.9f});
             (void)controller.apply(aleph::lowering::Op{add});
+            op_applied = true;
         }
         if (key_add_light) {
             aleph::lowering::AddLight light{};
@@ -985,16 +996,19 @@ int run_live(bool wave_demo = false) {
                                                      Vec3{1.0f, 0.0f, 0.0f},
                                                      Vec3{0.0f, 0.0f, 1.0f}};
             (void)controller.apply(aleph::lowering::Op{light});
+            op_applied = true;
         }
         if (key_delete && controller.selected().has_value()) {
             const NodeId victim = *controller.selected();
             auto r = controller.apply(
                 aleph::lowering::Op{aleph::lowering::DeleteObject{victim}});
             if (r.has_value()) controller.select(std::nullopt);
+            op_applied = true;
         }
         // Wave: ping the selected node (or the seed if nothing is selected).
         if (wave_demo && key_kick) {
             (void)controller.kick(controller.selected().value_or(kick_seed), 1.5);
+            op_applied = true;
         }
 
         // Arrow/Q-E nudge: move the selected object along camera-relative ground
@@ -1017,6 +1031,7 @@ int run_live(bool wave_demo = false) {
                  + fwd.z * static_cast<f32>(nudge_dz)) * step};
             (void)controller.translate_selected(delta);
             invalidate();   // keep raster fresh after the nudge (matches SetMaterial)
+            op_applied = true;
         }
 
         // ── Pick on a fresh left-click. ───────────────────────────────────────
@@ -1044,6 +1059,40 @@ int run_live(bool wave_demo = false) {
         // The wave demo stays in raster (φ is colormapped into vcol, which only the
         // rasterizer reads) and steps every frame, so it never goes idle/path-trace.
         const bool idle = !wave_demo && (now - last_input_ms) >= kIdleMs;
+
+        // ── Frame dirty-flag (pacing): decide BEFORE any render work. ─────────
+        // The signals mirror every way this loop can change pixels; while ANY
+        // holds, render as usual. See aleph.editor:perf for the decision.
+        const Mode next_mode = idle ? Mode::Tracing : Mode::Raster;
+        const aleph::editor::FrameSignals signals{
+            .had_input           = nev > 0,
+            .op_applied          = op_applied,
+            .sim_stepping        = wave_demo,
+            .crossfade_active    = have_prev_frame
+                                   && (next_mode != prev_mode
+                                       || (now - fade_start_ms) < kFadeMs),
+            .pt_accumulating     = idle && (!tracing || pt_samples < kMaxSpp),
+            .view_rebake_pending = view_dirty
+                                   && controller.has_view_dependent_material(),
+            .selection_changed   = clicked_pick && !prev_left,
+            .first_frame         = first_frame,
+        };
+        first_frame = false;
+        const bool dirty = aleph::editor::frame_dirty(signals);
+        if (!dirty && idle_frame_presented) {
+            // Clean and the IDLE-tagged frame is already up: re-present the
+            // unchanged back surface + sleep. Covers both the raster pre-idle
+            // window and the converged-path-trace hold (no crossfade/tonemap
+            // loop either). Skipped frames push no timings, so the (frozen)
+            // HUD means keep describing real rendered frames.
+            win.present();
+            std::this_thread::sleep_for(std::chrono::milliseconds(kIdleSleepMs));
+            prev_left = left_down;
+            continue;
+        }
+        // The first clean frame after a dirty one is rendered once more so the
+        // raster HUD can show its IDLE tag; after that the skip path holds.
+        idle_frame_presented = !dirty;
 
         Mode        mode;
         const Vec3* src = nullptr;
@@ -1223,7 +1272,7 @@ int run_live(bool wave_demo = false) {
             char perf_hud[160];
             std::snprintf(perf_hud, sizeof(perf_hud),
                           "FRM %.1f EVT %.1f STP %.1f RAS %.1f OUT %.1f "
-                          "DSP %.1f UI %.1f PRS %.1f | %.0f FPS",
+                          "DSP %.1f UI %.1f PRS %.1f | %.0f FPS%s",
                           static_cast<double>(frame_mean),
                           static_cast<double>(rm_events.mean()),
                           static_cast<double>(rm_step.mean()),
@@ -1232,7 +1281,8 @@ int run_live(bool wave_demo = false) {
                           static_cast<double>(rm_downsample.mean()),
                           static_cast<double>(rm_ui.mean()),
                           static_cast<double>(rm_present.mean()),
-                          static_cast<double>(fps));
+                          static_cast<double>(fps),
+                          dirty ? "" : " IDLE");
             aleph::editor::draw_rect(film, 8, 34, 640, 16, Vec3{0, 0, 0});
             aleph::editor::draw_text_shadowed(film, 14, 38, perf_hud,
                                               Vec3{1, 1, 1});
