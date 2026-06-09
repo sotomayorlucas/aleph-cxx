@@ -189,7 +189,10 @@ TEST_CASE("lowering: apply_op(DeleteObject) re-lowers to a valid Scene, no dangl
 
     // The structural op: delete the Mesh. Transactional via aleph.dpo — it
     // cascades the mesh's incident edges (its Contains-from-root and its
-    // References→Material), so the post-graph has no dangling edge.
+    // References→Material), so the post-graph has no dangling edge. NOTE: this
+    // fixture has no per-object Transform between root and mesh, so only the
+    // Material-cascade path is exercised here; the Transform cascade is pinned
+    // by the dedicated-Transform / multi-child cases below.
     aleph::lowering::Op op = aleph::lowering::DeleteObject{s.mesh};
     auto applied = aleph::lowering::apply_op(s.g, op);
     REQUIRE(applied.has_value());
@@ -197,13 +200,15 @@ TEST_CASE("lowering: apply_op(DeleteObject) re-lowers to a valid Scene, no dangl
     // (c) the post-edit GRAPH satisfies every invariant (the single truth holds).
     //     The mesh is gone, and the CASCADE also reclaimed its exclusively-
     //     referenced Material (no other mesh References it — leaving it would
-    //     leak a node per delete). The root Transform is NEVER cascaded: it
-    //     still Contains the camera + light, and it has no Contains parent (the
-    //     non-root guard). (max_in_degree = SIZE_MAX: not degree-gated.)
+    //     leak a node per delete). The root Transform survives via the
+    //     MULTI-CHILD guard: it still Contains the camera + light, which
+    //     short-circuits before the non-root guard is ever consulted (the
+    //     non-root guard binds in the single-child-root case below).
+    //     (max_in_degree = SIZE_MAX: not degree-gated.)
     CHECK(aleph::graph::validate_all(s.g, static_cast<std::size_t>(-1)).has_value());
     CHECK(s.g.node(s.mesh) == nullptr);  // the mesh is actually gone
     CHECK(s.g.node(s.mat) == nullptr);   // exclusive Material cascaded away
-    CHECK(s.g.node(s.root) != nullptr);  // root Transform survives (non-root guard)
+    CHECK(s.g.node(s.root) != nullptr);  // root Transform survives (multi-child guard: still Contains cam + light)
 
     // (a) re-lowering succeeds -> a VALID Scene (not a LowerError).
     auto after = aleph::lowering::lower(s.g);
@@ -589,4 +594,64 @@ TEST_CASE("lowering: cascading DeleteObject reports the full delete-set in the R
     CHECK(g.node_count() == 2);
     CHECK(g.edge_count() == 1);
     CHECK(aleph::graph::validate_all(g, static_cast<std::size_t>(-1)).has_value());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// (8) DeleteObject cascade: the NON-ROOT guard alone spares a single-child ROOT.
+//     Root Transform (no incoming Contains) Contains EXACTLY ONE child — the
+//     target mesh — so the multi-child check passes (other_child = false) and
+//     only `has_incoming_contains` stands between the root and the delete-set.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST_CASE("lowering: DeleteObject spares a single-child ROOT Transform (non-root guard binds)") {
+    Graph g;
+
+    const NodeId root = g.alloc_node_id();
+    g.insert_node(Transform{root, 0, LocalTransform{aleph::math::Mat4::identity()}});
+
+    // CameraExclusive needs exactly one Camera; keep it OUTSIDE the Contains
+    // hierarchy so the root's ONLY Contains child is the target mesh.
+    const NodeId cam = g.alloc_node_id();
+    Camera c{cam, std::string("sensor0")};
+    c.look_from = Vec3{0, 0, 5};
+    c.look_at   = Vec3{0, 0, 0};
+    c.up        = Vec3{0, 1, 0};
+    c.vfov_deg  = 40.0f;
+    g.insert_node(std::move(c));
+
+    const NodeId mesh = g.alloc_node_id();
+    Mesh m{mesh, std::string("s"), 0};
+    m.geometry = SphereLocal{Vec3{0, 0, 0}, 1.0f};
+    g.insert_node(std::move(m));
+
+    const NodeId mat = g.alloc_node_id();
+    Material mt{mat, MaterialKind::Lambertian};
+    mt.albedo = Vec3{1, 0, 0};
+    mt.emit   = Vec3{0, 0, 0};
+    g.insert_node(std::move(mt));
+
+    (void)g.add_edge(EdgeKind::Contains,   root, mesh);  // root's ONLY child
+    (void)g.add_edge(EdgeKind::References, mesh, mat);   // exclusive Material
+
+    aleph::lowering::Op op = aleph::lowering::DeleteObject{mesh};
+    auto applied = aleph::lowering::apply_op(g, op);
+    REQUIRE(applied.has_value());
+    const aleph::dpo::RewriteRecord& rec = *applied;
+
+    CHECK(g.node(mesh) == nullptr);  // the target mesh is gone
+    CHECK(g.node(mat)  == nullptr);  // its exclusive Material cascaded
+    // The ROOT SURVIVES — now childless, the multi-child check passed it
+    // (other_child = false), so ONLY the non-root guard spared it.
+    CHECK(g.node(root) != nullptr);
+
+    CHECK(aleph::graph::validate_all(g, static_cast<std::size_t>(-1)).has_value());
+
+    // deleted_nodes == exactly {mesh, mat} — the root is NOT in the delete-set.
+    REQUIRE(rec.deleted_nodes.size() == 2);
+    auto deleted_node = [&](NodeId id) {
+        for (NodeId d : rec.deleted_nodes) if (d == id) return true;
+        return false;
+    };
+    CHECK(deleted_node(mesh));
+    CHECK(deleted_node(mat));
+    CHECK_FALSE(deleted_node(root));
 }

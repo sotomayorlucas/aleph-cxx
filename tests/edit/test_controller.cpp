@@ -393,6 +393,9 @@ TEST_CASE("edit: apply(AddObject) -> lowered == fresh lower(graph), byte-identic
 // sourced; the controller's lowered IR must match a fresh full lower of the
 // parallel graph with the SAME DeleteObject committed. Invariants hold; the
 // deleted mesh sources NO surviving raster face.
+// NOTE: make_two_mesh puts its meshes directly under root (no per-object
+// Transform), so only the Material cascade fires here; the full cascade is
+// pinned by the 5x add/delete cycle test below.
 TEST_CASE("edit: apply(DeleteObject) -> lowered == fresh lower(graph), byte-identical") {
     TwoMesh ctl = make_two_mesh();
     TwoMesh ora = make_two_mesh();
