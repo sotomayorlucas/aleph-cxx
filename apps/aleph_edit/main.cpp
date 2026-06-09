@@ -895,7 +895,25 @@ int run_live(bool wave_demo = false) {
         last_input_ms = win.ticks_ms();
     };
 
+    // ── Per-phase frame timing (the perf HUD line) ───────────────────────────
+    // Each phase is bracketed by two win.perf_counter() reads (negligible) and
+    // pushed into its RollingMean; the HUD line shows the rolling means (so it
+    // lags this frame by one — the frame's own present/frame times are only
+    // known after it is shown). Raster-only phases are pushed only on raster
+    // frames so path-trace frames don't dilute their means toward 0.
+    const f32 perf_ms_per_tick =
+        1000.0f / static_cast<f32>(win.perf_frequency());
+    const auto phase_ms = [perf_ms_per_tick](aleph::math::u64 t0,
+                                             aleph::math::u64 t1) noexcept {
+        return static_cast<f32>(t1 - t0) * perf_ms_per_tick;
+    };
+    aleph::editor::RollingMean rm_frame{}, rm_events{}, rm_step{}, rm_raster{},
+                               rm_outline{}, rm_downsample{}, rm_ui{},
+                               rm_present{};
+
     while (running) {
+        const aleph::math::u64 tp_frame0 = win.perf_counter();
+        aleph::editor::PhaseTimes pt{};
         std::array<aleph::window::Event, 64> evbuf{};
         const int nev = win.poll_events(std::span<aleph::window::Event>{evbuf});
         bool clicked_pick = false;
@@ -1015,6 +1033,8 @@ int run_live(bool wave_demo = false) {
             }
         }
 
+        pt.events_ms = phase_ms(tp_frame0, win.perf_counter());
+
         // ── Decide raster vs. progressive path-trace (idle). ──────────────────
         // Whenever idle we show the path trace (accumulating until kMaxSpp, then
         // holding the converged mean — it no longer flips back to raster on
@@ -1076,7 +1096,10 @@ int run_live(bool wave_demo = false) {
             }
 
             // Advance the wave one fixed sub-step (re-bakes φ→vcol) before drawing.
+            const aleph::math::u64 tp_step0 = win.perf_counter();
             if (wave_demo) (void)controller.step(kWaveDt);
+            const aleph::math::u64 tp_raster0 = win.perf_counter();
+            pt.step_ms = phase_ms(tp_step0, tp_raster0);
 
             // ── RASTER: rasterize the editor's view + UI overlay into `film`. ──
             // Supersample the 3D scene at kSSAA× then box-downsample (linear)
@@ -1086,6 +1109,8 @@ int run_live(bool wave_demo = false) {
             aleph::render::sw::rasterize(controller.raster_scene(),
                                          orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
                                          ss_film, ss_depth, pool);
+            const aleph::math::u64 tp_outline0 = win.perf_counter();
+            pt.raster_ms = phase_ms(tp_raster0, tp_outline0);
 
             // Selection silhouette: raster only the selected entity's faces into a
             // zero-cleared depth buffer (coverage), then ring it. X-ray by design
@@ -1114,7 +1139,11 @@ int run_live(bool wave_demo = false) {
                         ss_film, sel_depth, /*radius=*/kSSAA, kSelectionColor);
                 }
             }
+            const aleph::math::u64 tp_down0 = win.perf_counter();
+            pt.outline_ms = phase_ms(tp_outline0, tp_down0);
             aleph::render::sw::downsample_box(ss_film, film, kSSAA);
+            const aleph::math::u64 tp_ui0 = win.perf_counter();
+            pt.downsample_ms = phase_ms(tp_down0, tp_ui0);
 
             // UI panel: selection + a material color slider that emits SetMaterial.
             const bool ui_mouse_pressed = left_down && !prev_left;
@@ -1188,6 +1217,27 @@ int run_live(bool wave_demo = false) {
             aleph::editor::draw_rect(film, 8, 8, 420, 24, Vec3{0, 0, 0});
             aleph::editor::draw_text_shadowed(film, 14, 14, hud, Vec3{1, 1, 1});
 
+            // Perf HUD: rolling per-phase means (ms) + FPS from the frame mean.
+            const f32 frame_mean = rm_frame.mean();
+            const f32 fps = (frame_mean > 0.0f) ? 1000.0f / frame_mean : 0.0f;
+            char perf_hud[160];
+            std::snprintf(perf_hud, sizeof(perf_hud),
+                          "FRM %.1f EVT %.1f STP %.1f RAS %.1f OUT %.1f "
+                          "DSP %.1f UI %.1f PRS %.1f | %.0f FPS",
+                          static_cast<double>(frame_mean),
+                          static_cast<double>(rm_events.mean()),
+                          static_cast<double>(rm_step.mean()),
+                          static_cast<double>(rm_raster.mean()),
+                          static_cast<double>(rm_outline.mean()),
+                          static_cast<double>(rm_downsample.mean()),
+                          static_cast<double>(rm_ui.mean()),
+                          static_cast<double>(rm_present.mean()),
+                          static_cast<double>(fps));
+            aleph::editor::draw_rect(film, 8, 34, 640, 16, Vec3{0, 0, 0});
+            aleph::editor::draw_text_shadowed(film, 14, 38, perf_hud,
+                                              Vec3{1, 1, 1});
+            pt.ui_ms = phase_ms(tp_ui0, win.perf_counter());
+
             src = film.pixels;  // film stride == W (contiguous)
         }
 
@@ -1195,6 +1245,7 @@ int run_live(bool wave_demo = false) {
         // A mode switch snapshots the last shown frame and restarts the ramp;
         // steady-state (alpha>=1) presents `src` verbatim. `presented` records
         // exactly what we show so the next transition fades from the real frame.
+        const aleph::math::u64 tp_present0 = win.perf_counter();
         if (have_prev_frame && mode != prev_mode) {
             std::copy(presented.begin(), presented.end(), fade_from.begin());
             fade_start_ms = now;
@@ -1218,6 +1269,19 @@ int run_live(bool wave_demo = false) {
             }
         }
         win.present();
+        const aleph::math::u64 tp_end = win.perf_counter();
+        pt.present_ms = phase_ms(tp_present0, tp_end);
+        pt.frame_ms   = phase_ms(tp_frame0, tp_end);
+        rm_events.push(pt.events_ms);
+        rm_present.push(pt.present_ms);
+        rm_frame.push(pt.frame_ms);
+        if (mode == Mode::Raster) {   // raster-only phases (0 while tracing)
+            rm_step.push(pt.step_ms);
+            rm_raster.push(pt.raster_ms);
+            rm_outline.push(pt.outline_ms);
+            rm_downsample.push(pt.downsample_ms);
+            rm_ui.push(pt.ui_ms);
+        }
         have_prev_frame = true;
         prev_mode  = mode;
         prev_left  = left_down;
