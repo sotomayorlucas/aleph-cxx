@@ -140,3 +140,58 @@ TEST_CASE("EditorController sim: edit re-projection keeps survivors, zeros new")
 
     CHECK(phi_of(a) == doctest::Approx(phiA_before));  // survivor unchanged
 }
+
+TEST_CASE("EditorController sim: cascading DeleteObject re-projects φ; survivor keeps it") {
+    AB s = make_ab();
+    const NodeId a = s.a, b = s.b, root = s.root;
+    aleph::edit::EditorController ctl{std::move(s.g)};
+    ctl.set_viewport(64, 48);
+
+    ctl.enable_sim(true);
+    REQUIRE(ctl.kick(a, 1.0));
+    for (int i = 0; i < 20; ++i)
+        REQUIRE(ctl.step(0.01f).has_value());
+
+    auto phi_of = [&](NodeId id) -> double {
+        const auto& f = ctl.displacement();
+        for (std::size_t i = 0; i < f.order.size(); ++i)
+            if (f.order[i] == id) return f.data[i];
+        return 0.0;
+    };
+    const double phiA_before = phi_of(a);
+
+    const std::size_t nodes0 = ctl.graph().node_count();
+    const std::size_t edges0 = ctl.graph().edge_count();
+
+    // AddObject (mints Transform + Mesh + Material) ...
+    aleph::lowering::AddObject add{};
+    add.parent   = root;
+    add.geometry = SphereLocal{Vec3{2, 0, 0}, 0.4f};
+    add.material = aleph::lowering::MaterialParams{};
+    REQUIRE(ctl.apply(aleph::lowering::Op{add}).has_value());
+
+    // ... find the minted Mesh (the only Mesh that is neither A nor B) ...
+    NodeId minted{};
+    bool found = false;
+    for (auto [nid, n] : ctl.graph().nodes()) {
+        if (kind_of(n) == NodeKind::Mesh && nid != a && nid != b) {
+            minted = nid;
+            found  = true;
+        }
+    }
+    REQUIRE(found);
+
+    // ... and delete it: the CASCADE reclaims all 3 minted nodes (the record
+    // now carries extra deleted Contains/References edges — these must stay
+    // inert to the localized wave-operator rebuild and to Section::reproject).
+    REQUIRE(ctl.apply(
+        aleph::lowering::Op{aleph::lowering::DeleteObject{minted}}).has_value());
+    CHECK(ctl.graph().node_count() == nodes0);
+    CHECK(ctl.graph().edge_count() == edges0);
+
+    // Survivor A kept its displacement through BOTH re-projections.
+    CHECK(phi_of(a) == doctest::Approx(phiA_before));
+
+    // And the sim still steps after the cascading delete.
+    REQUIRE(ctl.step(0.01f).has_value());
+}

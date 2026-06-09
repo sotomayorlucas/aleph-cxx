@@ -631,3 +631,55 @@ TEST_CASE("edit: orbit threads the eye -> Metal vcol moves, Lambertian vcol byte
     CHECK(max_metal_delta > 0.05f);       // chrome reflection tracked the eye
     CHECK(lambertian_identical);          // view-independent: byte-unchanged
 }
+
+// ── delete-cascade — repeated add/delete cycles leave NO graph garbage ───────
+// Every interactive delete used to leak the minted per-object Transform and the
+// minted Material (2 nodes/cycle). With the cascade, an AddObject/DeleteObject
+// cycle through the controller is a graph-level no-op: after EACH of 5 cycles
+// the node AND edge counts are back at baseline, and the seed entities survive.
+TEST_CASE("edit: 5x AddObject/DeleteObject cycles leave graph counts at baseline (no leak)") {
+    TwoMesh ctl = make_two_mesh();
+    const NodeId root   = ctl.root;
+    const NodeId seed_a = ctl.mesh_a;
+    const NodeId seed_b = ctl.mesh_b;
+
+    aleph::edit::EditorController c{std::move(ctl.g)};
+
+    const std::size_t nodes0 = c.graph().node_count();
+    const std::size_t edges0 = c.graph().edge_count();
+    REQUIRE(c.lowered().entities.size() == 2);
+
+    for (int cycle = 0; cycle < 5; ++cycle) {
+        aleph::lowering::AddObject add{};
+        add.parent   = root;
+        add.geometry = SphereLocal{Vec3{0, 2, 0}, 0.5f};
+        add.material = green_lambertian();
+        REQUIRE(c.apply(aleph::lowering::Op{add}).has_value());
+
+        // The freshly minted mesh is the lone entity that is neither seed quad
+        // (every earlier cycle's object was deleted, so exactly one exists).
+        NodeId minted{};
+        bool found = false;
+        for (const auto& e : c.lowered().entities) {
+            if (e.source != seed_a && e.source != seed_b) {
+                REQUIRE_FALSE(found);
+                minted = e.source;
+                found  = true;
+            }
+        }
+        REQUIRE(found);
+
+        REQUIRE(c.apply(
+            aleph::lowering::Op{aleph::lowering::DeleteObject{minted}}).has_value());
+
+        // The cascade reclaimed mesh + per-object Transform + Material: counts
+        // return to baseline EVERY cycle — no monotone node/edge leak.
+        CHECK(c.graph().node_count() == nodes0);
+        CHECK(c.graph().edge_count() == edges0);
+    }
+
+    // Both seed quads are intact and still lowered.
+    CHECK(c.lowered().entities.size() == 2);
+    CHECK(c.lowered().handle_map.get(seed_a) != nullptr);
+    CHECK(c.lowered().handle_map.get(seed_b) != nullptr);
+}
