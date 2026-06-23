@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     aleph::render::rt::path_trace(scene, cam, sky, film, pool,
         aleph::render::rt::RenderOpts{spp, depth, seed, 32});
 
-    // Convert linear Film (Vec3) to PPM bytes (gamma 2.0).
+    // Convert linear Film (Vec3) to PPM bytes (sRGB OETF).
     // We use aleph.io's write_ppm which expects a different format; write directly here.
     std::string p{out_path};
     std::FILE* f = std::fopen(p.c_str(), "wb");

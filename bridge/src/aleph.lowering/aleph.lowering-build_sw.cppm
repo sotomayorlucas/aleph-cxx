@@ -596,11 +596,15 @@ shade_face(aleph::math::Vec3 point, aleph::math::Vec3 normal,
 // modulated by the tint). `lightmap_id == 0xFFFFFFFF` => no lightmap (build_sw
 // emits no placeholder Lightmaps; the raster preview is flat). `face_source`
 // grows in lockstep with faces (1 Face == 1 triangle == 1 source).
+// `two_sided` mirrors the shade: quads/tris shade |N·L| two-sided, so their
+// back face rasterizes too; spheres are closed one-sided surfaces, so the
+// back-face cull stays on (correct AND ~halves their rasterized triangles).
 inline void push_tri(SwBuild& out,
                      aleph::math::Vec3 a, aleph::math::Vec3 b, aleph::math::Vec3 c,
                      aleph::math::Vec3 ca, aleph::math::Vec3 cb, aleph::math::Vec3 cc,
                      aleph::math::Vec2 uva, aleph::math::Vec2 uvb, aleph::math::Vec2 uvc,
                      aleph::render::sw::TexSampleFn fn,
+                     bool two_sided,
                      aleph::types::NodeId source) {
     aleph::render::sw::Face f{};
     f.verts = {a, b, c, c};
@@ -608,6 +612,7 @@ inline void push_tri(SwBuild& out,
     f.tex = fn;
     f.lightmap_id = 0xFFFFFFFFu;  // no lightmap
     f.vcol = {ca, cb, cc, cc};    // Gouraud: per-vertex lit colour (verts[3]==verts[2])
+    f.two_sided = two_sided;
     out.scene.faces.push_back(f);
     out.face_source.push_back(source);
 }
@@ -667,9 +672,11 @@ inline void emit_quad(SwBuild& out, const aleph::types::QuadLocal& g,
             const Vec3 s11 = phi ? fc : shade_face(c11, n, mat, eye, lights, true, occluders, source);
             const Vec3 s01 = phi ? fc : shade_face(c01, n, mat, eye, lights, true, occluders, source);
             push_tri(out, c00, c10, c11, s00, s10, s11,
-                     UV(i, j), UV(i + 1, j), UV(i + 1, j + 1), fn, source);
+                     UV(i, j), UV(i + 1, j), UV(i + 1, j + 1), fn,
+                     /*two_sided=*/true, source);
             push_tri(out, c00, c11, c01, s00, s11, s01,
-                     UV(i, j), UV(i + 1, j + 1), UV(i, j + 1), fn, source);
+                     UV(i, j), UV(i + 1, j + 1), UV(i, j + 1), fn,
+                     /*two_sided=*/true, source);
         }
     }
 }
@@ -689,7 +696,8 @@ inline void emit_tri(SwBuild& out, const aleph::types::TriLocal& g,
     // Tris are untextured this slice (the PT gives tris no UV — SPEC §1): inert
     // zero UVs + the white texture, so the rendered colour is exactly the vcol.
     const aleph::math::Vec2 z{0.0f, 0.0f};
-    push_tri(out, g.a, g.b, g.c, sa, sb, sc, z, z, z, &tex_white, source);
+    push_tri(out, g.a, g.b, g.c, sa, sb, sc, z, z, z, &tex_white,
+             /*two_sided=*/true, source);
 }
 
 // SphereLocal -> a deterministic UV sphere of RINGS x SECTORS quad cells, each
@@ -745,8 +753,10 @@ inline void emit_sphere(SwBuild& out, const aleph::types::SphereLocal& g,
             // Spheres are untextured this slice (the longitude u-seam breaks
             // raster↔PT parity — SPEC §1): inert zero UVs + the white texture.
             const aleph::math::Vec2 z{0.0f, 0.0f};
-            push_tri(out, a, b, c, sa, sb, sc, z, z, z, &tex_white, source);
-            push_tri(out, a, c, d, sa, sc, sd, z, z, z, &tex_white, source);
+            push_tri(out, a, b, c, sa, sb, sc, z, z, z, &tex_white,
+                     /*two_sided=*/false, source);
+            push_tri(out, a, c, d, sa, sc, sd, z, z, z, &tex_white,
+                     /*two_sided=*/false, source);
         }
     }
 }

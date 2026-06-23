@@ -461,7 +461,7 @@ int main(int argc, char** argv) {
     opts.max_spp_scale = 4;
     aleph::render::rt::path_trace(scene, cam, sky, film, pool, opts);
 
-    // ── 5. Write the PPM (gamma 2.0 via byte_from_linear), like aleph_rt. ─────
+    // ── 5. Write the PPM (sRGB OETF via byte_from_linear), like aleph_rt. ─────
     std::FILE* f = std::fopen(out_path.c_str(), "wb");
     if (f == nullptr) {
         std::fprintf(stderr, "aleph_lower_demo: cannot open %s for writing\n",

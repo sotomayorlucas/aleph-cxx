@@ -4,6 +4,15 @@
 
 Context (verified, explorer `ad3a998f` + review): graph `aleph::types::MaterialKind` = {Lambertian,Metal,Dielectric,Emissive} (no Textured); `aleph::types::Material` has no `uv_scale`. Scene `aleph::scene::MaterialKind` HAS `TexturedLambertian=4` + `TexturedLambertianSoA{tex_id, uv_scale}` (no albedo) + `scene_add_textured_lambertian`. PT `sample_textured_albedo` (rt-material.cppm) is a grey stub — the single albedo source for the TexturedLambertian scatter+NEE. Raster `Face::tex` is a `TexSampleFn`(`u32(*)(f32,f32)`); `rast_scan` does `argb_to_linear(tex(u,v)) × vcol` per pixel where **`argb_to_linear` is a plain `byte/255` (NO sRGB decode)**; `tex_checker` exists; `push_tri` hardcodes zeroed UVs + `&tex_white`. The 4c-i materials slice threads `const MaterialParams& mat` into `emit_quad/tri/sphere`.
 
+> **As-built note (2026-06-09):** the "plain `byte/255`, NO sRGB" decode described
+> throughout this doc is now historical. The 2026-06-09 sRGB slice (see
+> `2026-06-09-raster-twosided-srgb-design.md`) made `argb_to_linear` the true sRGB
+> EOTF (256-entry LUT) and `byte_from_linear` the sRGB OETF (threshold table +
+> binary search; exact round-trip for all 256 bytes). The parity mechanism here is
+> unchanged — the LO **byte** `0x80` stays the single source of truth — but its
+> decoded level is now `kCheckerLo = srgb_decode_byte(0x80) = 0.215860501f`
+> (was `128/255 ≈ 0.502`), and the lightmap bake encodes with the same OETF.
+
 ## 1. The UV-parity contract — QUAD only (the deliverable)
 The checker aligns between backends iff both feed `checker()` the SAME (u,v) for a surface point:
 - **Quad (the floor — IN scope, EXACT parity):** PT `hit_quad` (scene-hit.cppm) sets `rec.u=α, rec.v=β` = fractional position along `(u_edge,v_edge)` ∈ [0,1]² (verified: for `P=q+s·u+t·v`, `α=s, β=t` exactly). Raster `emit_quad` corner `P(i,j)` is at `(s,t)=(i/Nu, j/Nv)` of `(q,u,v)` — so baking vertex UV `(i/Nu, j/Nv)` equals the PT's α,β **bit-for-bit at vertices** (and matches per-pixel after perspective-correct interpolation, since u,v are linear on a planar quad). **Trivial, exact.**

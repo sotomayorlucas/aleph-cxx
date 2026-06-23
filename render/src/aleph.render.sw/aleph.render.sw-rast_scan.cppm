@@ -17,10 +17,14 @@ export namespace aleph::render::sw {
 
 namespace detail {
 
+// Texel decode: true sRGB EOTF per channel (a 256-entry LUT read — exact and
+// hot-loop cheap). The inverse of byte_from_linear's OETF, so texture bytes
+// and bake-encoded lightmap bytes round-trip exactly through the present.
 inline aleph::math::Vec3 argb_to_linear(aleph::math::u32 argb) noexcept {
-    const aleph::math::f32 r = static_cast<aleph::math::f32>((argb >> 16) & 0xFFu) / 255.0f;
-    const aleph::math::f32 g = static_cast<aleph::math::f32>((argb >>  8) & 0xFFu) / 255.0f;
-    const aleph::math::f32 b = static_cast<aleph::math::f32>( argb        & 0xFFu) / 255.0f;
+    using aleph::render::common::srgb_decode_byte;
+    const aleph::math::f32 r = srgb_decode_byte(static_cast<std::uint8_t>((argb >> 16) & 0xFFu));
+    const aleph::math::f32 g = srgb_decode_byte(static_cast<std::uint8_t>((argb >>  8) & 0xFFu));
+    const aleph::math::f32 b = srgb_decode_byte(static_cast<std::uint8_t>( argb        & 0xFFu));
     return aleph::math::Vec3{r, g, b};
 }
 
@@ -32,10 +36,18 @@ inline void rast_scan_textured(aleph::render::common::Film& fb,
                                 ScreenVert v0, ScreenVert v1, ScreenVert v2,
                                 TexSampleFn tex,
                                 const Lightmap* lm,
+                                bool two_sided,
                                 int y_clip_min, int y_clip_max) noexcept {
     const aleph::math::f32 signed_area =
         (v1.x - v0.x) * (v2.y - v0.y) - (v1.y - v0.y) * (v2.x - v0.x);
-    if (signed_area < 0.0f) return;
+    if (signed_area < 0.0f) {
+        if (!two_sided) return;  // one-sided: back-face cull (CW-front winding)
+        // Two-sided back face: re-wind to CW BEFORE any gradient/edge setup.
+        // uv/colour/inv_w ride inside ScreenVert, so the swap carries them; the
+        // swapped triangle's signed area is exactly -signed_area > 0 (nothing
+        // below reads signed_area, so no recompute is needed).
+        std::swap(v1, v2);
+    }
 
     if (v0.y > v1.y) std::swap(v0, v1);
     if (v1.y > v2.y) std::swap(v1, v2);

@@ -13,9 +13,11 @@ inline std::uint32_t add_floor(SceneRT& s, aleph::math::Vec3 c,
                                 aleph::math::f32 size, TexSampleFn tex) noexcept {
     const aleph::math::f32 h = size * 0.5f;
     Face f{};
-    // Vertices wound CW from above so rast_scan back-face cull passes
+    // Vertices wound CW from above so rast_scan treats above as the FRONT side
     // (rasterize splits as tris {0,1,2} and {0,2,3}; positive screen-area
-    //  requires CW order when viewed through the camera).
+    //  requires CW order when viewed through the camera). These primitives are
+    //  one-sided (two_sided defaults false), so the back face is still culled;
+    //  faces flagged two_sided render from both sides instead.
     f.verts = {
         aleph::math::Vec3{c.x - h, c.y, c.z - h},
         aleph::math::Vec3{c.x + h, c.y, c.z - h},
