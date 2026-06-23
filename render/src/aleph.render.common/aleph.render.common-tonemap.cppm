@@ -15,6 +15,8 @@ namespace detail {
 
 // Exact sRGB EOTF (decode) evaluated in double — the single source of truth
 // for BOTH lookup tables below, so encode/decode are inverses by construction.
+// IEC 61966-2-1 sRGB EOTF (constants 0.04045, 12.92, 0.055, 1.055, 2.4); the
+// OETF inverse (0.0031308 split) lives in byte_from_linear's table comment.
 inline double srgb_eotf(double e) noexcept {
     return (e <= 0.04045) ? e / 12.92 : std::pow((e + 0.055) / 1.055, 2.4);
 }
@@ -38,7 +40,8 @@ inline aleph::math::f32 srgb_decode_byte(std::uint8_t b) noexcept {
 }
 
 // sRGB OETF (encode) quantized round-to-nearest: round(srgb_oetf(x)·255) with
-// oetf(x) = x<=0.0031308 ? 12.92·x : 1.055·x^(1/2.4)−0.055. A libm pow per
+// oetf(x) = x<=0.0031308 ? 12.92·x : 1.055·x^(1/2.4)−0.055 (IEC 61966-2-1 sRGB
+// OETF). A libm pow per
 // channel per pixel (~1.4M calls per 800x600 present) is needless present-loop
 // cost, so instead: 255 linear THRESHOLDS t[i] = srgb_eotf((i+0.5)/255) — the
 // exact decision boundaries of that quantizer (x encodes to byte i iff
@@ -55,6 +58,9 @@ inline std::uint8_t byte_from_linear(aleph::math::f32 x) noexcept {
                 detail::srgb_eotf((static_cast<double>(i) + 0.5) / 255.0));
         return t;
     }();
+    // NaN shading inputs clamp to black, not white (std::clamp/upper_bound would
+    // otherwise let a NaN fall through to byte 255 silently).
+    if (std::isnan(x)) return 0u;
     const aleph::math::f32 clamped = std::clamp(x, 0.0f, 1.0f);
     const auto it =
         std::upper_bound(thresholds.begin(), thresholds.end(), clamped);

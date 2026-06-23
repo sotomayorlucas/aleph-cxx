@@ -1,3 +1,4 @@
+#include <cmath>
 #include "doctest.h"
 #include <vector>
 #include <algorithm>
@@ -33,18 +34,37 @@ TEST_CASE("rast_scan_textured: writes some pixels for a centered triangle") {
 
 namespace {
 
+// A position-independent white texel. The back-face test mirrors the image
+// top/bottom (eye above vs below), but tex_floor samples a v-asymmetric pattern
+// (tex(u,v) != tex(u,1-v)), so it would break a byte-exact mirror even with
+// perfect geometry. A flat texel isolates the per-vertex Gouraud interpolation
+// — the actual thing the v1/v2 swap must carry — from texture sampling.
+aleph::math::u32 tex_flat(aleph::math::f32, aleph::math::f32) noexcept {
+    return 0xFFFFFFFFu;
+}
+
 // A single floor quad at y=0, wound CW seen from ABOVE (the engine's front
-// side), with no lightmap. `two_sided` is the flag under test.
-SceneRT make_floor_face(bool two_sided) {
+// side), with no lightmap. `two_sided` is the flag under test. When
+// `gradient` is set, the four corners carry a non-trivial per-vertex Gouraud
+// tint so the interior is an interpolated colour (not a flat fill) — this is
+// what the back-face test asserts is carried correctly through the v1/v2 swap —
+// and the texture is switched to the flat texel so only the vcol gradient
+// drives the interior colour.
+SceneRT make_floor_face(bool two_sided, bool gradient = false) {
     SceneRT sr;
     Face f{};
     f.verts = {aleph::math::Vec3{-2, 0, -2}, aleph::math::Vec3{2, 0, -2},
                aleph::math::Vec3{2, 0, 2},   aleph::math::Vec3{-2, 0, 2}};
     f.uvs   = {aleph::math::Vec2{0, 0}, aleph::math::Vec2{1, 0},
                aleph::math::Vec2{1, 1}, aleph::math::Vec2{0, 1}};
-    f.tex = tex_floor;
+    f.tex = gradient ? tex_flat : tex_floor;
     f.lightmap_id = 0xFFFFFFFFu;
     f.two_sided = two_sided;
+    if (gradient)
+        f.vcol = {aleph::math::Vec3{0.20f, 0.30f, 0.40f},
+                  aleph::math::Vec3{0.90f, 0.30f, 0.40f},
+                  aleph::math::Vec3{0.90f, 0.80f, 0.40f},
+                  aleph::math::Vec3{0.20f, 0.80f, 0.40f}};
     sr.faces.push_back(f);
     return sr;
 }
@@ -87,6 +107,48 @@ TEST_CASE("rasterize: two_sided quad seen from the BACK covers pixels + writes d
     aleph::math::f32 max_depth = 0.0f;
     for (const aleph::math::f32 d : depth) max_depth = std::max(max_depth, d);
     CHECK(max_depth > 0.0f);  // covered pixels must also land in the z-buffer
+}
+
+TEST_CASE("rasterize: two_sided BACK face interpolates attributes like the FRONT") {
+    // Coverage + depth (above) don't prove the v1/v2 re-wind carried the
+    // per-vertex uv/colour through to interpolation — a swap that dropped them
+    // would still cover pixels. So render the SAME gradient quad (flat texel, so
+    // only the vcol gradient drives the interior) from the front and the back.
+    // The back eye is the front eye reflected across the quad's y=0 plane with
+    // the same up vector, so the back image is the front image mirrored
+    // vertically: back(x, y) == front(x, kH-1-y). At an interior pixel the
+    // interpolated colour must agree — to a tolerance, NOT bit-exactly: the
+    // perspective gradients sum the same floats in a different order after the
+    // swap, so front/back differ by ~1 ulp (~1e-7). A dropped or mis-wound
+    // attribute would diverge by O(0.1+), far above the tolerance.
+    alignas(64) static unsigned char fbuf_f[kW * kH * sizeof(aleph::math::Vec3)];
+    alignas(64) static unsigned char fbuf_b[kW * kH * sizeof(aleph::math::Vec3)];
+    aleph::alloc::Arena arena_f{fbuf_f, sizeof(fbuf_f)};
+    aleph::alloc::Arena arena_b{fbuf_b, sizeof(fbuf_b)};
+    aleph::render::common::Film film_f = aleph::render::common::film_alloc(arena_f, kW, kH);
+    aleph::render::common::Film film_b = aleph::render::common::film_alloc(arena_b, kW, kH);
+    std::vector<aleph::math::f32> depth_f, depth_b;
+
+    render_scene(make_floor_face(/*two_sided=*/true, /*gradient=*/true),
+                 aleph::math::Vec3{0, 2, 5}, film_f, depth_f);   // eye ABOVE (front)
+    render_scene(make_floor_face(/*two_sided=*/true, /*gradient=*/true),
+                 aleph::math::Vec3{0, -2, 5}, film_b, depth_b);  // eye BELOW (back)
+
+    REQUIRE(film_f.pixels != nullptr);
+    REQUIRE(film_b.pixels != nullptr);
+
+    // px=16,py=15 is solidly in the quad interior (two rows clear of the top
+    // coverage edge, so the fill-rule asymmetry under the mirror can't reach it).
+    constexpr int px = 16, py = 15;
+    const aleph::math::Vec3 front = film_f.pixels[py * kW + px];
+    const aleph::math::Vec3 back  = film_b.pixels[(kH - 1 - py) * kW + px];
+    REQUIRE(!(front == aleph::math::Vec3{1, 0, 1}));  // interior, not background
+    // A genuine interpolation: not flat-equal to any single corner colour.
+    REQUIRE(!(front == aleph::math::Vec3{0.20f, 0.30f, 0.40f}));
+    constexpr aleph::math::f32 kEps = 1e-4f;
+    CHECK(std::fabs(back.x - front.x) < kEps);  // back-face interpolation tracks
+    CHECK(std::fabs(back.y - front.y) < kEps);  // the front face (per channel,
+    CHECK(std::fabs(back.z - front.z) < kEps);  // to a 1-ulp-scale tolerance)
 }
 
 TEST_CASE("rasterize: one-sided quad seen from the BACK is culled (zero coverage)") {

@@ -1,5 +1,7 @@
 #include "doctest.h"
 #include <cstdint>
+#include <cmath>
+#include <limits>
 import aleph.render.common;
 import aleph.math;
 
@@ -10,6 +12,12 @@ TEST_CASE("byte_from_linear: 0.0 → 0, 1.0 → 255") {
     CHECK(byte_from_linear(1.0f) == 255u);
     CHECK(byte_from_linear(0.25f) > 0u);
     CHECK(byte_from_linear(0.25f) < 255u);
+}
+
+// NaN shading inputs must clamp to black (0), not silently full-bright (255):
+// std::clamp/upper_bound would otherwise pass a NaN through to byte 255.
+TEST_CASE("byte_from_linear: NaN → 0 (black, not white)") {
+    CHECK(byte_from_linear(std::numeric_limits<aleph::math::f32>::quiet_NaN()) == 0u);
 }
 
 // THE key sRGB oracle: the OETF (encode) and EOTF (decode) are exact inverses
