@@ -35,6 +35,7 @@ add_executable(aleph_tests
     linalg/test_sparse.cpp
     linalg/test_bk_ldlt.cpp
     dpo/test_dpo.cpp
+    dpo/test_dpo_stress.cpp
     sheaf/test_simplex.cpp
     sheaf/test_union_find.cpp
     sheaf/test_skeleton.cpp
@@ -46,6 +47,7 @@ add_executable(aleph_tests
     sheaf/test_sheaf_spd.cpp
     sheaf/test_cochain.cpp
     sheaf/test_cohomology.cpp
+    sheaf/test_cohomology_invalid.cpp
     sheaf/test_connecting.cpp
     sheaf/test_dec.cpp
     sheaf/test_mayer_vietoris.cpp
@@ -59,9 +61,11 @@ add_executable(aleph_tests
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
+    threads/test_pool_stress.cpp
     io/test_mmap.cpp
     io/test_ppm.cpp
     io/test_obj.cpp
+    io/test_obj_malformed.cpp
     scene/test_handle32.cpp
     scene/test_sphere_soa.cpp
     scene/test_quad_tri_soa.cpp
@@ -95,6 +99,7 @@ add_executable(aleph_tests
     lowering/test_light_grouping.cpp
     lowering/test_groups_in_scene.cpp
     lowering/test_incremental.cpp
+    lowering/test_incremental_sequences.cpp
     lowering/test_importance.cpp
     edit/test_build_sw.cpp
     edit/test_controller.cpp

@@ -481,3 +481,23 @@ TEST_CASE("sparse solve matches dense solve on random SPD (5..15)") {
         }
     }
 }
+
+TEST_CASE("regression_ldlt_not_psd: negative pivot returns NotPsd") {
+    DMatrix m = DMatrix::zeros(2, 2);
+    m.at(0, 0) = 1.0;
+    m.at(1, 1) = -1.0;
+    const auto f = LDLT::factorize(m);
+    CHECK_FALSE(f.has_value());
+    REQUIRE(f.error().kind == LdltError::NotPsd);
+}
+
+TEST_CASE("regression_sparse_ldlt_near_singular: zero pivot accepted as kernel") {
+    DMatrix m = DMatrix::zeros(3, 3);
+    for (std::size_t i = 0; i < 3; ++i) m.at(i, i) = (i == 0) ? 1e-14 : 1.0;
+    const CsrMatrix csr = CsrMatrix::from_dense(m);
+    const auto f = SparseLdlt::factorize(csr);
+    REQUIRE(f.has_value());
+    const std::array<double, 3> b{1.0, 0.0, 0.0};
+    const auto x = f->solve(std::span<const double>(b));
+    REQUIRE(x.has_value());
+}

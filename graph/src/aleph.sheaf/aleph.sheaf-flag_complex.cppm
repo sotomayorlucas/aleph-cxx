@@ -224,6 +224,18 @@ export namespace aleph::sheaf {
     }
 
     for (const auto& clique : maximal) {
+        if (clique.size() >= 32) {
+            // Full subset enumeration is O(2^n) and hits the n<32 guard (assert
+            // stripped in release). Still materialise pairwise edges from the clique.
+            for (std::size_t i = 0; i < clique.size(); ++i) {
+                for (std::size_t j = i + 1; j < clique.size(); ++j) {
+                    std::vector<aleph::types::NodeId> pair{clique[i], clique[j]};
+                    while (by_dim.size() <= 1) by_dim.emplace_back();
+                    by_dim[1].push_back(make_simplex(std::move(pair)));
+                }
+            }
+            continue;
+        }
         for (auto& subset : detail::non_empty_subsets(clique)) {
             const std::size_t d = subset.size() - 1;
             while (by_dim.size() <= d) by_dim.emplace_back();

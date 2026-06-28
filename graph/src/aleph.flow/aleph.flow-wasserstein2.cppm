@@ -97,7 +97,9 @@ export namespace aleph::flow {
                                                const std::vector<std::vector<f64>>& cost_sq,
                                                f64 epsilon,
                                                size_t max_iter) {
-    assert(epsilon > 0.0 && "epsilon must be strictly positive");
+    if (epsilon <= 0.0) {
+        return std::numeric_limits<f64>::quiet_NaN();
+    }
     const size_t n = mu.size();
     assert(nu.size() == n && "mu and nu must have the same length");
     if (n == 0) {
