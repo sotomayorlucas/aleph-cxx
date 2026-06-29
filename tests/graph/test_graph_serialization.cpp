@@ -125,6 +125,28 @@ TEST_CASE("graph serialization: rejects missing header") {
     CHECK(loaded.error() == aleph::graph::SerializationError::InvalidHeader);
 }
 
+TEST_CASE("graph serialization: rejects repeated header") {
+    std::string text = minimal_graph_text();
+    const std::size_t pos = text.find("node 0 transform");
+    REQUIRE(pos != kStringNpos);
+    text.insert(pos, "aleph-graph/1\n");
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(loaded.error() == aleph::graph::SerializationError::InvalidHeader);
+}
+
+TEST_CASE("graph serialization: rejects missing root declaration") {
+    std::string text = minimal_graph_text();
+    const std::size_t pos = text.find("root 0\n");
+    REQUIRE(pos != kStringNpos);
+    text.erase(pos, std::string{"root 0\n"}.size());
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(loaded.error() == aleph::graph::SerializationError::InvalidHeader);
+}
+
 TEST_CASE("graph serialization: rejects duplicate node id without abort") {
     const std::string text = std::string{"aleph-graph/1\n"}
         + "root 0\n"
@@ -159,6 +181,56 @@ TEST_CASE("graph serialization: rejects numeric token with trailing garbage") {
     auto loaded = aleph::graph::load_graph_string(text);
     REQUIRE_FALSE(loaded.has_value());
     CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
+}
+
+TEST_CASE("graph serialization: rejects invalid numeric tokens") {
+    struct BadNumericCase {
+        const char* name;
+        std::string text;
+    };
+
+    std::vector<BadNumericCase> cases;
+    {
+        std::string text = minimal_graph_text();
+        const std::string good = "node 0 transform 0 ";
+        const std::size_t pos = text.find(good);
+        REQUIRE(pos != kStringNpos);
+        text.replace(pos, good.size(), "node 0 transform -1 ");
+        cases.push_back({"negative u32", text});
+    }
+    {
+        std::string text = minimal_graph_text();
+        const std::string good = "node 0 transform 0 ";
+        const std::size_t pos = text.find(good);
+        REQUIRE(pos != kStringNpos);
+        text.replace(pos, good.size(), "node 0 transform 4294967296 ");
+        cases.push_back({"overflowing u32", text});
+    }
+    {
+        std::string text = minimal_graph_text();
+        const std::string good = "node 1 camera sensor0 0 1 5 0 0 0 0 1 0 45 0 1";
+        const std::string bad = "node 1 camera sensor0 0 1 nan 0 0 0 0 1 0 45 0 1";
+        const std::size_t pos = text.find(good);
+        REQUIRE(pos != kStringNpos);
+        text.replace(pos, good.size(), bad);
+        cases.push_back({"nan float", text});
+    }
+    {
+        std::string text = minimal_graph_text();
+        const std::string good = "node 1 camera sensor0 0 1 5 0 0 0 0 1 0 45 0 1";
+        const std::string bad = "node 1 camera sensor0 0 1 inf 0 0 0 0 1 0 45 0 1";
+        const std::size_t pos = text.find(good);
+        REQUIRE(pos != kStringNpos);
+        text.replace(pos, good.size(), bad);
+        cases.push_back({"inf float", text});
+    }
+
+    for (const BadNumericCase& c : cases) {
+        INFO(c.name);
+        auto loaded = aleph::graph::load_graph_string(c.text);
+        REQUIRE_FALSE(loaded.has_value());
+        CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
+    }
 }
 
 TEST_CASE("graph serialization: rejects quoted token without delimiter") {
@@ -222,6 +294,18 @@ TEST_CASE("graph serialization: rejects trailing fields on a valid node line") {
     CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
 }
 
+TEST_CASE("graph serialization: rejects trailing fields on edge line") {
+    std::string text = minimal_graph_text();
+    const std::string good = "edge contains 0 1\n";
+    const std::size_t pos = text.find(good);
+    REQUIRE(pos != kStringNpos);
+    text.replace(pos, good.size(), "edge contains 0 1 extra\n");
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
+}
+
 TEST_CASE("graph serialization: rejects duplicate root declaration") {
     std::string text = minimal_graph_text();
     const std::size_t pos = text.find("node 0 transform");
@@ -260,6 +344,25 @@ TEST_CASE("graph serialization: rejects incompatible edge kind") {
     auto loaded = aleph::graph::load_graph_string(text);
     REQUIRE_FALSE(loaded.has_value());
     CHECK(loaded.error() == aleph::graph::SerializationError::InvalidEdge);
+}
+
+TEST_CASE("graph serialization: accepts tab-separated fields") {
+    std::string identity = kIdentity;
+    for (char& c : identity) {
+        if (c == ' ') c = '\t';
+    }
+
+    const std::string text = std::string{"aleph-graph/1\n"}
+        + "root\t0\n"
+        + "node\t0\ttransform\t0\t" + identity + "\n"
+        + "node\t1\tcamera\tsensor0\t0\t1\t5\t0\t0\t0\t0\t1\t0\t45\t0\t1\n"
+        + "edge\tcontains\t0\t1\n";
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->root == NodeId{0});
+    CHECK(loaded->graph.node_count() == 2);
+    CHECK(edge_set(loaded->graph).count(EdgeKey{EdgeKind::Contains, NodeId{0}, NodeId{1}}) == 1);
 }
 
 TEST_CASE("graph serialization: allocator advances past largest loaded node id") {
