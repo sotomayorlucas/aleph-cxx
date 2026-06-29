@@ -1,9 +1,12 @@
 module;
+#include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <expected>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -38,6 +41,13 @@ struct LoadedGraph {
 
 namespace detail {
 
+[[nodiscard]] inline bool rest_is_blank(std::string_view line) noexcept {
+    for (char c : line) {
+        if (c != ' ' && c != '\t') return false;
+    }
+    return true;
+}
+
 inline void append_f32(std::string& out, aleph::math::f32 v) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%.9g", static_cast<double>(v));
@@ -58,7 +68,11 @@ inline void append_mat4(std::string& out, const aleph::math::Mat4& m) {
 }
 
 inline void append_string(std::string& out, std::string_view s) {
-    if (s.find(' ') == std::string_view::npos && s.find('"') == std::string_view::npos) {
+    if (!s.empty()
+        && s.find(' ') == std::string_view::npos
+        && s.find('\t') == std::string_view::npos
+        && s.find('"') == std::string_view::npos
+        && s.find('\\') == std::string_view::npos) {
         out += s;
         return;
     }
@@ -72,25 +86,34 @@ inline void append_string(std::string& out, std::string_view s) {
 }
 
 [[nodiscard]] inline bool parse_f32(std::string_view tok, aleph::math::f32& out) {
+    if (tok.empty()) return false;
     char buf[64];
     if (tok.size() >= sizeof(buf)) return false;
     std::memcpy(buf, tok.data(), tok.size());
     buf[tok.size()] = '\0';
+    errno = 0;
     char* end = nullptr;
     const double v = std::strtod(buf, &end);
-    if (end == buf) return false;
+    if (end != buf + tok.size()) return false;
+    if (errno == ERANGE || !std::isfinite(v)) return false;
     out = static_cast<aleph::math::f32>(v);
-    return true;
+    return std::isfinite(out);
 }
 
 [[nodiscard]] inline bool parse_u32(std::string_view tok, std::uint32_t& out) {
+    if (tok.empty()) return false;
+    if (tok.front() == '-') return false;
     char buf[32];
     if (tok.size() >= sizeof(buf)) return false;
     std::memcpy(buf, tok.data(), tok.size());
     buf[tok.size()] = '\0';
+    errno = 0;
     char* end = nullptr;
     const unsigned long v = std::strtoul(buf, &end, 10);
-    if (end == buf) return false;
+    if (end != buf + tok.size()) return false;
+    if (errno == ERANGE || v > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
     out = static_cast<std::uint32_t>(v);
     return true;
 }
@@ -103,7 +126,9 @@ inline void append_string(std::string& out, std::string_view s) {
 }
 
 [[nodiscard]] inline std::string_view next_token(std::string_view& line) {
-    while (!line.empty() && line.front() == ' ') line.remove_prefix(1);
+    while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
+        line.remove_prefix(1);
+    }
     if (line.empty()) return {};
     if (line.front() == '"') {
         line.remove_prefix(1);
@@ -119,9 +144,10 @@ inline void append_string(std::string& out, std::string_view s) {
         line = rest.substr(i + 1);
         return tok;
     }
-    const std::size_t sp = line.find(' ');
-    const std::string_view tok = (sp == std::string_view::npos) ? line : line.substr(0, sp);
-    line = (sp == std::string_view::npos) ? std::string_view{} : line.substr(sp + 1);
+    std::size_t sp = 0;
+    while (sp < line.size() && line[sp] != ' ' && line[sp] != '\t') ++sp;
+    const std::string_view tok = line.substr(0, sp);
+    line = (sp == line.size()) ? std::string_view{} : line.substr(sp + 1);
     return tok;
 }
 
@@ -347,6 +373,7 @@ parse_node_line(std::string_view line) {
         if (!parse_geometry(rest, m.geometry)) {
             return std::unexpected(SerializationError::ParseError);
         }
+        if (!rest_is_blank(rest)) return std::unexpected(SerializationError::ParseError);
         return aleph::types::Node{std::move(m)};
     }
     if (kind_tok == "material") {
@@ -360,6 +387,7 @@ parse_node_line(std::string_view line) {
         if (!parse_f32(next_token(rest), mat.ior)) return std::unexpected(SerializationError::ParseError);
         if (!parse_vec3(rest, mat.emit)) return std::unexpected(SerializationError::ParseError);
         if (!parse_f32(next_token(rest), mat.uv_scale)) return std::unexpected(SerializationError::ParseError);
+        if (!rest_is_blank(rest)) return std::unexpected(SerializationError::ParseError);
         return aleph::types::Node{std::move(mat)};
     }
     if (kind_tok == "light") {
@@ -371,6 +399,7 @@ parse_node_line(std::string_view line) {
         l.emit_ref = unescape(next_token(rest));
         if (!parse_vec3(rest, l.emission)) return std::unexpected(SerializationError::ParseError);
         if (!parse_geometry(rest, l.geometry)) return std::unexpected(SerializationError::ParseError);
+        if (!rest_is_blank(rest)) return std::unexpected(SerializationError::ParseError);
         return aleph::types::Node{std::move(l)};
     }
     if (kind_tok == "volume") {
@@ -379,6 +408,7 @@ parse_node_line(std::string_view line) {
         const auto kind = parse_medium_kind(next_token(rest));
         if (!kind.has_value()) return std::unexpected(SerializationError::ParseError);
         v.medium = *kind;
+        if (!rest_is_blank(rest)) return std::unexpected(SerializationError::ParseError);
         return aleph::types::Node{std::move(v)};
     }
     if (kind_tok == "camera") {
@@ -391,6 +421,7 @@ parse_node_line(std::string_view line) {
         if (!parse_f32(next_token(rest), c.vfov_deg)) return std::unexpected(SerializationError::ParseError);
         if (!parse_f32(next_token(rest), c.aperture)) return std::unexpected(SerializationError::ParseError);
         if (!parse_f32(next_token(rest), c.focus_dist)) return std::unexpected(SerializationError::ParseError);
+        if (!rest_is_blank(rest)) return std::unexpected(SerializationError::ParseError);
         return aleph::types::Node{std::move(c)};
     }
     if (kind_tok == "texture") {
@@ -401,6 +432,7 @@ parse_node_line(std::string_view line) {
         const auto fmt = parse_texture_format(next_token(rest));
         if (!fmt.has_value()) return std::unexpected(SerializationError::ParseError);
         t.format = *fmt;
+        if (!rest_is_blank(rest)) return std::unexpected(SerializationError::ParseError);
         return aleph::types::Node{std::move(t)};
     }
     if (kind_tok == "transform") {
@@ -410,6 +442,7 @@ parse_node_line(std::string_view line) {
             return std::unexpected(SerializationError::ParseError);
         }
         if (!parse_mat4(rest, xf.local.m)) return std::unexpected(SerializationError::ParseError);
+        if (!rest_is_blank(rest)) return std::unexpected(SerializationError::ParseError);
         return aleph::types::Node{std::move(xf)};
     }
     return std::unexpected(SerializationError::InvalidNode);
@@ -443,7 +476,10 @@ save_graph_string(const Graph& g, aleph::types::NodeId root) {
 load_graph_string(std::string_view text) {
     LoadedGraph loaded{};
     aleph::types::NodeId root{};
+    bool have_header = false;
     bool have_root = false;
+    bool have_nodes = false;
+    std::uint32_t max_node_id = 0;
     std::vector<detail::PendingEdge> pending_edges;
 
     std::size_t pos = 0;
@@ -453,12 +489,25 @@ load_graph_string(std::string_view text) {
         std::string_view line = text.substr(pos, end - pos);
         pos = (end < text.size()) ? end + 1 : end;
 
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+        while (!line.empty() && (line.front() == ' ' || line.front() == '\t')) {
+            line.remove_prefix(1);
+        }
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) {
             line.remove_suffix(1);
         }
         if (line.empty() || line.front() == '#') continue;
 
-        if (line == "aleph-graph/1") continue;
+        if (!have_header) {
+            if (line != "aleph-graph/1") {
+                return std::unexpected(SerializationError::InvalidHeader);
+            }
+            have_header = true;
+            continue;
+        }
+
+        if (line == "aleph-graph/1") {
+            return std::unexpected(SerializationError::InvalidHeader);
+        }
 
         std::string_view rest = line;
         const std::string_view tag = detail::next_token(rest);
@@ -466,38 +515,51 @@ load_graph_string(std::string_view text) {
             if (!detail::parse_node_id(detail::next_token(rest), root)) {
                 return std::unexpected(SerializationError::ParseError);
             }
+            if (!detail::rest_is_blank(rest)) return std::unexpected(SerializationError::ParseError);
             have_root = true;
             continue;
         }
         if (tag == "node") {
             auto node = detail::parse_node_line(line);
             if (!node.has_value()) return std::unexpected(node.error());
-            loaded.graph.insert_node(std::move(*node));
+            const aleph::types::NodeId id = aleph::types::id_of(*node);
+            auto inserted = loaded.graph.try_insert_node(std::move(*node));
+            if (!inserted.has_value()) {
+                return std::unexpected(SerializationError::InvalidNode);
+            }
+            if (!have_nodes || id.value > max_node_id) {
+                max_node_id = id.value;
+                have_nodes = true;
+            }
             continue;
         }
         if (tag == "edge") {
             detail::PendingEdge pe{};
             const auto kind = detail::parse_edge_kind(detail::next_token(rest));
-            if (!kind.has_value()) return std::unexpected(SerializationError::ParseError);
+            if (!kind.has_value()) return std::unexpected(SerializationError::InvalidEdge);
             pe.kind = *kind;
             if (!detail::parse_node_id(detail::next_token(rest), pe.src)) {
-                return std::unexpected(SerializationError::ParseError);
+                return std::unexpected(SerializationError::InvalidEdge);
             }
             if (!detail::parse_node_id(detail::next_token(rest), pe.dst)) {
-                return std::unexpected(SerializationError::ParseError);
+                return std::unexpected(SerializationError::InvalidEdge);
             }
+            if (!detail::rest_is_blank(rest)) return std::unexpected(SerializationError::ParseError);
             pending_edges.push_back(pe);
             continue;
         }
-        return std::unexpected(SerializationError::InvalidHeader);
+        return std::unexpected(SerializationError::ParseError);
     }
 
+    if (!have_header) return std::unexpected(SerializationError::InvalidHeader);
     if (!have_root) return std::unexpected(SerializationError::InvalidHeader);
     if (loaded.graph.node(root) == nullptr) {
         return std::unexpected(SerializationError::ParseError);
     }
 
-    loaded.graph.sync_node_allocator();
+    if (have_nodes && max_node_id != std::numeric_limits<std::uint32_t>::max()) {
+        loaded.graph.sync_node_allocator_to_at_least(max_node_id + 1);
+    }
 
     for (const detail::PendingEdge& pe : pending_edges) {
         auto eid = loaded.graph.add_edge(pe.kind, pe.src, pe.dst);

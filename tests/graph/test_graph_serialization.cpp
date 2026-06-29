@@ -161,6 +161,19 @@ TEST_CASE("graph serialization: rejects trailing fields on a valid line") {
     CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
 }
 
+TEST_CASE("graph serialization: rejects trailing fields on a valid node line") {
+    std::string text = minimal_graph_text();
+    const std::string good = "node 1 camera sensor0 0 1 5 0 0 0 0 1 0 45 0 1";
+    const std::string bad = good + " extra";
+    const std::size_t pos = text.find(good);
+    REQUIRE(pos != kStringNpos);
+    text.replace(pos, good.size(), bad);
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
+}
+
 TEST_CASE("graph serialization: rejects missing root node") {
     std::string text = minimal_graph_text();
     const std::size_t pos = text.find("root 0\n");
