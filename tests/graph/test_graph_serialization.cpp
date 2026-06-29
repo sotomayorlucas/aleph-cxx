@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <set>
 #include <string>
+#include <variant>
 #include <vector>
 
 import aleph.graph;
@@ -36,6 +37,18 @@ std::set<EdgeKey> edge_set(const Graph& g) {
         out.insert(EdgeKey{e.kind, e.src, e.dst});
     }
     return out;
+}
+
+const Node& require_node(const Graph& g, NodeId id) {
+    const Node* n = g.node(id);
+    REQUIRE(n != nullptr);
+    return *n;
+}
+
+void check_vec3(aleph::math::Vec3 actual, aleph::math::Vec3 expected) {
+    CHECK(actual.x == doctest::Approx(expected.x));
+    CHECK(actual.y == doctest::Approx(expected.y));
+    CHECK(actual.z == doctest::Approx(expected.z));
 }
 
 Graph make_sample() {
@@ -102,6 +115,152 @@ TEST_CASE("graph serialization: round-trip preserves topology") {
     REQUIRE(loaded.has_value());
     CHECK(loaded->root == root);
     CHECK(same_topology(original, loaded->graph));
+}
+
+TEST_CASE("graph serialization: round-trip preserves node payloads") {
+    Graph original;
+    const NodeId root = original.alloc_node_id();
+    aleph::math::Mat4 root_xf = aleph::math::Mat4::identity();
+    root_xf.m[12] = 2.0f;
+    root_xf.m[13] = 3.0f;
+    root_xf.m[14] = 4.0f;
+    original.insert_node(Transform{root, 7, LocalTransform{root_xf}});
+
+    const NodeId cam = original.alloc_node_id();
+    Camera camera{cam, std::string("sensor wide\tmain")};
+    camera.look_from  = aleph::math::Vec3{1.0f, 2.0f, 3.0f};
+    camera.look_at    = aleph::math::Vec3{4.0f, 5.0f, 6.0f};
+    camera.up         = aleph::math::Vec3{0.0f, 1.0f, 0.0f};
+    camera.vfov_deg   = 55.0f;
+    camera.aperture   = 0.25f;
+    camera.focus_dist = 9.5f;
+    original.insert_node(std::move(camera));
+
+    const NodeId mesh_id = original.alloc_node_id();
+    Mesh mesh{mesh_id, std::string("tri mesh\tasset"), 1};
+    TriLocal tri{};
+    tri.a = aleph::math::Vec3{0.0f, 0.0f, 0.0f};
+    tri.b = aleph::math::Vec3{1.0f, 0.0f, 0.0f};
+    tri.c = aleph::math::Vec3{0.0f, 1.0f, 0.0f};
+    mesh.geometry = tri;
+    original.insert_node(std::move(mesh));
+
+    const NodeId mat_id = original.alloc_node_id();
+    Material material{mat_id, MaterialKind::TexturedLambertian};
+    material.albedo   = aleph::math::Vec3{0.1f, 0.2f, 0.3f};
+    material.fuzz     = 0.4f;
+    material.ior      = 1.45f;
+    material.emit     = aleph::math::Vec3{0.5f, 0.6f, 0.7f};
+    material.uv_scale = 12.0f;
+    original.insert_node(material);
+
+    const NodeId tex_id = original.alloc_node_id();
+    original.insert_node(Texture{tex_id, 320, 200, TextureFormat::Rgb8});
+
+    const NodeId light_id = original.alloc_node_id();
+    Light light{light_id, LightKind::Directional, std::string("emit \"key\" \\bank")};
+    light.emission = aleph::math::Vec3{10.0f, 11.0f, 12.0f};
+    QuadLocal quad{};
+    quad.q = aleph::math::Vec3{-1.0f, 0.0f, 0.0f};
+    quad.u = aleph::math::Vec3{2.0f, 0.0f, 0.0f};
+    quad.v = aleph::math::Vec3{0.0f, 2.0f, 0.0f};
+    light.geometry = quad;
+    original.insert_node(std::move(light));
+
+    REQUIRE(original.add_edge(EdgeKind::Contains, root, cam).has_value());
+    REQUIRE(original.add_edge(EdgeKind::Contains, root, mesh_id).has_value());
+    REQUIRE(original.add_edge(EdgeKind::Contains, root, light_id).has_value());
+    REQUIRE(original.add_edge(EdgeKind::References, mesh_id, mat_id).has_value());
+    REQUIRE(original.add_edge(EdgeKind::References, mat_id, tex_id).has_value());
+
+    const std::string saved = aleph::graph::save_graph_string(original, root);
+    auto loaded = aleph::graph::load_graph_string(saved);
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->root == root);
+    CHECK(loaded->graph.node_count() == 6);
+    CHECK(loaded->graph.edge_count() == 5);
+    CHECK(edge_set(loaded->graph) == edge_set(original));
+
+    const auto* loaded_root = std::get_if<Transform>(&require_node(loaded->graph, root));
+    REQUIRE(loaded_root != nullptr);
+    CHECK(loaded_root->pose_slot == 7);
+    CHECK(loaded_root->local.m.m[12] == doctest::Approx(2.0f));
+    CHECK(loaded_root->local.m.m[13] == doctest::Approx(3.0f));
+    CHECK(loaded_root->local.m.m[14] == doctest::Approx(4.0f));
+
+    const auto* loaded_camera = std::get_if<Camera>(&require_node(loaded->graph, cam));
+    REQUIRE(loaded_camera != nullptr);
+    CHECK(loaded_camera->sensor_id == "sensor wide\tmain");
+    check_vec3(loaded_camera->look_from, aleph::math::Vec3{1.0f, 2.0f, 3.0f});
+    check_vec3(loaded_camera->look_at, aleph::math::Vec3{4.0f, 5.0f, 6.0f});
+    check_vec3(loaded_camera->up, aleph::math::Vec3{0.0f, 1.0f, 0.0f});
+    CHECK(loaded_camera->vfov_deg == doctest::Approx(55.0f));
+    CHECK(loaded_camera->aperture == doctest::Approx(0.25f));
+    CHECK(loaded_camera->focus_dist == doctest::Approx(9.5f));
+
+    const auto* loaded_mesh = std::get_if<Mesh>(&require_node(loaded->graph, mesh_id));
+    REQUIRE(loaded_mesh != nullptr);
+    CHECK(loaded_mesh->geometry_ref == "tri mesh\tasset");
+    CHECK(loaded_mesh->tris_count == 1);
+    const auto* loaded_tri = std::get_if<TriLocal>(&loaded_mesh->geometry);
+    REQUIRE(loaded_tri != nullptr);
+    check_vec3(loaded_tri->a, aleph::math::Vec3{0.0f, 0.0f, 0.0f});
+    check_vec3(loaded_tri->b, aleph::math::Vec3{1.0f, 0.0f, 0.0f});
+    check_vec3(loaded_tri->c, aleph::math::Vec3{0.0f, 1.0f, 0.0f});
+
+    const auto* loaded_material = std::get_if<Material>(&require_node(loaded->graph, mat_id));
+    REQUIRE(loaded_material != nullptr);
+    CHECK(loaded_material->kind == MaterialKind::TexturedLambertian);
+    check_vec3(loaded_material->albedo, aleph::math::Vec3{0.1f, 0.2f, 0.3f});
+    CHECK(loaded_material->fuzz == doctest::Approx(0.4f));
+    CHECK(loaded_material->ior == doctest::Approx(1.45f));
+    check_vec3(loaded_material->emit, aleph::math::Vec3{0.5f, 0.6f, 0.7f});
+    CHECK(loaded_material->uv_scale == doctest::Approx(12.0f));
+
+    const auto* loaded_texture = std::get_if<Texture>(&require_node(loaded->graph, tex_id));
+    REQUIRE(loaded_texture != nullptr);
+    CHECK(loaded_texture->width == 320);
+    CHECK(loaded_texture->height == 200);
+    CHECK(loaded_texture->format == TextureFormat::Rgb8);
+
+    const auto* loaded_light = std::get_if<Light>(&require_node(loaded->graph, light_id));
+    REQUIRE(loaded_light != nullptr);
+    CHECK(loaded_light->kind == LightKind::Directional);
+    CHECK(loaded_light->emit_ref == "emit \"key\" \\bank");
+    check_vec3(loaded_light->emission, aleph::math::Vec3{10.0f, 11.0f, 12.0f});
+    const auto* loaded_quad = std::get_if<QuadLocal>(&loaded_light->geometry);
+    REQUIRE(loaded_quad != nullptr);
+    check_vec3(loaded_quad->q, aleph::math::Vec3{-1.0f, 0.0f, 0.0f});
+    check_vec3(loaded_quad->u, aleph::math::Vec3{2.0f, 0.0f, 0.0f});
+    check_vec3(loaded_quad->v, aleph::math::Vec3{0.0f, 2.0f, 0.0f});
+}
+
+TEST_CASE("graph serialization: round-trip preserves empty strings") {
+    Graph original;
+    const NodeId root = original.alloc_node_id();
+    original.insert_node(Transform{root, 0, LocalTransform{aleph::math::Mat4::identity()}});
+
+    const NodeId cam = original.alloc_node_id();
+    Camera camera{cam, std::string{}};
+    original.insert_node(std::move(camera));
+
+    const NodeId light_id = original.alloc_node_id();
+    Light light{light_id, LightKind::Directional, std::string{}};
+    original.insert_node(std::move(light));
+
+    REQUIRE(original.add_edge(EdgeKind::Contains, root, cam).has_value());
+    REQUIRE(original.add_edge(EdgeKind::Contains, root, light_id).has_value());
+
+    auto loaded = aleph::graph::load_graph_string(aleph::graph::save_graph_string(original, root));
+    REQUIRE(loaded.has_value());
+
+    const auto* loaded_camera = std::get_if<Camera>(&require_node(loaded->graph, cam));
+    REQUIRE(loaded_camera != nullptr);
+    CHECK(loaded_camera->sensor_id.empty());
+
+    const auto* loaded_light = std::get_if<Light>(&require_node(loaded->graph, light_id));
+    REQUIRE(loaded_light != nullptr);
+    CHECK(loaded_light->emit_ref.empty());
 }
 
 TEST_CASE("graph serialization: file round-trip") {
