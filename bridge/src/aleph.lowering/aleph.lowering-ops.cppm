@@ -232,6 +232,7 @@ material_from(aleph::types::NodeId id, const MaterialParams& p) noexcept {
     m.fuzz   = p.fuzz;
     m.ior    = p.ior;
     m.emit   = p.emit;
+    m.uv_scale = p.uv_scale;
     return m;
 }
 

@@ -180,6 +180,7 @@ TEST_CASE("lowering: AddObject grows entity count by one; survivors stable") {
     new_mat.fuzz   = 0.15f;
     new_mat.ior    = 1.5f;
     new_mat.emit   = Vec3{0, 0, 0};  // NOT emissive -> must NOT join the light table.
+    new_mat.uv_scale = 9.0f;
 
     aleph::lowering::AddObject add{};
     add.parent   = s.root;
@@ -236,6 +237,7 @@ TEST_CASE("lowering: AddObject grows entity count by one; survivors stable") {
     CHECK(b.handle_map.contains(added->source));
     CHECK(added->material.kind == MaterialKind::Metal);
     CHECK(added->material.albedo == Vec3{0.2f, 0.4f, 0.9f});
+    CHECK(added->material.uv_scale == doctest::Approx(9.0f));
     REQUIRE(std::holds_alternative<SphereLocal>(added->world_geometry));
     // Wired under the identity root -> world geometry == the local geometry.
     CHECK(std::get<SphereLocal>(added->world_geometry).center == Vec3{3, 0, 0});
