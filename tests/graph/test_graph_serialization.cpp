@@ -185,6 +185,18 @@ TEST_CASE("graph serialization: rejects quoted token delimiter before following 
     CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
 }
 
+TEST_CASE("graph serialization: rejects unterminated quoted string") {
+    const std::string text = std::string{"aleph-graph/1\n"}
+        + "root 0\n"
+        + "node 0 transform 0 " + kIdentity + "\n"
+        + "node 1 camera \" 0 1 5 0 0 0 0 1 0 45 0 1\n"
+        + "edge contains 0 1\n";
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
+}
+
 TEST_CASE("graph serialization: rejects trailing fields on a valid line") {
     std::string text = minimal_graph_text();
     const std::string old_root = "root 0\n";

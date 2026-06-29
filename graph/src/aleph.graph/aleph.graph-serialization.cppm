@@ -139,7 +139,10 @@ inline void append_string(std::string& out, std::string_view s) {
             if (rest[i] == '"') break;
             ++i;
         }
-        if (i >= rest.size()) return {};
+        if (i >= rest.size()) {
+            line = std::string_view{"\1", 1};
+            return {};
+        }
         if (i + 1 < rest.size() && rest[i + 1] != ' ' && rest[i + 1] != '\t') {
             line = {};
             return {};
