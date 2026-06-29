@@ -1,5 +1,6 @@
 module;
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <expected>
 #include <utility>
@@ -15,6 +16,7 @@ enum class GraphError {
     NodeNotFound,
     EdgeNotFound,
     EdgeTypeMismatch,
+    DuplicateNode,
 };
 
 class Graph {
@@ -27,10 +29,16 @@ public:
     aleph::types::NodeId alloc_node_id() noexcept { return ids_.alloc_node(); }
     aleph::types::EdgeId alloc_edge_id() noexcept { return ids_.alloc_edge(); }
 
-    void insert_node(aleph::types::Node n) {
+    std::expected<void, GraphError> try_insert_node(aleph::types::Node n) {
         const aleph::types::NodeId id = aleph::types::id_of(n);
         const bool fresh = nodes_.insert(id, std::move(n));
-        if (!fresh) std::abort();
+        if (!fresh) return std::unexpected(GraphError::DuplicateNode);
+        return {};
+    }
+
+    void insert_node(aleph::types::Node n) {
+        auto r = try_insert_node(std::move(n));
+        if (!r.has_value()) std::abort();
     }
 
     const aleph::types::Node* node(aleph::types::NodeId id) const noexcept {
@@ -111,6 +119,27 @@ public:
         }
         out.ids_ = ids_;  // preserve watermarks so future ids don't collide
         return out;
+    }
+
+    void sync_node_allocator_to_at_least(std::uint32_t next) noexcept {
+        ids_.sync_node_to_at_least(next);
+    }
+
+    void sync_edge_allocator_to_at_least(std::uint32_t next) noexcept {
+        ids_.sync_edge_to_at_least(next);
+    }
+
+    void sync_node_allocator() noexcept {
+        std::uint32_t max_id = 0;
+        bool any = false;
+        for (auto [nid, node] : nodes_) {
+            (void)node;
+            any = true;
+            if (nid.value > max_id) max_id = nid.value;
+        }
+        if (any && max_id != UINT32_MAX) {
+            sync_node_allocator_to_at_least(max_id + 1);
+        }
     }
 
 protected:

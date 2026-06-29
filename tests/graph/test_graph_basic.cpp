@@ -61,3 +61,29 @@ TEST_CASE("Graph: remove_node_cascade removes node (edges in task 10)") {
     CHECK(g.node(a) == nullptr);
     CHECK(g.node(b) != nullptr);
 }
+
+TEST_CASE("Graph: try_insert_node rejects duplicate id without abort") {
+    Graph g;
+    const NodeId id = g.alloc_node_id();
+
+    auto first = g.try_insert_node(Mesh{id, std::string("cube"), 12});
+    REQUIRE(first.has_value());
+
+    auto second = g.try_insert_node(Material{id, MaterialKind::Lambertian});
+    REQUIRE_FALSE(second.has_value());
+    CHECK(second.error() == GraphError::DuplicateNode);
+    CHECK(g.node_count() == 1);
+    const Node* n = g.node(id);
+    REQUIRE(n != nullptr);
+    CHECK(kind_of(*n) == NodeKind::Mesh);
+}
+
+TEST_CASE("Graph: sync_node_allocator advances directly past loaded ids") {
+    Graph g;
+    g.sync_node_allocator_to_at_least(1024);
+    CHECK(g.alloc_node_id().value == 1024);
+    CHECK(g.alloc_node_id().value == 1025);
+
+    g.sync_node_allocator_to_at_least(12);
+    CHECK(g.alloc_node_id().value == 1026);
+}
