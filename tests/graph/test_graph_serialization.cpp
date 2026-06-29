@@ -45,7 +45,14 @@ const Node& require_node(const Graph& g, NodeId id) {
     return *n;
 }
 
-void check_vec3(aleph::math::Vec3 actual, aleph::math::Vec3 expected) {
+void check_vec3(aleph::math::Vec3 actual, aleph::math::Vec3 expected, const char* label = nullptr) {
+    if (label != nullptr) {
+        INFO(label);
+        CHECK(actual.x == doctest::Approx(expected.x));
+        CHECK(actual.y == doctest::Approx(expected.y));
+        CHECK(actual.z == doctest::Approx(expected.z));
+        return;
+    }
     CHECK(actual.x == doctest::Approx(expected.x));
     CHECK(actual.y == doctest::Approx(expected.y));
     CHECK(actual.z == doctest::Approx(expected.z));
@@ -145,6 +152,11 @@ TEST_CASE("graph serialization: round-trip preserves node payloads") {
     mesh.geometry = tri;
     original.insert_node(std::move(mesh));
 
+    const NodeId sphere_mesh_id = original.alloc_node_id();
+    Mesh sphere_mesh{sphere_mesh_id, std::string("sphere mesh\tasset"), 0};
+    sphere_mesh.geometry = SphereLocal{aleph::math::Vec3{-2.0f, 3.5f, 4.25f}, 6.75f};
+    original.insert_node(std::move(sphere_mesh));
+
     const NodeId mat_id = original.alloc_node_id();
     Material material{mat_id, MaterialKind::TexturedLambertian};
     material.albedo   = aleph::math::Vec3{0.1f, 0.2f, 0.3f};
@@ -153,6 +165,9 @@ TEST_CASE("graph serialization: round-trip preserves node payloads") {
     material.emit     = aleph::math::Vec3{0.5f, 0.6f, 0.7f};
     material.uv_scale = 12.0f;
     original.insert_node(material);
+
+    const NodeId sphere_mat_id = original.alloc_node_id();
+    original.insert_node(Material{sphere_mat_id, MaterialKind::Metal});
 
     const NodeId tex_id = original.alloc_node_id();
     original.insert_node(Texture{tex_id, 320, 200, TextureFormat::Rgb8});
@@ -167,18 +182,24 @@ TEST_CASE("graph serialization: round-trip preserves node payloads") {
     light.geometry = quad;
     original.insert_node(std::move(light));
 
+    const NodeId volume_id = original.alloc_node_id();
+    original.insert_node(Volume{volume_id, MediumKind::Heterogeneous});
+
     REQUIRE(original.add_edge(EdgeKind::Contains, root, cam).has_value());
     REQUIRE(original.add_edge(EdgeKind::Contains, root, mesh_id).has_value());
+    REQUIRE(original.add_edge(EdgeKind::Contains, root, sphere_mesh_id).has_value());
     REQUIRE(original.add_edge(EdgeKind::Contains, root, light_id).has_value());
+    REQUIRE(original.add_edge(EdgeKind::Contains, root, volume_id).has_value());
     REQUIRE(original.add_edge(EdgeKind::References, mesh_id, mat_id).has_value());
+    REQUIRE(original.add_edge(EdgeKind::References, sphere_mesh_id, sphere_mat_id).has_value());
     REQUIRE(original.add_edge(EdgeKind::References, mat_id, tex_id).has_value());
 
     const std::string saved = aleph::graph::save_graph_string(original, root);
     auto loaded = aleph::graph::load_graph_string(saved);
     REQUIRE(loaded.has_value());
     CHECK(loaded->root == root);
-    CHECK(loaded->graph.node_count() == 6);
-    CHECK(loaded->graph.edge_count() == 5);
+    CHECK(loaded->graph.node_count() == 9);
+    CHECK(loaded->graph.edge_count() == 8);
     CHECK(edge_set(loaded->graph) == edge_set(original));
 
     const auto* loaded_root = std::get_if<Transform>(&require_node(loaded->graph, root));
@@ -191,9 +212,9 @@ TEST_CASE("graph serialization: round-trip preserves node payloads") {
     const auto* loaded_camera = std::get_if<Camera>(&require_node(loaded->graph, cam));
     REQUIRE(loaded_camera != nullptr);
     CHECK(loaded_camera->sensor_id == "sensor wide\tmain");
-    check_vec3(loaded_camera->look_from, aleph::math::Vec3{1.0f, 2.0f, 3.0f});
-    check_vec3(loaded_camera->look_at, aleph::math::Vec3{4.0f, 5.0f, 6.0f});
-    check_vec3(loaded_camera->up, aleph::math::Vec3{0.0f, 1.0f, 0.0f});
+    check_vec3(loaded_camera->look_from, aleph::math::Vec3{1.0f, 2.0f, 3.0f}, "camera look_from");
+    check_vec3(loaded_camera->look_at, aleph::math::Vec3{4.0f, 5.0f, 6.0f}, "camera look_at");
+    check_vec3(loaded_camera->up, aleph::math::Vec3{0.0f, 1.0f, 0.0f}, "camera up");
     CHECK(loaded_camera->vfov_deg == doctest::Approx(55.0f));
     CHECK(loaded_camera->aperture == doctest::Approx(0.25f));
     CHECK(loaded_camera->focus_dist == doctest::Approx(9.5f));
@@ -204,18 +225,31 @@ TEST_CASE("graph serialization: round-trip preserves node payloads") {
     CHECK(loaded_mesh->tris_count == 1);
     const auto* loaded_tri = std::get_if<TriLocal>(&loaded_mesh->geometry);
     REQUIRE(loaded_tri != nullptr);
-    check_vec3(loaded_tri->a, aleph::math::Vec3{0.0f, 0.0f, 0.0f});
-    check_vec3(loaded_tri->b, aleph::math::Vec3{1.0f, 0.0f, 0.0f});
-    check_vec3(loaded_tri->c, aleph::math::Vec3{0.0f, 1.0f, 0.0f});
+    check_vec3(loaded_tri->a, aleph::math::Vec3{0.0f, 0.0f, 0.0f}, "tri a");
+    check_vec3(loaded_tri->b, aleph::math::Vec3{1.0f, 0.0f, 0.0f}, "tri b");
+    check_vec3(loaded_tri->c, aleph::math::Vec3{0.0f, 1.0f, 0.0f}, "tri c");
+
+    const auto* loaded_sphere_mesh = std::get_if<Mesh>(&require_node(loaded->graph, sphere_mesh_id));
+    REQUIRE(loaded_sphere_mesh != nullptr);
+    CHECK(loaded_sphere_mesh->geometry_ref == "sphere mesh\tasset");
+    CHECK(loaded_sphere_mesh->tris_count == 0);
+    const auto* loaded_sphere = std::get_if<SphereLocal>(&loaded_sphere_mesh->geometry);
+    REQUIRE(loaded_sphere != nullptr);
+    check_vec3(loaded_sphere->center, aleph::math::Vec3{-2.0f, 3.5f, 4.25f}, "sphere center");
+    CHECK(loaded_sphere->radius == doctest::Approx(6.75f));
 
     const auto* loaded_material = std::get_if<Material>(&require_node(loaded->graph, mat_id));
     REQUIRE(loaded_material != nullptr);
     CHECK(loaded_material->kind == MaterialKind::TexturedLambertian);
-    check_vec3(loaded_material->albedo, aleph::math::Vec3{0.1f, 0.2f, 0.3f});
+    check_vec3(loaded_material->albedo, aleph::math::Vec3{0.1f, 0.2f, 0.3f}, "material albedo");
     CHECK(loaded_material->fuzz == doctest::Approx(0.4f));
     CHECK(loaded_material->ior == doctest::Approx(1.45f));
-    check_vec3(loaded_material->emit, aleph::math::Vec3{0.5f, 0.6f, 0.7f});
+    check_vec3(loaded_material->emit, aleph::math::Vec3{0.5f, 0.6f, 0.7f}, "material emit");
     CHECK(loaded_material->uv_scale == doctest::Approx(12.0f));
+
+    const auto* loaded_sphere_material = std::get_if<Material>(&require_node(loaded->graph, sphere_mat_id));
+    REQUIRE(loaded_sphere_material != nullptr);
+    CHECK(loaded_sphere_material->kind == MaterialKind::Metal);
 
     const auto* loaded_texture = std::get_if<Texture>(&require_node(loaded->graph, tex_id));
     REQUIRE(loaded_texture != nullptr);
@@ -227,12 +261,16 @@ TEST_CASE("graph serialization: round-trip preserves node payloads") {
     REQUIRE(loaded_light != nullptr);
     CHECK(loaded_light->kind == LightKind::Directional);
     CHECK(loaded_light->emit_ref == "emit \"key\" \\bank");
-    check_vec3(loaded_light->emission, aleph::math::Vec3{10.0f, 11.0f, 12.0f});
+    check_vec3(loaded_light->emission, aleph::math::Vec3{10.0f, 11.0f, 12.0f}, "light emission");
     const auto* loaded_quad = std::get_if<QuadLocal>(&loaded_light->geometry);
     REQUIRE(loaded_quad != nullptr);
-    check_vec3(loaded_quad->q, aleph::math::Vec3{-1.0f, 0.0f, 0.0f});
-    check_vec3(loaded_quad->u, aleph::math::Vec3{2.0f, 0.0f, 0.0f});
-    check_vec3(loaded_quad->v, aleph::math::Vec3{0.0f, 2.0f, 0.0f});
+    check_vec3(loaded_quad->q, aleph::math::Vec3{-1.0f, 0.0f, 0.0f}, "quad q");
+    check_vec3(loaded_quad->u, aleph::math::Vec3{2.0f, 0.0f, 0.0f}, "quad u");
+    check_vec3(loaded_quad->v, aleph::math::Vec3{0.0f, 2.0f, 0.0f}, "quad v");
+
+    const auto* loaded_volume = std::get_if<Volume>(&require_node(loaded->graph, volume_id));
+    REQUIRE(loaded_volume != nullptr);
+    CHECK(loaded_volume->medium == MediumKind::Heterogeneous);
 }
 
 TEST_CASE("graph serialization: round-trip preserves empty strings") {
