@@ -136,6 +136,18 @@ TEST_CASE("graph serialization: rejects duplicate node id without abort") {
     CHECK(loaded.error() == aleph::graph::SerializationError::InvalidNode);
 }
 
+TEST_CASE("graph serialization: rejects max node id that cannot advance allocator") {
+    const std::string text = std::string{"aleph-graph/1\n"}
+        + "root 0\n"
+        + "node 0 transform 0 " + kIdentity + "\n"
+        + "node 4294967295 camera sensor0 0 1 5 0 0 0 0 1 0 45 0 1\n"
+        + "edge contains 0 4294967295\n";
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(loaded.error() == aleph::graph::SerializationError::InvalidNode);
+}
+
 TEST_CASE("graph serialization: rejects numeric token with trailing garbage") {
     std::string text = minimal_graph_text();
     const std::string bad = "node 1 camera sensor0 0 1 5x 0 0 0 0 1 0 45 0 1";
@@ -143,6 +155,30 @@ TEST_CASE("graph serialization: rejects numeric token with trailing garbage") {
     const std::size_t pos = text.find(good);
     REQUIRE(pos != kStringNpos);
     text.replace(pos, good.size(), bad);
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
+}
+
+TEST_CASE("graph serialization: rejects quoted token without delimiter") {
+    const std::string text = std::string{"aleph-graph/1\n"}
+        + "root 0\n"
+        + "node 0 transform 0 " + kIdentity + "\n"
+        + "node 1 camera \"sensor0\"0 0 1 5 0 0 0 0 1 0 45 0 1\n"
+        + "edge contains 0 1\n";
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
+}
+
+TEST_CASE("graph serialization: rejects quoted token delimiter before following field") {
+    const std::string text = std::string{"aleph-graph/1\n"}
+        + "root 0\n"
+        + "node 0 transform 0 " + kIdentity + "\n"
+        + "node 1 mesh \"mesh-ref\"0 sphere 0 0 0 1\n"
+        + "edge contains 0 1\n";
 
     auto loaded = aleph::graph::load_graph_string(text);
     REQUIRE_FALSE(loaded.has_value());
@@ -168,6 +204,17 @@ TEST_CASE("graph serialization: rejects trailing fields on a valid node line") {
     const std::size_t pos = text.find(good);
     REQUIRE(pos != kStringNpos);
     text.replace(pos, good.size(), bad);
+
+    auto loaded = aleph::graph::load_graph_string(text);
+    REQUIRE_FALSE(loaded.has_value());
+    CHECK(loaded.error() == aleph::graph::SerializationError::ParseError);
+}
+
+TEST_CASE("graph serialization: rejects duplicate root declaration") {
+    std::string text = minimal_graph_text();
+    const std::size_t pos = text.find("node 0 transform");
+    REQUIRE(pos != kStringNpos);
+    text.insert(pos, "root 0\n");
 
     auto loaded = aleph::graph::load_graph_string(text);
     REQUIRE_FALSE(loaded.has_value());

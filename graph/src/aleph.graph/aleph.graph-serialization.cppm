@@ -140,6 +140,10 @@ inline void append_string(std::string& out, std::string_view s) {
             ++i;
         }
         if (i >= rest.size()) return {};
+        if (i + 1 < rest.size() && rest[i + 1] != ' ' && rest[i + 1] != '\t') {
+            line = {};
+            return {};
+        }
         const std::string_view tok = rest.substr(0, i);
         line = rest.substr(i + 1);
         return tok;
@@ -512,6 +516,9 @@ load_graph_string(std::string_view text) {
         std::string_view rest = line;
         const std::string_view tag = detail::next_token(rest);
         if (tag == "root") {
+            if (have_root) {
+                return std::unexpected(SerializationError::ParseError);
+            }
             if (!detail::parse_node_id(detail::next_token(rest), root)) {
                 return std::unexpected(SerializationError::ParseError);
             }
@@ -523,6 +530,9 @@ load_graph_string(std::string_view text) {
             auto node = detail::parse_node_line(line);
             if (!node.has_value()) return std::unexpected(node.error());
             const aleph::types::NodeId id = aleph::types::id_of(*node);
+            if (id.value == std::numeric_limits<std::uint32_t>::max()) {
+                return std::unexpected(SerializationError::InvalidNode);
+            }
             auto inserted = loaded.graph.try_insert_node(std::move(*node));
             if (!inserted.has_value()) {
                 return std::unexpected(SerializationError::InvalidNode);
