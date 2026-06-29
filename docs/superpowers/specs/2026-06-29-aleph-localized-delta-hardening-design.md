@@ -1,7 +1,7 @@
 # Design Spec — Localized Delta Hardening
 
-**Date:** 2026-06-29  
-**Status:** approved design, written for review  
+**Date:** 2026-06-29
+**Status:** approved design, written for review
 **Scope:** C slice after serialization hardening
 
 ## 1. Goal
