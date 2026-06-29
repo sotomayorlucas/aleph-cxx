@@ -28,9 +28,10 @@ import aleph.lowering;   // AddObject, DeleteObject, Op, MaterialParams
 //       — the localized rebuild reproduces the full bounded operator bit-for-bit;
 //   (2) the Mayer-Vietoris Tier-2 certificate closes (residual == 0) for the same
 //       rewrite under the Visibility sheaf;
-//   (3) a controller DeleteObject on a lattice INTERIOR node (which deletes its
-//       Adjacent edges) ALSO produces the byte-identical bounded operator and
-//       reports an O(touched) ≪ |E| recompute count — the localized delete.
+//   (3) controller DeleteObject is covered in three pieces:
+//       small graph: byte-identical bounded operator + MV closes;
+//       R=8 graph: dirty cover is too broad, so the full fallback is observable;
+//       R=9 graph: dirty cover is local, recompute_count is the 60 touched edges.
 
 using namespace aleph::types;
 using aleph::graph::Graph;
@@ -168,33 +169,22 @@ TEST_CASE("mv-controller: AddObject -> operator == full bounded (byte-exact) + M
     CHECK(cert.residual == 0);
 }
 
-TEST_CASE("mv-controller: DeleteObject (interior lattice node) -> byte-exact + O(touched) recompute") {
-    constexpr int R = 12;  // large enough that a local 2-hop ball is ≪ |E|
+TEST_CASE("mv-controller: DeleteObject (small lattice) -> byte-exact + MV closes") {
+    constexpr int R = 6;
     Lattice s = make_lattice(R);
-    // An interior mesh: full 4-neighbourhood, so its delete removes 4 Adjacent
-    // edges and dirties only the local 2-hop ball — the localized delete.
     const NodeId victim = s.nodes[static_cast<std::size_t>((R / 2) * R + (R / 2))];
 
     aleph::edit::EditorController ctl{std::move(s.g)};
     ctl.set_viewport(64, 48);
     ctl.enable_sim(true);
 
-    const std::size_t edges_before = ctl.wave_operator().curvatures.size();
-
     const Graph before = ctl.graph().clone();
 
     auto r = ctl.apply(aleph::lowering::Op{aleph::lowering::DeleteObject{victim}});
     REQUIRE(r.has_value());
 
-    // Byte-exact to the full bounded rebuild of the post-delete graph.
     check_operator_is_full_bounded(ctl);
 
-    // The localized win: recompute count is O(touched) and strictly < |E|.
-    const int rc = ctl.last_recompute_count();
-    CHECK(rc > 0);                                              // the delete dirtied edges
-    CHECK(rc < static_cast<int>(edges_before));                // ≪ |E| — not a full rebuild
-
-    // Mayer-Vietoris Tier-2 still closes for the delete rewrite.
     const aleph::containers::FlatSet<NodeId> preserved =
         preserved_of(before, ctl.graph());
     auto [u, k, rsub] = aleph::sheaf::decompose_rewrite(before, ctl.graph(), preserved);
@@ -202,4 +192,42 @@ TEST_CASE("mv-controller: DeleteObject (interior lattice node) -> byte-exact + O
         aleph::sheaf::mayer_vietoris_certify_with(
             ctl.graph(), u, rsub, k, aleph::sheaf::SheafKind::Visibility);
     CHECK(cert.residual == 0);
+}
+
+TEST_CASE("mv-controller: DeleteObject (R=8 lattice) -> broad dirty cover uses full fallback") {
+    constexpr int R = 8;
+    Lattice s = make_lattice(R);
+    const NodeId victim = s.nodes[static_cast<std::size_t>((R / 2) * R + (R / 2))];
+
+    aleph::edit::EditorController ctl{std::move(s.g)};
+    ctl.set_viewport(64, 48);
+    ctl.enable_sim(true);
+
+    auto r = ctl.apply(aleph::lowering::Op{aleph::lowering::DeleteObject{victim}});
+    REQUIRE(r.has_value());
+
+    check_operator_is_full_bounded(ctl);
+    CHECK(ctl.last_recompute_count() == 0);
+}
+
+TEST_CASE("mv-controller: DeleteObject (R=9 lattice) -> byte-exact + 60-edge localized recompute") {
+    constexpr int R = 9;
+    Lattice s = make_lattice(R);
+    const NodeId victim = s.nodes[static_cast<std::size_t>((R / 2) * R + (R / 2))];
+
+    aleph::edit::EditorController ctl{std::move(s.g)};
+    ctl.set_viewport(64, 48);
+    ctl.enable_sim(true);
+
+    const std::size_t edges_before = ctl.wave_operator().curvatures.size();
+    CHECK(edges_before == 144);
+
+    auto r = ctl.apply(aleph::lowering::Op{aleph::lowering::DeleteObject{victim}});
+    REQUIRE(r.has_value());
+
+    check_operator_is_full_bounded(ctl);
+
+    const int rc = ctl.last_recompute_count();
+    CHECK(rc == 60);
+    CHECK(rc < static_cast<int>(edges_before / 2));
 }
