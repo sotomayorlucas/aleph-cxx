@@ -360,6 +360,7 @@ public:
                 // is false for them.
                 const bool op_is_localizable =
                     std::holds_alternative<aleph::lowering::AddObject>(op) ||
+                    std::holds_alternative<aleph::lowering::ImportObj>(op) ||
                     std::holds_alternative<aleph::lowering::DeleteObject>(op);
                 rebuild_operator_localized(*rec, op_is_localizable);
             }

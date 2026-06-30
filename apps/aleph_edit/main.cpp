@@ -41,6 +41,8 @@
 #include <thread>
 #include <vector>
 
+#include "live_hud.hpp"
+
 import aleph.math;
 import aleph.types;
 import aleph.graph;
@@ -1010,6 +1012,11 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
     constexpr int W = 800, H = 600;
     constexpr int R = 7;             // lattice resolution (wave demo)
     constexpr f32 kWaveDt = 0.02f;   // fixed physics sub-step per frame
+    constexpr int kHudPanelW = 260;
+    constexpr int kHudPanelH = 374;
+    constexpr int kHudPanelX = W - kHudPanelW - 8;
+    constexpr int kHudPanelY = 44;
+    constexpr int kHudPad = 8;
     aleph::window::Window win(W, H, wave_demo
         ? "aleph_edit — wave on the shared Laplacian (click=select, K=kick, X=delete, drag=orbit)"
         : "aleph_edit — structural editor");
@@ -1098,7 +1105,9 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
 
     bool running   = true;
     bool left_down = false, prev_left = false;
+    bool hud_drag = false;
     bool save_failed = false;
+    bool project_dirty = did_import;
     int  mouse_x = 0, mouse_y = 0;
     u32  last_input_ms = win.ticks_ms();
 
@@ -1128,6 +1137,107 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
         last_input_ms = win.ticks_ms();
     };
 
+    auto point_in_hud_panel = [&](int x, int y) noexcept {
+        return x >= kHudPanelX && x < kHudPanelX + kHudPanelW
+            && y >= kHudPanelY && y < kHudPanelY + kHudPanelH;
+    };
+
+    auto mark_project_dirty = [&]() noexcept {
+        project_dirty = true;
+        save_failed = false;
+    };
+
+    auto save_now = [&]() -> bool {
+        if (!opts.save_path.has_value()) return false;
+        if (save_project(controller, root, *opts.save_path)) {
+            project_dirty = false;
+            save_failed = false;
+            return true;
+        }
+        save_failed = true;
+        return false;
+    };
+
+    auto apply_graph_edit = [&](const aleph::lowering::Op& op) -> bool {
+        auto r = controller.apply(op);
+        if (!r.has_value()) return false;
+        mark_project_dirty();
+        invalidate();
+        return true;
+    };
+
+    auto do_undo = [&]() -> bool {
+        if (!controller.undo()) return false;
+        mark_project_dirty();
+        invalidate();
+        return true;
+    };
+
+    auto do_redo = [&]() -> bool {
+        if (!controller.redo()) return false;
+        mark_project_dirty();
+        invalidate();
+        return true;
+    };
+
+    auto do_add_object = [&]() -> bool {
+        aleph::lowering::AddObject add{};
+        add.parent   = root;
+        add.geometry = aleph::types::SphereLocal{Vec3{0.0f, 0.5f, 0.0f}, 0.5f};
+        add.material = lambertian(Vec3{0.3f, 0.6f, 0.9f});
+        return apply_graph_edit(aleph::lowering::Op{add});
+    };
+
+    auto do_add_light = [&]() -> bool {
+        aleph::lowering::AddLight light{};
+        light.parent   = root;
+        light.emission = Vec3{4.0f, 4.0f, 4.0f};
+        light.geometry = aleph::types::QuadLocal{Vec3{-0.5f, 3.0f, -0.5f},
+                                                 Vec3{1.0f, 0.0f, 0.0f},
+                                                 Vec3{0.0f, 0.0f, 1.0f}};
+        return apply_graph_edit(aleph::lowering::Op{light});
+    };
+
+    auto do_delete_selected = [&]() -> bool {
+        if (!controller.selected().has_value()) return false;
+        const NodeId victim = *controller.selected();
+        if (!apply_graph_edit(
+                aleph::lowering::Op{aleph::lowering::DeleteObject{victim}})) {
+            return false;
+        }
+        controller.select(std::nullopt);
+        return true;
+    };
+
+    auto do_refine = [&]() -> bool {
+        return apply_graph_edit(aleph::lowering::Op{
+            aleph::lowering::ApplyRule{&aleph::dpo::rules::refine_cell()}});
+    };
+
+    auto do_kick = [&]() -> bool {
+        if (!wave_demo) return false;
+        const bool kicked =
+            controller.kick(controller.selected().value_or(kick_seed), 1.5);
+        if (kicked) invalidate();
+        return kicked;
+    };
+
+    auto live_hud_snapshot = [&]() {
+        aleph::app::edit::LiveHudSnapshot state{};
+        state.entities = controller.lowered().entities.size();
+        state.lights = controller.lowered().lights.size();
+        state.faces = controller.raster_scene().faces.size();
+        state.wave_demo = wave_demo;
+        state.loaded_project = opts.load_path.has_value();
+        state.imported_obj = did_import;
+        state.can_undo = controller.can_undo();
+        state.can_redo = controller.can_redo();
+        state.has_save_path = opts.save_path.has_value();
+        state.dirty = project_dirty;
+        state.save_failed = save_failed;
+        return state;
+    };
+
     while (running) {
         std::array<aleph::window::Event, 64> evbuf{};
         const int nev = win.poll_events(std::span<aleph::window::Event>{evbuf});
@@ -1135,6 +1245,7 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
         bool key_add_obj = false, key_add_light = false, key_delete = false;
         bool key_kick = false;
         bool key_undo = false, key_redo = false, key_refine = false, key_save = false;
+        bool clicked_pick_over_hud = false;
         int nudge_dx = 0;   // -1 left, +1 right (camera right axis)
         int nudge_dz = 0;   // -1 toward camera eye, +1 toward look target (camera forward on ground)
         int nudge_dy = 0;   // -1 down, +1 up (world Y)
@@ -1166,23 +1277,34 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
                         nudge_fast = true;
                     break;
                 case aleph::window::Event::Kind::MouseDown:
-                    if (e.button == 1) { left_down = true; clicked_pick = true; }
                     mouse_x = e.x; mouse_y = e.y;
+                    if (e.button == 1) {
+                        left_down = true;
+                        clicked_pick = true;
+                        hud_drag = point_in_hud_panel(e.x, e.y);
+                        clicked_pick_over_hud = hud_drag;
+                    }
                     break;
                 case aleph::window::Event::Kind::MouseUp:
-                    if (e.button == 1) left_down = false;
+                    if (e.button == 1) {
+                        left_down = false;
+                        hud_drag = false;
+                    }
+                    mouse_x = e.x; mouse_y = e.y;
                     break;
                 case aleph::window::Event::Kind::MouseMove:
                     mouse_x = e.x; mouse_y = e.y;
-                    if (left_down) {
+                    if (left_down && !hud_drag) {
                         controller.camera().orbit(static_cast<f32>(e.dx),
                                                   static_cast<f32>(e.dy));
                         view_dirty = true;
                     }
                     break;
                 case aleph::window::Event::Kind::MouseWheel:
-                    controller.camera().zoom(e.wheel > 0 ? (1.0f / 1.12f) : 1.12f);
-                    view_dirty = true;
+                    if (!point_in_hud_panel(mouse_x, mouse_y)) {
+                        controller.camera().zoom(e.wheel > 0 ? (1.0f / 1.12f) : 1.12f);
+                        view_dirty = true;
+                    }
                     break;
                 default: break;
             }
@@ -1190,41 +1312,15 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
         if (!running) break;
 
         // ── Gestures -> Ops. ──────────────────────────────────────────────────
-        if (key_undo)  (void)controller.undo();
-        if (key_redo)  (void)controller.redo();
-        if (key_save && opts.save_path.has_value()) {
-            if (!save_project(controller, root, *opts.save_path)) save_failed = true;
-        }
-        if (key_refine) {
-            (void)controller.apply(aleph::lowering::Op{
-                aleph::lowering::ApplyRule{&aleph::dpo::rules::refine_cell()}});
-        }
-        if (key_add_obj) {
-            aleph::lowering::AddObject add{};
-            add.parent   = root;
-            add.geometry = aleph::types::SphereLocal{Vec3{0.0f, 0.5f, 0.0f}, 0.5f};
-            add.material = lambertian(Vec3{0.3f, 0.6f, 0.9f});
-            (void)controller.apply(aleph::lowering::Op{add});
-        }
-        if (key_add_light) {
-            aleph::lowering::AddLight light{};
-            light.parent   = root;
-            light.emission = Vec3{4.0f, 4.0f, 4.0f};
-            light.geometry = aleph::types::QuadLocal{Vec3{-0.5f, 3.0f, -0.5f},
-                                                     Vec3{1.0f, 0.0f, 0.0f},
-                                                     Vec3{0.0f, 0.0f, 1.0f}};
-            (void)controller.apply(aleph::lowering::Op{light});
-        }
-        if (key_delete && controller.selected().has_value()) {
-            const NodeId victim = *controller.selected();
-            auto r = controller.apply(
-                aleph::lowering::Op{aleph::lowering::DeleteObject{victim}});
-            if (r.has_value()) controller.select(std::nullopt);
-        }
+        if (key_undo)  (void)do_undo();
+        if (key_redo)  (void)do_redo();
+        if (key_save)  (void)save_now();
+        if (key_refine)   (void)do_refine();
+        if (key_add_obj)  (void)do_add_object();
+        if (key_add_light) (void)do_add_light();
+        if (key_delete) (void)do_delete_selected();
         // Wave: ping the selected node (or the seed if nothing is selected).
-        if (wave_demo && key_kick) {
-            (void)controller.kick(controller.selected().value_or(kick_seed), 1.5);
-        }
+        if (key_kick) (void)do_kick();
 
         // Arrow/Q-E nudge: move the selected object along camera-relative ground
         // axes (←/→ = camera right, ↑/↓ = camera forward on XZ) and world Y (Q/E).
@@ -1244,12 +1340,15 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
                 static_cast<f32>(nudge_dy) * step,
                 (right.z * static_cast<f32>(nudge_dx)
                  + fwd.z * static_cast<f32>(nudge_dz)) * step};
-            (void)controller.translate_selected(delta);
-            invalidate();   // keep raster fresh after the nudge (matches SetMaterial)
+            auto moved = controller.translate_selected(delta);
+            if (moved.has_value()) {
+                mark_project_dirty();
+                invalidate();   // keep raster fresh after the nudge (matches SetMaterial)
+            }
         }
 
         // ── Pick on a fresh left-click. ───────────────────────────────────────
-        if (clicked_pick && !prev_left) {
+        if (clicked_pick && !prev_left && !clicked_pick_over_hud) {
             std::optional<NodeId> hit = controller.pick(mouse_x, mouse_y);
             controller.select(hit);
             if (hit.has_value()) {
@@ -1363,11 +1462,26 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
             }
             aleph::render::sw::downsample_box(ss_film, film, kSSAA);
 
-            // UI panel: selection + a material color slider that emits SetMaterial.
+            // UI panel: selection + direct edit controls.
             const bool ui_mouse_pressed = left_down && !prev_left;
             aleph::editor::ui_begin(ui, &film, mouse_x, mouse_y, left_down,
                                     ui_mouse_pressed);
-            aleph::editor::ui_panel(ui, W - 250, 50, 240, 260, "EDITOR");
+            aleph::editor::ui_panel(ui, kHudPanelX, kHudPanelY, kHudPanelW,
+                                    kHudPanelH, "ALEPH LIVE");
+
+            bool ui_add_obj = false;
+            bool ui_add_light = false;
+            bool ui_delete = false;
+            bool ui_undo = false;
+            bool ui_redo = false;
+            bool ui_refine = false;
+            bool ui_save = false;
+            bool ui_kick = false;
+
+            const int x0 = kHudPanelX + kHudPad;
+            int y = kHudPanelY + 30;
+            const int row_h = 18;
+            const aleph::app::edit::LiveHudSnapshot hud_state = live_hud_snapshot();
 
             char line[96];
             if (controller.selected().has_value()) {
@@ -1376,24 +1490,81 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
             } else {
                 std::snprintf(line, sizeof(line), "NO SELECTION");
             }
-            aleph::editor::ui_label(ui, W - 242, 80, line, Vec3{1, 1, 1});
+            aleph::editor::ui_label(ui, x0, y, line, Vec3{1, 1, 1});
+            y += 16;
 
-            aleph::editor::ui_label(ui, W - 242, 100, "MATERIAL RGB", Vec3{1, 1, 1});
+            std::snprintf(line, sizeof(line), "MODE %.*s",
+                          static_cast<int>(
+                              aleph::app::edit::live_hud_mode_label(hud_state).size()),
+                          aleph::app::edit::live_hud_mode_label(hud_state).data());
+            aleph::editor::ui_label(ui, x0, y, line, Vec3{0.75f, 0.9f, 1.0f});
+            y += 16;
+
+            const std::string history = aleph::app::edit::live_hud_history_line(hud_state);
+            aleph::editor::ui_label(ui, x0, y, history, Vec3{0.78f, 0.82f, 0.9f});
+            y += 16;
+
+            std::snprintf(line, sizeof(line), "SAVE %.*s",
+                          static_cast<int>(
+                              aleph::app::edit::live_hud_save_label(hud_state).size()),
+                          aleph::app::edit::live_hud_save_label(hud_state).data());
+            const Vec3 save_color = save_failed ? Vec3{1.0f, 0.35f, 0.25f}
+                                  : project_dirty ? Vec3{1.0f, 0.82f, 0.35f}
+                                                  : Vec3{0.55f, 0.95f, 0.65f};
+            aleph::editor::ui_label(ui, x0, y, line, save_color);
+            y += 24;
+
+            aleph::editor::ui_label(ui, x0, y, "MATERIAL RGB", Vec3{1, 1, 1});
+            y += 16;
             const Vec3 before = sel_albedo;
-            aleph::editor::ui_slider_f(ui, W - 242, 116, 224, 14, sel_albedo.x, 0.0f, 1.0f);
-            aleph::editor::ui_slider_f(ui, W - 242, 134, 224, 14, sel_albedo.y, 0.0f, 1.0f);
-            aleph::editor::ui_slider_f(ui, W - 242, 152, 224, 14, sel_albedo.z, 0.0f, 1.0f);
+            aleph::editor::ui_slider_f(ui, x0, y, 244, 14, sel_albedo.x, 0.0f, 1.0f);
+            y += 18;
+            aleph::editor::ui_slider_f(ui, x0, y, 244, 14, sel_albedo.y, 0.0f, 1.0f);
+            y += 18;
+            aleph::editor::ui_slider_f(ui, x0, y, 244, 14, sel_albedo.z, 0.0f, 1.0f);
+            y += 22;
             // A color swatch of the current albedo.
-            aleph::editor::draw_rect(film, W - 242, 174, 60, 30, sel_albedo);
+            aleph::editor::draw_rect(film, x0, y, 60, 28, sel_albedo);
+            y += 40;
 
-            aleph::editor::ui_label(ui, W - 242, 214, "A ADD  L LIGHT", Vec3{0.85f, 0.85f, 0.9f});
-            aleph::editor::ui_label(ui, W - 242, 230,
-                                    wave_demo ? "K KICK  X DELETE  DRAG ORBIT"
-                                              : "X DELETE  DRAG ORBIT",
-                                    Vec3{0.85f, 0.85f, 0.9f});
-            aleph::editor::ui_label(ui, W - 242, 246,
-                                    "ARROWS MOVE  Q/E UP-DN  SHIFT FAST",
-                                    Vec3{0.7f, 0.7f, 0.7f});
+            aleph::editor::ui_label(ui, x0, y, "ACTIONS", Vec3{0.85f, 0.85f, 0.9f});
+            y += 16;
+            ui_add_obj =
+                aleph::editor::ui_button(ui, x0, y, 76, row_h, "A OBJ");
+            ui_add_light =
+                aleph::editor::ui_button(ui, x0 + 84, y, 76, row_h, "L LIGHT");
+            ui_delete =
+                aleph::editor::ui_button(ui, x0 + 168, y, 76, row_h, "X DEL");
+            y += 24;
+            ui_undo =
+                aleph::editor::ui_button(ui, x0, y, 76, row_h, "U UNDO");
+            ui_redo =
+                aleph::editor::ui_button(ui, x0 + 84, y, 76, row_h, "Y REDO");
+            ui_refine =
+                aleph::editor::ui_button(ui, x0 + 168, y, 76, row_h, "R CELL");
+            y += 24;
+            if (opts.save_path.has_value()) {
+                ui_save =
+                    aleph::editor::ui_button(ui, x0, y, 76, row_h, "S SAVE");
+            } else {
+                aleph::editor::ui_label(ui, x0, y + 5, "NO SAVE PATH",
+                                        Vec3{0.62f, 0.64f, 0.7f});
+            }
+            if (wave_demo) {
+                ui_kick =
+                    aleph::editor::ui_button(ui, x0 + 84, y, 76, row_h, "K KICK");
+            }
+            y += 30;
+
+            aleph::editor::ui_label(ui, x0, y, "DRAG ORBIT  WHEEL ZOOM",
+                                    Vec3{0.7f, 0.74f, 0.78f});
+            y += 16;
+            aleph::editor::ui_label(ui, x0, y, "ARROWS MOVE  Q/E UP-DN",
+                                    Vec3{0.7f, 0.74f, 0.78f});
+            y += 16;
+            aleph::editor::ui_label(ui, x0, y, "SHIFT FAST",
+                                    Vec3{0.7f, 0.74f, 0.78f});
+            y += 16;
             if (controller.selected().has_value()) {
                 if (auto tid = controller.transform_of(*controller.selected())) {
                     const aleph::types::Node* tn = controller.graph().node(*tid);
@@ -1408,7 +1579,7 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
                                       static_cast<double>(tm(0, 3)),
                                       static_cast<double>(tm(1, 3)),
                                       static_cast<double>(tm(2, 3)));
-                        aleph::editor::ui_label(ui, W - 242, 262, off,
+                        aleph::editor::ui_label(ui, x0, y, off,
                                                 Vec3{0.9f, 0.8f, 0.5f});
                     }
                 }
@@ -1422,17 +1593,22 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
                 aleph::lowering::SetMaterial set{};
                 set.target = *controller.selected();
                 set.params = lambertian(sel_albedo);
-                (void)controller.apply(aleph::lowering::Op{set});
-                invalidate();
+                (void)apply_graph_edit(aleph::lowering::Op{set});
             }
 
+            if (ui_add_obj) (void)do_add_object();
+            if (ui_add_light) (void)do_add_light();
+            if (ui_delete) (void)do_delete_selected();
+            if (ui_undo) (void)do_undo();
+            if (ui_redo) (void)do_redo();
+            if (ui_refine) (void)do_refine();
+            if (ui_save) (void)save_now();
+            if (ui_kick) (void)do_kick();
+
             // HUD.
-            char hud[128];
-            std::snprintf(hud, sizeof(hud), "ENTITIES %zu  LIGHTS %zu  FACES %zu",
-                          controller.lowered().entities.size(),
-                          controller.lowered().lights.size(),
-                          controller.raster_scene().faces.size());
-            aleph::editor::draw_rect(film, 8, 8, 420, 24, Vec3{0, 0, 0});
+            const std::string hud =
+                aleph::app::edit::live_hud_top_line(live_hud_snapshot());
+            aleph::editor::draw_rect(film, 8, 8, 560, 24, Vec3{0, 0, 0});
             aleph::editor::draw_text_shadowed(film, 14, 14, hud, Vec3{1, 1, 1});
 
             src = film.pixels;  // film stride == W (contiguous)
@@ -1470,7 +1646,7 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
         prev_left  = left_down;
     }
     if (opts.save_path.has_value()) {
-        if (!save_project(controller, root, *opts.save_path)) save_failed = true;
+        (void)save_now();
     }
     return save_failed ? 1 : 0;
 }
