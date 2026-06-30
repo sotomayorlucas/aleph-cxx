@@ -105,6 +105,7 @@ add_executable(aleph_tests
     lowering/test_importance.cpp
     edit/test_build_sw.cpp
     edit/test_controller.cpp
+    edit/test_project_workflow.cpp
     edit/test_sim_controller.cpp
     edit/test_mv_controller.cpp
     edit/test_translate.cpp
