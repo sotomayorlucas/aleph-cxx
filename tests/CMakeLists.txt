@@ -95,6 +95,7 @@ add_executable(aleph_tests
     lowering/test_missing_reference.cpp
     lowering/test_edit_material.cpp
     lowering/test_add_object.cpp
+    lowering/test_import_obj.cpp
     lowering/test_dpo_edit.cpp
     lowering/test_determinism.cpp
     lowering/test_light_grouping.cpp
