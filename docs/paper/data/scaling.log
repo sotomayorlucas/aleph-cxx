@@ -1,0 +1,7 @@
+grid 8x8...
+  grid=8 initial    |E|=112 global=6122.67ms bounded=19.82ms
+  grid=8 add1       dirty=37/113 rc=37 full=29.41ms local=16.86ms x1.7 exact=1 +cert
+  grid=8 add2       dirty=51/115 rc=51 full=30.40ms local=21.57ms x1.4 exact=1 +cert
+  grid=8 add_corner dirty=13/116 rc=13 full=30.63ms local=1.56ms x19.7 exact=1 +cert
+  grid=8 delete     dirty=49/114 rc=49 full=29.80ms local=20.68ms x1.4 exact=1 +cert
+grid 12x12...
