@@ -28,6 +28,7 @@ cmake --build build-asan --target aleph_tests -j$(nproc)
 | Structural editor (GUI) | `./build/apps/aleph_edit/aleph_edit` |
 | Software raster demo | `./build/apps/aleph_sw/aleph_sw` |
 | Headless edit script | `./build/apps/aleph_edit/aleph_edit --headless /tmp/out` |
+| Scaling bench (paper CSV) | `./build/bench/aleph_bench_scaling --reps 5 > docs/paper/data/scaling.csv` |
 
 ### Editor project I/O
 
