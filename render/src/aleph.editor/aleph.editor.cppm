@@ -3,3 +3,4 @@ export import :font;
 export import :ui;
 export import :orbit;
 export import :picking;
+export import :perf;

@@ -25,6 +25,7 @@
 
 #include <algorithm>   // std::fill, std::clamp, std::max
 #include <array>       // std::array (SDL event buffer)
+#include <chrono>      // std::chrono::milliseconds (idle frame pacing)
 #include <cmath>       // std::sqrt, std::abs (wave-field heatmap)
 #include <cstddef>
 #include <cstdint>
@@ -1238,7 +1239,33 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
         return state;
     };
 
+    // ── Per-phase frame timing (the perf HUD line) ───────────────────────────
+    // Each phase is bracketed by two win.perf_counter() reads (negligible) and
+    // pushed into its RollingMean; the HUD line shows the rolling means (so it
+    // lags this frame by one — the frame's own present/frame times are only
+    // known after it is shown). Raster-only phases are pushed only on raster
+    // frames so path-trace frames don't dilute their means toward 0.
+    const f32 perf_ms_per_tick =
+        1000.0f / static_cast<f32>(win.perf_frequency());
+    const auto phase_ms = [perf_ms_per_tick](aleph::math::u64 t0,
+                                             aleph::math::u64 t1) noexcept {
+        return static_cast<f32>(t1 - t0) * perf_ms_per_tick;
+    };
+    aleph::editor::RollingMean rm_frame{}, rm_events{}, rm_step{}, rm_raster{},
+                               rm_outline{}, rm_downsample{}, rm_ui{},
+                               rm_present{};
+
+    // ── Frame dirty-flag + pacing ────────────────────────────────────────────
+    // When nothing observable changed, re-present the cached back surface (it
+    // keeps the last tonemapped frame) and sleep kIdleSleepMs instead of
+    // re-rendering — events still poll at ~250 Hz, CPU drops to near zero.
+    constexpr int kIdleSleepMs = 4;
+    bool first_frame = true;            // nothing presented yet -> must render
+    bool idle_frame_presented = false;  // the IDLE-tagged frame is on screen
+
     while (running) {
+        const aleph::math::u64 tp_frame0 = win.perf_counter();
+        aleph::editor::PhaseTimes pt{};
         std::array<aleph::window::Event, 64> evbuf{};
         const int nev = win.poll_events(std::span<aleph::window::Event>{evbuf});
         bool clicked_pick = false;
@@ -1250,6 +1277,7 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
         int nudge_dz = 0;   // -1 toward camera eye, +1 toward look target (camera forward on ground)
         int nudge_dy = 0;   // -1 down, +1 up (world Y)
         bool nudge_fast = false;
+        bool op_applied = false;   // any Op ran this frame (dirty signal)
 
         for (std::size_t i = 0; i < static_cast<std::size_t>(nev); ++i) {
             const auto& e = evbuf[i];
@@ -1312,15 +1340,15 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
         if (!running) break;
 
         // ── Gestures -> Ops. ──────────────────────────────────────────────────
-        if (key_undo)  (void)do_undo();
-        if (key_redo)  (void)do_redo();
-        if (key_save)  (void)save_now();
-        if (key_refine)   (void)do_refine();
-        if (key_add_obj)  (void)do_add_object();
-        if (key_add_light) (void)do_add_light();
-        if (key_delete) (void)do_delete_selected();
+        if (key_undo)  op_applied |= do_undo();
+        if (key_redo)  op_applied |= do_redo();
+        if (key_save)  { (void)save_now(); op_applied = true; }  // outcome shows in the HUD either way
+        if (key_refine)   op_applied |= do_refine();
+        if (key_add_obj)  op_applied |= do_add_object();
+        if (key_add_light) op_applied |= do_add_light();
+        if (key_delete) op_applied |= do_delete_selected();
         // Wave: ping the selected node (or the seed if nothing is selected).
-        if (key_kick) (void)do_kick();
+        if (key_kick) op_applied |= do_kick();
 
         // Arrow/Q-E nudge: move the selected object along camera-relative ground
         // axes (←/→ = camera right, ↑/↓ = camera forward on XZ) and world Y (Q/E).
@@ -1344,6 +1372,7 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
             if (moved.has_value()) {
                 mark_project_dirty();
                 invalidate();   // keep raster fresh after the nudge (matches SetMaterial)
+                op_applied = true;
             }
         }
 
@@ -1361,6 +1390,8 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
             }
         }
 
+        pt.events_ms = phase_ms(tp_frame0, win.perf_counter());
+
         // ── Decide raster vs. progressive path-trace (idle). ──────────────────
         // Whenever idle we show the path trace (accumulating until kMaxSpp, then
         // holding the converged mean — it no longer flips back to raster on
@@ -1370,6 +1401,40 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
         // The wave demo stays in raster (φ is colormapped into vcol, which only the
         // rasterizer reads) and steps every frame, so it never goes idle/path-trace.
         const bool idle = !wave_demo && (now - last_input_ms) >= kIdleMs;
+
+        // ── Frame dirty-flag (pacing): decide BEFORE any render work. ─────────
+        // The signals mirror every way this loop can change pixels; while ANY
+        // holds, render as usual. See aleph.editor:perf for the decision.
+        const Mode next_mode = idle ? Mode::Tracing : Mode::Raster;
+        const aleph::editor::FrameSignals signals{
+            .had_input           = nev > 0,
+            .op_applied          = op_applied,
+            .sim_stepping        = wave_demo,
+            .crossfade_active    = have_prev_frame
+                                   && (next_mode != prev_mode
+                                       || (now - fade_start_ms) < kFadeMs),
+            .pt_accumulating     = idle && (!tracing || pt_samples < kMaxSpp),
+            .view_rebake_pending = view_dirty
+                                   && controller.has_view_dependent_material(),
+            .selection_changed   = clicked_pick && !prev_left,
+            .first_frame         = first_frame,
+        };
+        first_frame = false;
+        const bool dirty = aleph::editor::frame_dirty(signals);
+        if (!dirty && idle_frame_presented) {
+            // Clean and the IDLE-tagged frame is already up: re-present the
+            // unchanged back surface + sleep. Covers both the raster pre-idle
+            // window and the converged-path-trace hold (no crossfade/tonemap
+            // loop either). Skipped frames push no timings, so the (frozen)
+            // HUD means keep describing real rendered frames.
+            win.present();
+            std::this_thread::sleep_for(std::chrono::milliseconds(kIdleSleepMs));
+            prev_left = left_down;
+            continue;
+        }
+        // The first clean frame after a dirty one is rendered once more so the
+        // raster HUD can show its IDLE tag; after that the skip path holds.
+        idle_frame_presented = !dirty;
 
         Mode        mode;
         const Vec3* src = nullptr;
@@ -1422,7 +1487,10 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
             }
 
             // Advance the wave one fixed sub-step (re-bakes φ→vcol) before drawing.
+            const aleph::math::u64 tp_step0 = win.perf_counter();
             if (wave_demo) (void)controller.step(kWaveDt);
+            const aleph::math::u64 tp_raster0 = win.perf_counter();
+            pt.step_ms = phase_ms(tp_step0, tp_raster0);
 
             // ── RASTER: rasterize the editor's view + UI overlay into `film`. ──
             // Supersample the 3D scene at kSSAA× then box-downsample (linear)
@@ -1432,6 +1500,8 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
             aleph::render::sw::rasterize(controller.raster_scene(),
                                          orbit_mvp(controller.camera(), kSSAA * W, kSSAA * H),
                                          ss_film, ss_depth, pool);
+            const aleph::math::u64 tp_outline0 = win.perf_counter();
+            pt.raster_ms = phase_ms(tp_raster0, tp_outline0);
 
             // Selection silhouette: raster only the selected entity's faces into a
             // zero-cleared depth buffer (coverage), then ring it. X-ray by design
@@ -1460,7 +1530,11 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
                         ss_film, sel_depth, /*radius=*/kSSAA, kSelectionColor);
                 }
             }
+            const aleph::math::u64 tp_down0 = win.perf_counter();
+            pt.outline_ms = phase_ms(tp_outline0, tp_down0);
             aleph::render::sw::downsample_box(ss_film, film, kSSAA);
+            const aleph::math::u64 tp_ui0 = win.perf_counter();
+            pt.downsample_ms = phase_ms(tp_down0, tp_ui0);
 
             // UI panel: selection + direct edit controls.
             const bool ui_mouse_pressed = left_down && !prev_left;
@@ -1611,6 +1685,28 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
             aleph::editor::draw_rect(film, 8, 8, 560, 24, Vec3{0, 0, 0});
             aleph::editor::draw_text_shadowed(film, 14, 14, hud, Vec3{1, 1, 1});
 
+            // Perf HUD: rolling per-phase means (ms) + FPS from the frame mean.
+            const f32 frame_mean = rm_frame.mean();
+            const f32 fps = (frame_mean > 0.0f) ? 1000.0f / frame_mean : 0.0f;
+            char perf_hud[160];
+            std::snprintf(perf_hud, sizeof(perf_hud),
+                          "FRM %.1f EVT %.1f STP %.1f RAS %.1f OUT %.1f "
+                          "DSP %.1f UI %.1f PRS %.1f | %.0f FPS%s",
+                          static_cast<double>(frame_mean),
+                          static_cast<double>(rm_events.mean()),
+                          static_cast<double>(rm_step.mean()),
+                          static_cast<double>(rm_raster.mean()),
+                          static_cast<double>(rm_outline.mean()),
+                          static_cast<double>(rm_downsample.mean()),
+                          static_cast<double>(rm_ui.mean()),
+                          static_cast<double>(rm_present.mean()),
+                          static_cast<double>(fps),
+                          dirty ? "" : " IDLE");
+            aleph::editor::draw_rect(film, 8, 34, 640, 16, Vec3{0, 0, 0});
+            aleph::editor::draw_text_shadowed(film, 14, 38, perf_hud,
+                                              Vec3{1, 1, 1});
+            pt.ui_ms = phase_ms(tp_ui0, win.perf_counter());
+
             src = film.pixels;  // film stride == W (contiguous)
         }
 
@@ -1618,6 +1714,7 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
         // A mode switch snapshots the last shown frame and restarts the ramp;
         // steady-state (alpha>=1) presents `src` verbatim. `presented` records
         // exactly what we show so the next transition fades from the real frame.
+        const aleph::math::u64 tp_present0 = win.perf_counter();
         if (have_prev_frame && mode != prev_mode) {
             std::copy(presented.begin(), presented.end(), fade_from.begin());
             fade_start_ms = now;
@@ -1641,6 +1738,19 @@ int run_live(bool wave_demo, const LaunchOptions& opts) {
             }
         }
         win.present();
+        const aleph::math::u64 tp_end = win.perf_counter();
+        pt.present_ms = phase_ms(tp_present0, tp_end);
+        pt.frame_ms   = phase_ms(tp_frame0, tp_end);
+        rm_events.push(pt.events_ms);
+        rm_present.push(pt.present_ms);
+        rm_frame.push(pt.frame_ms);
+        if (mode == Mode::Raster) {   // raster-only phases (0 while tracing)
+            rm_step.push(pt.step_ms);
+            rm_raster.push(pt.raster_ms);
+            rm_outline.push(pt.outline_ms);
+            rm_downsample.push(pt.downsample_ms);
+            rm_ui.push(pt.ui_ms);
+        }
         have_prev_frame = true;
         prev_mode  = mode;
         prev_left  = left_down;
