@@ -5,7 +5,7 @@ set_target_properties(aleph_edit_app PROPERTIES OUTPUT_NAME aleph_edit)
 target_link_libraries(aleph_edit_app PRIVATE
     aleph_edit aleph_window aleph_editor
     aleph_render_sw aleph_render_rt aleph_render_common aleph_lowering
-    aleph_graph aleph_types aleph_scene
+    aleph_graph aleph_types aleph_scene aleph_io aleph_dpo
     aleph_math aleph_threads aleph_alloc
     aleph_flags_test)
 # The SDL shell (live hybrid loop + UI) is gated on this; the target is only

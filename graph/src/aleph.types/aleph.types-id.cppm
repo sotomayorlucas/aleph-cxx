@@ -34,6 +34,14 @@ public:
     std::uint32_t node_watermark() const noexcept { return node_next_; }
     std::uint32_t edge_watermark() const noexcept { return edge_next_; }
 
+    void sync_node_to_at_least(std::uint32_t next) noexcept {
+        if (node_next_ < next) node_next_ = next;
+    }
+
+    void sync_edge_to_at_least(std::uint32_t next) noexcept {
+        if (edge_next_ < next) edge_next_ = next;
+    }
+
 private:
     std::uint32_t node_next_{0};
     std::uint32_t edge_next_{0};

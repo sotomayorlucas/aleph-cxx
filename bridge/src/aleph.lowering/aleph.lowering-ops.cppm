@@ -56,6 +56,7 @@ module;
 #include <utility>
 #include <variant>
 #include <vector>
+#include <span>
 
 export module aleph.lowering:ops;
 
@@ -63,6 +64,7 @@ import aleph.graph;   // Graph: nodes()/edges()/node()/insert_node()/add_edge()/
 import aleph.types;   // Node/Edge, NodeId, EdgeId, NodeKind, EdgeKind, LocalTransform, Mesh/Material/Light, GeometryPayload, kind_of
 import aleph.dpo;     // Rule, Match, find_matches, apply, RewriteRecord, ApplyError (the shared return-path engine + report)
 import aleph.math;    // Vec3, f32 (carried by MaterialParams)
+import aleph.io;      // load_obj (ImportObj)
 import :lowered;      // MaterialParams (the normalized, renderer-independent material view)
 
 export namespace aleph::lowering {
@@ -123,6 +125,15 @@ struct AddObject {
     types::NodeId          parent{};                         // an existing Transform to Contain the new per-object Transform (and transitively the mesh)
     types::GeometryPayload geometry{types::SphereLocal{}};   // LOCAL geometry payload
     MaterialParams         material{};                       // normalized material for the new Material node
+};
+
+// Import a Wavefront OBJ blob: parse `obj_bytes`, mint a group Transform under
+// `parent`, one shared Material, and one Mesh per triangle (TriLocal geometry).
+// Caps at 4096 triangles. Empty/invalid OBJ fails with InvariantViolation.
+struct ImportObj {
+    types::NodeId          parent{};
+    std::vector<std::byte> obj_bytes;
+    MaterialParams         material{};
 };
 
 // Add an explicit sampling light: create a `Light` node (its own kind — NOT a
@@ -189,7 +200,7 @@ struct ApplyRule {
 // value type — it is constructed in place and passed to `apply_op` by const
 // reference; it is never copied.
 using Op = std::variant<SetTransform, SetMaterial,
-                        AddObject, AddLight, DeleteObject, ApplyRule>;
+                        AddObject, ImportObj, AddLight, DeleteObject, ApplyRule>;
 
 // Structured failure of an op (SPEC §5: no silent defaults). Every failure
 // leaves the graph unchanged.
@@ -232,6 +243,7 @@ material_from(aleph::types::NodeId id, const MaterialParams& p) noexcept {
     m.fuzz   = p.fuzz;
     m.ior    = p.ior;
     m.emit   = p.emit;
+    m.uv_scale = p.uv_scale;
     return m;
 }
 
@@ -592,6 +604,98 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                         return {};
                     });
 
+            } else if constexpr (std::is_same_v<T, ImportObj>) {
+                const aleph::types::Node* parent = g.node(o.parent);
+                if (parent == nullptr) {
+                    return std::unexpected(OpError::NodeNotFound);
+                }
+                if (aleph::types::kind_of(*parent) != aleph::types::NodeKind::Transform) {
+                    return std::unexpected(OpError::KindMismatch);
+                }
+                auto mesh = aleph::io::load_obj(std::span<const std::byte>{
+                    o.obj_bytes.data(), o.obj_bytes.size()});
+                if (!mesh.has_value()) {
+                    return std::unexpected(OpError::InvariantViolation);
+                }
+                if (mesh->tris.empty()) {
+                    return std::unexpected(OpError::InvariantViolation);
+                }
+                constexpr std::size_t kMaxTris = 4096;
+                if (mesh->tris.size() > kMaxTris) {
+                    return std::unexpected(OpError::InvariantViolation);
+                }
+                return detail::commit_structural(
+                    g,
+                    [&](aleph::graph::Graph& post, aleph::dpo::RewriteRecord& rec)
+                        -> std::expected<void, OpError> {
+                        detail::clone_nodes(g, post);
+
+                        const aleph::types::NodeId group_xf = post.alloc_node_id();
+                        post.insert_node(aleph::types::Node{aleph::types::Transform{
+                            group_xf, 0,
+                            aleph::types::LocalTransform{aleph::math::Mat4::identity()}}});
+                        rec.created_nodes.push_back(group_xf);
+
+                        const aleph::types::NodeId mat_id = post.alloc_node_id();
+                        post.insert_node(aleph::types::Node{
+                            detail::material_from(mat_id, o.material)});
+                        rec.created_nodes.push_back(mat_id);
+
+                        for (auto [eid, e] : g.edges()) {
+                            (void)eid;
+                            auto r = post.add_edge(e.kind, e.src, e.dst);
+                            if (!r.has_value()) {
+                                return std::unexpected(OpError::InvariantViolation);
+                            }
+                        }
+
+                        auto pcon = post.add_edge(aleph::types::EdgeKind::Contains,
+                                                  o.parent, group_xf);
+                        if (!pcon.has_value()) {
+                            return std::unexpected(OpError::EdgeTypeMismatch);
+                        }
+                        rec.created_edges.push_back(*pcon);
+
+                        for (const auto& tri : mesh->tris) {
+                            const aleph::types::NodeId mesh_id = post.alloc_node_id();
+                            aleph::types::Mesh m{};
+                            m.id           = mesh_id;
+                            m.geometry_ref = "imported";
+                            m.tris_count   = 1;
+                            m.geometry     = aleph::types::TriLocal{
+                                aleph::math::Vec3{
+                                    mesh->verts[static_cast<std::size_t>(tri[0])].x,
+                                    mesh->verts[static_cast<std::size_t>(tri[0])].y,
+                                    mesh->verts[static_cast<std::size_t>(tri[0])].z},
+                                aleph::math::Vec3{
+                                    mesh->verts[static_cast<std::size_t>(tri[1])].x,
+                                    mesh->verts[static_cast<std::size_t>(tri[1])].y,
+                                    mesh->verts[static_cast<std::size_t>(tri[1])].z},
+                                aleph::math::Vec3{
+                                    mesh->verts[static_cast<std::size_t>(tri[2])].x,
+                                    mesh->verts[static_cast<std::size_t>(tri[2])].y,
+                                    mesh->verts[static_cast<std::size_t>(tri[2])].z},
+                            };
+                            post.insert_node(aleph::types::Node{std::move(m)});
+                            rec.created_nodes.push_back(mesh_id);
+
+                            auto ref = post.add_edge(aleph::types::EdgeKind::References,
+                                                     mesh_id, mat_id);
+                            if (!ref.has_value()) {
+                                return std::unexpected(OpError::EdgeTypeMismatch);
+                            }
+                            rec.created_edges.push_back(*ref);
+
+                            auto con = post.add_edge(aleph::types::EdgeKind::Contains,
+                                                     group_xf, mesh_id);
+                            if (!con.has_value()) {
+                                return std::unexpected(OpError::EdgeTypeMismatch);
+                            }
+                            rec.created_edges.push_back(*con);
+                        }
+                        return {};
+                    });
+
             } else if constexpr (std::is_same_v<T, AddLight>) {
                 // Create a Light node Contained by an existing Transform. A Light
                 // is its OWN node (SPEC §3) — not a mesh — so no Material/
@@ -807,6 +911,7 @@ apply_op(aleph::graph::Graph& g, const Op& op) {
                 static_assert(std::is_same_v<T, SetTransform>
                                   || std::is_same_v<T, SetMaterial>
                                   || std::is_same_v<T, AddObject>
+                                  || std::is_same_v<T, ImportObj>
                                   || std::is_same_v<T, AddLight>
                                   || std::is_same_v<T, DeleteObject>
                                   || std::is_same_v<T, ApplyRule>,

@@ -11,5 +11,5 @@ target_sources(aleph_lowering
         aleph.lowering-importance.cppm
         aleph.lowering-build_sw.cppm)
 target_link_libraries(aleph_lowering
-    PUBLIC  aleph_graph aleph_types aleph_scene aleph_dpo aleph_math aleph_sheaf aleph_flow aleph_render_sw
+    PUBLIC  aleph_graph aleph_types aleph_scene aleph_dpo aleph_math aleph_sheaf aleph_flow aleph_render_sw aleph_io
     PRIVATE aleph_flags_isa)

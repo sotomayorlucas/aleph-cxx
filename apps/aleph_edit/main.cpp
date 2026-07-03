@@ -31,6 +31,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <limits>
 #include <optional>    // std::optional, std::nullopt
 #include <variant>     // std::get (aleph::types::Node variant)
 #include <span>        // std::span (poll_events)
@@ -38,6 +40,8 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+#include "live_hud.hpp"
 
 import aleph.math;
 import aleph.types;
@@ -50,6 +54,8 @@ import aleph.render.common;
 import aleph.edit;
 import aleph.alloc;
 import aleph.threads;
+import aleph.io;
+import aleph.dpo;
 
 #if defined(ALEPH_HAVE_SDL2)
 import aleph.window;
@@ -313,6 +319,189 @@ aleph::lowering::MaterialParams lambertian(Vec3 albedo) {
     return m;
 }
 
+struct LaunchOptions {
+    std::optional<std::string> load_path;
+    std::optional<std::string> save_path;
+    std::optional<std::string> import_obj_path;
+};
+
+struct BootScene {
+    aleph::graph::Graph g;
+    NodeId                root{};
+    NodeId                sphere{};
+};
+
+struct ObjImportInfo {
+    Vec3        center{};
+    f32         radius{5.0f};
+    std::size_t tris{};
+};
+
+// Empty stage for `--import`: root + camera + light only (no demo geometry).
+BootScene build_minimal_graph() {
+    using namespace aleph::types;
+    BootScene boot;
+    aleph::graph::Graph& g = boot.g;
+
+    boot.root = g.alloc_node_id();
+    g.insert_node(Transform{boot.root, 0, LocalTransform{Mat4::identity()}});
+
+    const NodeId cam_id = g.alloc_node_id();
+    Camera cam{cam_id, std::string("sensor0")};
+    cam.look_from  = Vec3{0.0f, 1.0f, 5.0f};
+    cam.look_at    = Vec3{0.0f, 0.0f, 0.0f};
+    cam.up         = Vec3{0.0f, 1.0f, 0.0f};
+    cam.vfov_deg   = 45.0f;
+    g.insert_node(std::move(cam));
+
+    const NodeId light_id = g.alloc_node_id();
+    Light light{light_id, LightKind::Area, std::string("emit0")};
+    light.emission = Vec3{8.0f, 8.0f, 8.0f};
+    light.geometry = QuadLocal{Vec3{-2.0f, 4.0f, -2.0f},
+                               Vec3{4.0f, 0.0f, 0.0f},
+                               Vec3{0.0f, 0.0f, 4.0f}};
+    g.insert_node(std::move(light));
+
+    (void)g.add_edge(EdgeKind::Contains, boot.root, cam_id);
+    (void)g.add_edge(EdgeKind::Contains, boot.root, light_id);
+    return boot;
+}
+
+void frame_camera_on_import(aleph::edit::OrbitCamera& cam, const ObjImportInfo& info) {
+    cam.target   = info.center;
+    cam.yaw      = 0.4f;
+    cam.pitch    = 0.25f;
+    cam.radius   = std::clamp(info.radius, 0.5f, 1.0e4f);
+    cam.vfov_deg = 45.0f;
+}
+
+std::vector<std::byte> read_file_bytes(const std::string& path) {
+    auto mapped = aleph::io::MappedFile::open_read(path);
+    if (!mapped.has_value()) return {};
+    const auto bytes = mapped->bytes();
+    return std::vector<std::byte>(bytes.begin(), bytes.end());
+}
+
+BootScene boot_scene_from_options(const LaunchOptions& opts, bool wave_demo = false) {
+    if (opts.load_path.has_value()) {
+        auto loaded = aleph::graph::load_graph_file(*opts.load_path);
+        if (!loaded.has_value()) {
+            std::fprintf(stderr, "aleph_edit: cannot load graph from %s\n",
+                         opts.load_path->c_str());
+            std::exit(1);
+        }
+        BootScene boot{};
+        boot.g    = std::move(loaded->graph);
+        boot.root = loaded->root;
+        for (auto [id, node] : boot.g.nodes()) {
+            (void)node;
+            if (aleph::types::kind_of(node) == aleph::types::NodeKind::Mesh) {
+                boot.sphere = id;
+                break;
+            }
+        }
+        return boot;
+    }
+    if (wave_demo) {
+        LatticeScene ls = build_lattice_graph(7);
+        return BootScene{std::move(ls.g), ls.root, ls.nodes[24]};
+    }
+    if (opts.import_obj_path.has_value()) {
+        return build_minimal_graph();
+    }
+    InitialScene init = build_initial_graph();
+    return BootScene{std::move(init.g), init.root, init.sphere};
+}
+
+std::optional<NodeId> first_mesh_id(const aleph::graph::Graph& g) {
+    for (auto [id, node] : g.nodes()) {
+        if (aleph::types::kind_of(node) == aleph::types::NodeKind::Mesh) {
+            return id;
+        }
+    }
+    return std::nullopt;
+}
+
+bool apply_import_obj(aleph::edit::EditorController& controller, NodeId root,
+                      const std::string& path, ObjImportInfo* out_info = nullptr) {
+    const std::vector<std::byte> obj_bytes = read_file_bytes(path);
+    if (obj_bytes.empty()) {
+        std::fprintf(stderr, "aleph_edit: cannot read OBJ %s\n", path.c_str());
+        return false;
+    }
+
+    auto parsed = aleph::io::load_obj(std::span<const std::byte>{
+        obj_bytes.data(), obj_bytes.size()});
+    if (!parsed.has_value()) {
+        std::fprintf(stderr, "aleph_edit: invalid OBJ %s: %s\n",
+                     path.c_str(), parsed.error().c_str());
+        return false;
+    }
+    if (parsed->tris.empty()) {
+        std::fprintf(stderr, "aleph_edit: OBJ %s has no triangles\n", path.c_str());
+        return false;
+    }
+    constexpr std::size_t kMaxTris = 4096;
+    if (parsed->tris.size() > kMaxTris) {
+        std::fprintf(stderr,
+                     "aleph_edit: OBJ %s has %zu triangles (max %zu)\n",
+                     path.c_str(), parsed->tris.size(), kMaxTris);
+        return false;
+    }
+
+    Vec3 bmin{ std::numeric_limits<f32>::max(),
+               std::numeric_limits<f32>::max(),
+               std::numeric_limits<f32>::max() };
+    Vec3 bmax{ std::numeric_limits<f32>::lowest(),
+               std::numeric_limits<f32>::lowest(),
+               std::numeric_limits<f32>::lowest() };
+    for (const aleph::io::Vec3f& v : parsed->verts) {
+        bmin.x = std::min(bmin.x, v.x); bmax.x = std::max(bmax.x, v.x);
+        bmin.y = std::min(bmin.y, v.y); bmax.y = std::max(bmax.y, v.y);
+        bmin.z = std::min(bmin.z, v.z); bmax.z = std::max(bmax.z, v.z);
+    }
+
+    aleph::lowering::ImportObj imp{};
+    imp.parent    = root;
+    imp.obj_bytes = obj_bytes;
+    imp.material  = lambertian(Vec3{0.7f, 0.7f, 0.75f});
+    auto r = controller.apply(aleph::lowering::Op{std::move(imp)});
+    if (!r.has_value()) {
+        std::fprintf(stderr, "aleph_edit: ImportObj failed (OpError %d)\n",
+                     static_cast<int>(r.error()));
+        return false;
+    }
+
+    const Vec3 center{
+        0.5f * (bmin.x + bmax.x),
+        0.5f * (bmin.y + bmax.y),
+        0.5f * (bmin.z + bmax.z),
+    };
+    const Vec3 ext{bmax.x - bmin.x, bmax.y - bmin.y, bmax.z - bmin.z};
+    const f32 diag = std::sqrt(ext.x * ext.x + ext.y * ext.y + ext.z * ext.z);
+
+    std::printf("aleph_edit: imported %zu triangles from %s\n",
+                parsed->tris.size(), path.c_str());
+
+    if (out_info != nullptr) {
+        out_info->center = center;
+        out_info->radius = std::max(1.5f, diag * 1.2f);
+        out_info->tris   = parsed->tris.size();
+    }
+    return true;
+}
+
+bool save_project(const aleph::edit::EditorController& controller, NodeId root,
+                  const std::string& path) {
+    auto r = aleph::graph::save_graph_file(controller.graph(), root, path);
+    if (!r.has_value()) {
+        std::fprintf(stderr, "aleph_edit: cannot save graph to %s\n", path.c_str());
+        return false;
+    }
+    std::printf("aleph_edit: saved graph to %s\n", path.c_str());
+    return true;
+}
+
 // ── The shared editor sky (raster clear gradient + path-trace background). ───
 const aleph::render::common::Sky kSky{Vec3{0.45f, 0.58f, 0.78f},
                                       Vec3{0.78f, 0.86f, 0.98f}};
@@ -363,6 +552,17 @@ bool write_ppm(const char* path, const aleph::render::common::Film& film) {
     return true;
 }
 
+bool ensure_output_dir(const std::string& outdir) {
+    std::error_code ec;
+    std::filesystem::create_directories(outdir, ec);
+    if (ec) {
+        std::fprintf(stderr, "aleph_edit: cannot create output directory %s: %s\n",
+                     outdir.c_str(), ec.message().c_str());
+        return false;
+    }
+    return true;
+}
+
 int thread_count() noexcept {
     int t = static_cast<int>(std::thread::hardware_concurrency());
     return t > 0 ? t : 1;
@@ -372,22 +572,43 @@ int thread_count() noexcept {
 // Run a fixed Op sequence through the controller; after each step rasterize +
 // path-trace and write two PPMs. Print entity/light counts. Returns the process
 // exit code (0 on success).
-int run_headless(const std::string& outdir) {
-    InitialScene init = build_initial_graph();
-    const NodeId root   = init.root;
-    const NodeId sphere = init.sphere;
+int run_headless(const std::string& outdir, const LaunchOptions& opts) {
+    if (!ensure_output_dir(outdir)) return 1;
 
-    aleph::edit::EditorController controller{std::move(init.g)};
+    BootScene boot = boot_scene_from_options(opts);
+    const NodeId root   = boot.root;
+    NodeId sphere = boot.sphere;
+
+    aleph::edit::EditorController controller{std::move(boot.g)};
+    ObjImportInfo imported{};
+    const bool did_import = opts.import_obj_path.has_value();
+    if (did_import) {
+        if (!apply_import_obj(controller, root, *opts.import_obj_path, &imported)) {
+            return 1;
+        }
+        const std::optional<NodeId> imported_mesh = first_mesh_id(controller.graph());
+        if (!imported_mesh.has_value()) {
+            std::fprintf(stderr, "aleph_edit: OBJ import produced no mesh nodes\n");
+            return 1;
+        }
+        sphere = *imported_mesh;
+    }
+    if (opts.save_path.has_value()) {
+        if (!save_project(controller, root, *opts.save_path)) return 1;
+    }
 
     constexpr int W = 320, H = 240;
     controller.set_viewport(W, H);
-    // Frame the scene: orbit a touch above and around.
     auto& cam = controller.camera();
-    cam.target = Vec3{0.0f, 0.5f, 0.0f};
-    cam.yaw    = 0.4f;
-    cam.pitch  = 0.25f;
-    cam.radius = 5.0f;
-    cam.vfov_deg = 45.0f;
+    if (did_import) {
+        frame_camera_on_import(cam, imported);
+    } else {
+        cam.target = Vec3{0.0f, 0.5f, 0.0f};
+        cam.yaw    = 0.4f;
+        cam.pitch  = 0.25f;
+        cam.radius = 5.0f;
+        cam.vfov_deg = 45.0f;
+    }
     // Re-bake sw_ at the FINAL framed pose: the ctor baked while cam_ was still the
     // default {0,0,5} eye, but Metal/Dielectric vcol is view-dependent.
     controller.rebake_view();
@@ -422,6 +643,14 @@ int run_headless(const std::string& outdir) {
             std::fprintf(stderr, "aleph_edit: cannot write %s\n", rp.c_str());
             return false;
         }
+        if (step_no == 0) {
+            const std::string compat_rp = outdir + "/step0_raster.ppm";
+            if (!write_ppm(compat_rp.c_str(), film)) {
+                std::fprintf(stderr, "aleph_edit: cannot write %s\n",
+                             compat_rp.c_str());
+                return false;
+            }
+        }
         if (std::getenv("ALEPH_DUMP_DEPTH") != nullptr) {
             // Visualize the SS depth buffer (1/w, near=bright) — take each 2×2
             // block's top-left sample as the 1× representative.
@@ -445,9 +674,9 @@ int run_headless(const std::string& outdir) {
         clear_sky(film);
         const aleph::render::common::Camera pcam =
             controller.camera().render_camera(W, H);
-        aleph::render::rt::RenderOpts opts{8, 6, 42ull, 32};
+        aleph::render::rt::RenderOpts rt_opts{8, 6, 42ull, 32};
         aleph::render::rt::path_trace(controller.render_scene(), pcam, kSky,
-                                      film, pool, opts);
+                                      film, pool, rt_opts);
         std::string pp = outdir + "/step" + std::to_string(step_no) + "_" + label
                        + "_pt.ppm";
         if (!write_ppm(pp.c_str(), film)) {
@@ -536,6 +765,8 @@ int run_headless(const std::string& outdir) {
 // sit in a DIFFERENT place between the two poses (vs the frozen 4c-i behaviour).
 // Not SDL-guarded so it runs headless. Returns the process exit code.
 int run_orbit_track(const std::string& outdir) {
+    if (!ensure_output_dir(outdir)) return 1;
+
     InitialScene init = build_initial_graph();
     aleph::edit::EditorController controller{std::move(init.g)};
 
@@ -614,6 +845,8 @@ int run_orbit_track(const std::string& outdir) {
 // gap zeroes), so the ripple genuinely RE-ROUTES around the hole while the rest
 // of the wave persists (N more frames). All frames are deterministic PPMs.
 int run_wave(const std::string& outdir) {
+    if (!ensure_output_dir(outdir)) return 1;
+
     // R is large enough that a mid-run DeleteObject's local 2-hop dirty ball is
     // ≪ |E|, so the controller's localized κ_R rebuild engages (O(touched), not a
     // full rebuild) — the demonstrable win of this slice. (A small grid would make
@@ -775,10 +1008,15 @@ int run_wave(const std::string& outdir) {
 // Manual-smoke only (not auto-tested). Drives the headless controller from real
 // input: orbit drag -> raster; left-click -> pick/select; UI material slider ->
 // SetMaterial; keys a/l/x -> Add/Add/Delete; idle -> progressive path-trace.
-int run_live(bool wave_demo = false) {
+int run_live(bool wave_demo, const LaunchOptions& opts) {
     constexpr int W = 800, H = 600;
     constexpr int R = 7;             // lattice resolution (wave demo)
     constexpr f32 kWaveDt = 0.02f;   // fixed physics sub-step per frame
+    constexpr int kHudPanelW = 260;
+    constexpr int kHudPanelH = 374;
+    constexpr int kHudPanelX = W - kHudPanelW - 8;
+    constexpr int kHudPanelY = 44;
+    constexpr int kHudPad = 8;
     aleph::window::Window win(W, H, wave_demo
         ? "aleph_edit — wave on the shared Laplacian (click=select, K=kick, X=delete, drag=orbit)"
         : "aleph_edit — structural editor");
@@ -787,18 +1025,17 @@ int run_live(bool wave_demo = false) {
     // the plain editor keeps the sphere+floor scene. Both yield a graph + root.
     NodeId root{};
     NodeId kick_seed{};
-    aleph::graph::Graph scene_graph = [&] {
-        if (wave_demo) {
-            LatticeScene ls = build_lattice_graph(R);
-            root      = ls.root;
-            kick_seed = ls.nodes[static_cast<std::size_t>((R / 2) * R + (R / 2))];
-            return std::move(ls.g);
+    BootScene boot = boot_scene_from_options(opts, wave_demo);
+    root      = boot.root;
+    kick_seed = wave_demo ? boot.sphere : NodeId{};
+    aleph::edit::EditorController controller{std::move(boot.g)};
+    ObjImportInfo imported{};
+    const bool did_import = opts.import_obj_path.has_value();
+    if (did_import) {
+        if (!apply_import_obj(controller, root, *opts.import_obj_path, &imported)) {
+            return 1;
         }
-        InitialScene is = build_initial_graph();
-        root = is.root;
-        return std::move(is.g);
-    }();
-    aleph::edit::EditorController controller{std::move(scene_graph)};
+    }
     controller.set_viewport(W, H);
     auto& cam = controller.camera();
     if (wave_demo) {
@@ -810,6 +1047,8 @@ int run_live(bool wave_demo = false) {
         cam.vfov_deg = 45.0f;
         controller.enable_sim(true);
         (void)controller.kick(kick_seed, 1.5);   // an initial ping to watch
+    } else if (did_import) {
+        frame_camera_on_import(cam, imported);
     } else {
         cam.target   = Vec3{0.0f, 0.5f, 0.0f};
         cam.yaw      = 0.4f;
@@ -866,6 +1105,9 @@ int run_live(bool wave_demo = false) {
 
     bool running   = true;
     bool left_down = false, prev_left = false;
+    bool hud_drag = false;
+    bool save_failed = false;
+    bool project_dirty = did_import;
     int  mouse_x = 0, mouse_y = 0;
     u32  last_input_ms = win.ticks_ms();
 
@@ -895,12 +1137,115 @@ int run_live(bool wave_demo = false) {
         last_input_ms = win.ticks_ms();
     };
 
+    auto point_in_hud_panel = [&](int x, int y) noexcept {
+        return x >= kHudPanelX && x < kHudPanelX + kHudPanelW
+            && y >= kHudPanelY && y < kHudPanelY + kHudPanelH;
+    };
+
+    auto mark_project_dirty = [&]() noexcept {
+        project_dirty = true;
+        save_failed = false;
+    };
+
+    auto save_now = [&]() -> bool {
+        if (!opts.save_path.has_value()) return false;
+        if (save_project(controller, root, *opts.save_path)) {
+            project_dirty = false;
+            save_failed = false;
+            return true;
+        }
+        save_failed = true;
+        return false;
+    };
+
+    auto apply_graph_edit = [&](const aleph::lowering::Op& op) -> bool {
+        auto r = controller.apply(op);
+        if (!r.has_value()) return false;
+        mark_project_dirty();
+        invalidate();
+        return true;
+    };
+
+    auto do_undo = [&]() -> bool {
+        if (!controller.undo()) return false;
+        mark_project_dirty();
+        invalidate();
+        return true;
+    };
+
+    auto do_redo = [&]() -> bool {
+        if (!controller.redo()) return false;
+        mark_project_dirty();
+        invalidate();
+        return true;
+    };
+
+    auto do_add_object = [&]() -> bool {
+        aleph::lowering::AddObject add{};
+        add.parent   = root;
+        add.geometry = aleph::types::SphereLocal{Vec3{0.0f, 0.5f, 0.0f}, 0.5f};
+        add.material = lambertian(Vec3{0.3f, 0.6f, 0.9f});
+        return apply_graph_edit(aleph::lowering::Op{add});
+    };
+
+    auto do_add_light = [&]() -> bool {
+        aleph::lowering::AddLight light{};
+        light.parent   = root;
+        light.emission = Vec3{4.0f, 4.0f, 4.0f};
+        light.geometry = aleph::types::QuadLocal{Vec3{-0.5f, 3.0f, -0.5f},
+                                                 Vec3{1.0f, 0.0f, 0.0f},
+                                                 Vec3{0.0f, 0.0f, 1.0f}};
+        return apply_graph_edit(aleph::lowering::Op{light});
+    };
+
+    auto do_delete_selected = [&]() -> bool {
+        if (!controller.selected().has_value()) return false;
+        const NodeId victim = *controller.selected();
+        if (!apply_graph_edit(
+                aleph::lowering::Op{aleph::lowering::DeleteObject{victim}})) {
+            return false;
+        }
+        controller.select(std::nullopt);
+        return true;
+    };
+
+    auto do_refine = [&]() -> bool {
+        return apply_graph_edit(aleph::lowering::Op{
+            aleph::lowering::ApplyRule{&aleph::dpo::rules::refine_cell()}});
+    };
+
+    auto do_kick = [&]() -> bool {
+        if (!wave_demo) return false;
+        const bool kicked =
+            controller.kick(controller.selected().value_or(kick_seed), 1.5);
+        if (kicked) invalidate();
+        return kicked;
+    };
+
+    auto live_hud_snapshot = [&]() {
+        aleph::app::edit::LiveHudSnapshot state{};
+        state.entities = controller.lowered().entities.size();
+        state.lights = controller.lowered().lights.size();
+        state.faces = controller.raster_scene().faces.size();
+        state.wave_demo = wave_demo;
+        state.loaded_project = opts.load_path.has_value();
+        state.imported_obj = did_import;
+        state.can_undo = controller.can_undo();
+        state.can_redo = controller.can_redo();
+        state.has_save_path = opts.save_path.has_value();
+        state.dirty = project_dirty;
+        state.save_failed = save_failed;
+        return state;
+    };
+
     while (running) {
         std::array<aleph::window::Event, 64> evbuf{};
         const int nev = win.poll_events(std::span<aleph::window::Event>{evbuf});
         bool clicked_pick = false;
         bool key_add_obj = false, key_add_light = false, key_delete = false;
         bool key_kick = false;
+        bool key_undo = false, key_redo = false, key_refine = false, key_save = false;
+        bool clicked_pick_over_hud = false;
         int nudge_dx = 0;   // -1 left, +1 right (camera right axis)
         int nudge_dz = 0;   // -1 toward camera eye, +1 toward look target (camera forward on ground)
         int nudge_dy = 0;   // -1 down, +1 up (world Y)
@@ -918,6 +1263,10 @@ int run_live(bool wave_demo = false) {
                     else if (e.key == 'l') key_add_light = true;
                     else if (e.key == 'x') key_delete = true;
                     else if (e.key == 'k') key_kick = true;
+                    else if (e.key == 'u') key_undo = true;
+                    else if (e.key == 'y') key_redo = true;
+                    else if (e.key == 'r') key_refine = true;
+                    else if (e.key == 's') key_save = true;
                     else if (e.key == aleph::window::key::Left)  nudge_dx = -1;
                     else if (e.key == aleph::window::key::Right) nudge_dx = +1;
                     else if (e.key == aleph::window::key::Up)    nudge_dz = +1;
@@ -928,23 +1277,34 @@ int run_live(bool wave_demo = false) {
                         nudge_fast = true;
                     break;
                 case aleph::window::Event::Kind::MouseDown:
-                    if (e.button == 1) { left_down = true; clicked_pick = true; }
                     mouse_x = e.x; mouse_y = e.y;
+                    if (e.button == 1) {
+                        left_down = true;
+                        clicked_pick = true;
+                        hud_drag = point_in_hud_panel(e.x, e.y);
+                        clicked_pick_over_hud = hud_drag;
+                    }
                     break;
                 case aleph::window::Event::Kind::MouseUp:
-                    if (e.button == 1) left_down = false;
+                    if (e.button == 1) {
+                        left_down = false;
+                        hud_drag = false;
+                    }
+                    mouse_x = e.x; mouse_y = e.y;
                     break;
                 case aleph::window::Event::Kind::MouseMove:
                     mouse_x = e.x; mouse_y = e.y;
-                    if (left_down) {
+                    if (left_down && !hud_drag) {
                         controller.camera().orbit(static_cast<f32>(e.dx),
                                                   static_cast<f32>(e.dy));
                         view_dirty = true;
                     }
                     break;
                 case aleph::window::Event::Kind::MouseWheel:
-                    controller.camera().zoom(e.wheel > 0 ? (1.0f / 1.12f) : 1.12f);
-                    view_dirty = true;
+                    if (!point_in_hud_panel(mouse_x, mouse_y)) {
+                        controller.camera().zoom(e.wheel > 0 ? (1.0f / 1.12f) : 1.12f);
+                        view_dirty = true;
+                    }
                     break;
                 default: break;
             }
@@ -952,32 +1312,15 @@ int run_live(bool wave_demo = false) {
         if (!running) break;
 
         // ── Gestures -> Ops. ──────────────────────────────────────────────────
-        if (key_add_obj) {
-            aleph::lowering::AddObject add{};
-            add.parent   = root;
-            add.geometry = aleph::types::SphereLocal{Vec3{0.0f, 0.5f, 0.0f}, 0.5f};
-            add.material = lambertian(Vec3{0.3f, 0.6f, 0.9f});
-            (void)controller.apply(aleph::lowering::Op{add});
-        }
-        if (key_add_light) {
-            aleph::lowering::AddLight light{};
-            light.parent   = root;
-            light.emission = Vec3{4.0f, 4.0f, 4.0f};
-            light.geometry = aleph::types::QuadLocal{Vec3{-0.5f, 3.0f, -0.5f},
-                                                     Vec3{1.0f, 0.0f, 0.0f},
-                                                     Vec3{0.0f, 0.0f, 1.0f}};
-            (void)controller.apply(aleph::lowering::Op{light});
-        }
-        if (key_delete && controller.selected().has_value()) {
-            const NodeId victim = *controller.selected();
-            auto r = controller.apply(
-                aleph::lowering::Op{aleph::lowering::DeleteObject{victim}});
-            if (r.has_value()) controller.select(std::nullopt);
-        }
+        if (key_undo)  (void)do_undo();
+        if (key_redo)  (void)do_redo();
+        if (key_save)  (void)save_now();
+        if (key_refine)   (void)do_refine();
+        if (key_add_obj)  (void)do_add_object();
+        if (key_add_light) (void)do_add_light();
+        if (key_delete) (void)do_delete_selected();
         // Wave: ping the selected node (or the seed if nothing is selected).
-        if (wave_demo && key_kick) {
-            (void)controller.kick(controller.selected().value_or(kick_seed), 1.5);
-        }
+        if (key_kick) (void)do_kick();
 
         // Arrow/Q-E nudge: move the selected object along camera-relative ground
         // axes (←/→ = camera right, ↑/↓ = camera forward on XZ) and world Y (Q/E).
@@ -997,12 +1340,15 @@ int run_live(bool wave_demo = false) {
                 static_cast<f32>(nudge_dy) * step,
                 (right.z * static_cast<f32>(nudge_dx)
                  + fwd.z * static_cast<f32>(nudge_dz)) * step};
-            (void)controller.translate_selected(delta);
-            invalidate();   // keep raster fresh after the nudge (matches SetMaterial)
+            auto moved = controller.translate_selected(delta);
+            if (moved.has_value()) {
+                mark_project_dirty();
+                invalidate();   // keep raster fresh after the nudge (matches SetMaterial)
+            }
         }
 
         // ── Pick on a fresh left-click. ───────────────────────────────────────
-        if (clicked_pick && !prev_left) {
+        if (clicked_pick && !prev_left && !clicked_pick_over_hud) {
             std::optional<NodeId> hit = controller.pick(mouse_x, mouse_y);
             controller.select(hit);
             if (hit.has_value()) {
@@ -1044,12 +1390,12 @@ int run_live(bool wave_demo = false) {
                 // Render one batch into `film`, then fold into the accumulator;
                 // the seed varies per batch so successive passes draw new samples.
                 clear_sky(film);
-                aleph::render::rt::RenderOpts opts{
+                aleph::render::rt::RenderOpts rt_opts{
                     kBatch, 8,
                     aleph::math::u64{42} + static_cast<aleph::math::u64>(pt_samples),
                     32};
                 aleph::render::rt::path_trace(controller.render_scene(), pcam, kSky,
-                                              film, pool, opts);
+                                              film, pool, rt_opts);
                 const f32 wbatch = static_cast<f32>(kBatch);
                 const f32 prev   = static_cast<f32>(pt_samples);
                 const f32 inv    = 1.0f / (prev + wbatch);
@@ -1116,11 +1462,26 @@ int run_live(bool wave_demo = false) {
             }
             aleph::render::sw::downsample_box(ss_film, film, kSSAA);
 
-            // UI panel: selection + a material color slider that emits SetMaterial.
+            // UI panel: selection + direct edit controls.
             const bool ui_mouse_pressed = left_down && !prev_left;
             aleph::editor::ui_begin(ui, &film, mouse_x, mouse_y, left_down,
                                     ui_mouse_pressed);
-            aleph::editor::ui_panel(ui, W - 250, 50, 240, 260, "EDITOR");
+            aleph::editor::ui_panel(ui, kHudPanelX, kHudPanelY, kHudPanelW,
+                                    kHudPanelH, "ALEPH LIVE");
+
+            bool ui_add_obj = false;
+            bool ui_add_light = false;
+            bool ui_delete = false;
+            bool ui_undo = false;
+            bool ui_redo = false;
+            bool ui_refine = false;
+            bool ui_save = false;
+            bool ui_kick = false;
+
+            const int x0 = kHudPanelX + kHudPad;
+            int y = kHudPanelY + 30;
+            const int row_h = 18;
+            const aleph::app::edit::LiveHudSnapshot hud_state = live_hud_snapshot();
 
             char line[96];
             if (controller.selected().has_value()) {
@@ -1129,24 +1490,81 @@ int run_live(bool wave_demo = false) {
             } else {
                 std::snprintf(line, sizeof(line), "NO SELECTION");
             }
-            aleph::editor::ui_label(ui, W - 242, 80, line, Vec3{1, 1, 1});
+            aleph::editor::ui_label(ui, x0, y, line, Vec3{1, 1, 1});
+            y += 16;
 
-            aleph::editor::ui_label(ui, W - 242, 100, "MATERIAL RGB", Vec3{1, 1, 1});
+            std::snprintf(line, sizeof(line), "MODE %.*s",
+                          static_cast<int>(
+                              aleph::app::edit::live_hud_mode_label(hud_state).size()),
+                          aleph::app::edit::live_hud_mode_label(hud_state).data());
+            aleph::editor::ui_label(ui, x0, y, line, Vec3{0.75f, 0.9f, 1.0f});
+            y += 16;
+
+            const std::string history = aleph::app::edit::live_hud_history_line(hud_state);
+            aleph::editor::ui_label(ui, x0, y, history, Vec3{0.78f, 0.82f, 0.9f});
+            y += 16;
+
+            std::snprintf(line, sizeof(line), "SAVE %.*s",
+                          static_cast<int>(
+                              aleph::app::edit::live_hud_save_label(hud_state).size()),
+                          aleph::app::edit::live_hud_save_label(hud_state).data());
+            const Vec3 save_color = save_failed ? Vec3{1.0f, 0.35f, 0.25f}
+                                  : project_dirty ? Vec3{1.0f, 0.82f, 0.35f}
+                                                  : Vec3{0.55f, 0.95f, 0.65f};
+            aleph::editor::ui_label(ui, x0, y, line, save_color);
+            y += 24;
+
+            aleph::editor::ui_label(ui, x0, y, "MATERIAL RGB", Vec3{1, 1, 1});
+            y += 16;
             const Vec3 before = sel_albedo;
-            aleph::editor::ui_slider_f(ui, W - 242, 116, 224, 14, sel_albedo.x, 0.0f, 1.0f);
-            aleph::editor::ui_slider_f(ui, W - 242, 134, 224, 14, sel_albedo.y, 0.0f, 1.0f);
-            aleph::editor::ui_slider_f(ui, W - 242, 152, 224, 14, sel_albedo.z, 0.0f, 1.0f);
+            aleph::editor::ui_slider_f(ui, x0, y, 244, 14, sel_albedo.x, 0.0f, 1.0f);
+            y += 18;
+            aleph::editor::ui_slider_f(ui, x0, y, 244, 14, sel_albedo.y, 0.0f, 1.0f);
+            y += 18;
+            aleph::editor::ui_slider_f(ui, x0, y, 244, 14, sel_albedo.z, 0.0f, 1.0f);
+            y += 22;
             // A color swatch of the current albedo.
-            aleph::editor::draw_rect(film, W - 242, 174, 60, 30, sel_albedo);
+            aleph::editor::draw_rect(film, x0, y, 60, 28, sel_albedo);
+            y += 40;
 
-            aleph::editor::ui_label(ui, W - 242, 214, "A ADD  L LIGHT", Vec3{0.85f, 0.85f, 0.9f});
-            aleph::editor::ui_label(ui, W - 242, 230,
-                                    wave_demo ? "K KICK  X DELETE  DRAG ORBIT"
-                                              : "X DELETE  DRAG ORBIT",
-                                    Vec3{0.85f, 0.85f, 0.9f});
-            aleph::editor::ui_label(ui, W - 242, 246,
-                                    "ARROWS MOVE  Q/E UP-DN  SHIFT FAST",
-                                    Vec3{0.7f, 0.7f, 0.7f});
+            aleph::editor::ui_label(ui, x0, y, "ACTIONS", Vec3{0.85f, 0.85f, 0.9f});
+            y += 16;
+            ui_add_obj =
+                aleph::editor::ui_button(ui, x0, y, 76, row_h, "A OBJ");
+            ui_add_light =
+                aleph::editor::ui_button(ui, x0 + 84, y, 76, row_h, "L LIGHT");
+            ui_delete =
+                aleph::editor::ui_button(ui, x0 + 168, y, 76, row_h, "X DEL");
+            y += 24;
+            ui_undo =
+                aleph::editor::ui_button(ui, x0, y, 76, row_h, "U UNDO");
+            ui_redo =
+                aleph::editor::ui_button(ui, x0 + 84, y, 76, row_h, "Y REDO");
+            ui_refine =
+                aleph::editor::ui_button(ui, x0 + 168, y, 76, row_h, "R CELL");
+            y += 24;
+            if (opts.save_path.has_value()) {
+                ui_save =
+                    aleph::editor::ui_button(ui, x0, y, 76, row_h, "S SAVE");
+            } else {
+                aleph::editor::ui_label(ui, x0, y + 5, "NO SAVE PATH",
+                                        Vec3{0.62f, 0.64f, 0.7f});
+            }
+            if (wave_demo) {
+                ui_kick =
+                    aleph::editor::ui_button(ui, x0 + 84, y, 76, row_h, "K KICK");
+            }
+            y += 30;
+
+            aleph::editor::ui_label(ui, x0, y, "DRAG ORBIT  WHEEL ZOOM",
+                                    Vec3{0.7f, 0.74f, 0.78f});
+            y += 16;
+            aleph::editor::ui_label(ui, x0, y, "ARROWS MOVE  Q/E UP-DN",
+                                    Vec3{0.7f, 0.74f, 0.78f});
+            y += 16;
+            aleph::editor::ui_label(ui, x0, y, "SHIFT FAST",
+                                    Vec3{0.7f, 0.74f, 0.78f});
+            y += 16;
             if (controller.selected().has_value()) {
                 if (auto tid = controller.transform_of(*controller.selected())) {
                     const aleph::types::Node* tn = controller.graph().node(*tid);
@@ -1161,7 +1579,7 @@ int run_live(bool wave_demo = false) {
                                       static_cast<double>(tm(0, 3)),
                                       static_cast<double>(tm(1, 3)),
                                       static_cast<double>(tm(2, 3)));
-                        aleph::editor::ui_label(ui, W - 242, 262, off,
+                        aleph::editor::ui_label(ui, x0, y, off,
                                                 Vec3{0.9f, 0.8f, 0.5f});
                     }
                 }
@@ -1175,17 +1593,22 @@ int run_live(bool wave_demo = false) {
                 aleph::lowering::SetMaterial set{};
                 set.target = *controller.selected();
                 set.params = lambertian(sel_albedo);
-                (void)controller.apply(aleph::lowering::Op{set});
-                invalidate();
+                (void)apply_graph_edit(aleph::lowering::Op{set});
             }
 
+            if (ui_add_obj) (void)do_add_object();
+            if (ui_add_light) (void)do_add_light();
+            if (ui_delete) (void)do_delete_selected();
+            if (ui_undo) (void)do_undo();
+            if (ui_redo) (void)do_redo();
+            if (ui_refine) (void)do_refine();
+            if (ui_save) (void)save_now();
+            if (ui_kick) (void)do_kick();
+
             // HUD.
-            char hud[128];
-            std::snprintf(hud, sizeof(hud), "ENTITIES %zu  LIGHTS %zu  FACES %zu",
-                          controller.lowered().entities.size(),
-                          controller.lowered().lights.size(),
-                          controller.raster_scene().faces.size());
-            aleph::editor::draw_rect(film, 8, 8, 420, 24, Vec3{0, 0, 0});
+            const std::string hud =
+                aleph::app::edit::live_hud_top_line(live_hud_snapshot());
+            aleph::editor::draw_rect(film, 8, 8, 560, 24, Vec3{0, 0, 0});
             aleph::editor::draw_text_shadowed(film, 14, 14, hud, Vec3{1, 1, 1});
 
             src = film.pixels;  // film stride == W (contiguous)
@@ -1222,7 +1645,10 @@ int run_live(bool wave_demo = false) {
         prev_mode  = mode;
         prev_left  = left_down;
     }
-    return 0;
+    if (opts.save_path.has_value()) {
+        (void)save_now();
+    }
+    return save_failed ? 1 : 0;
 }
 
 #endif  // ALEPH_HAVE_SDL2
@@ -1231,34 +1657,86 @@ int run_live(bool wave_demo = false) {
 
 int main(int argc, char** argv) {
     // ── Arg parse ─────────────────────────────────────────────────────────────
+    //   --load <file.aleph>   open a saved graph project
+    //   --save <file.aleph>   write the graph on exit / key s
+    //   --import <file.obj>   import OBJ under the scene root at startup
     //   --headless <outdir>     scripted windowless edit demo (PPM pairs)
     //   --wave <outdir>         headless wave-field capture (deterministic frames)
     //   --orbit-track <outdir>  2-pose live-orbit view-tracking montage (1 PPM)
     //   --wave-live             interactive wave on the lattice (needs SDL2)
     //   (no args)               interactive structural editor (needs SDL2)
+    LaunchOptions opts;
     bool wave_live = false;
+    std::optional<std::string> headless_outdir;
+    std::optional<std::string> wave_outdir;
+    std::optional<std::string> orbit_outdir;
+    bool parse_error = false;
+
+    auto is_flag = [](std::string_view arg) noexcept {
+        return arg.size() >= 2 && arg.substr(0, 2) == "--";
+    };
+    auto optional_outdir = [&](int& i, const char* default_path) -> std::string {
+        if (i + 1 < argc) {
+            const std::string_view next{argv[i + 1]};
+            if (!is_flag(next)) {
+                return std::string(argv[++i]);
+            }
+        }
+        return std::string(default_path);
+    };
+    auto required_path = [&](int& i, std::string_view flag)
+        -> std::optional<std::string> {
+        if (i + 1 < argc) {
+            const std::string_view next{argv[i + 1]};
+            if (!is_flag(next)) {
+                return std::string(argv[++i]);
+            }
+        }
+        std::fprintf(stderr, "aleph_edit: %.*s requires a path\n",
+                     static_cast<int>(flag.size()), flag.data());
+        parse_error = true;
+        return std::nullopt;
+    };
+
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
-        if (arg == "--headless") {
-            std::string outdir = (i + 1 < argc) ? std::string(argv[i + 1])
-                                                : std::string("/tmp/edit_out");
-            return run_headless(outdir);
+        if (arg == "--load") {
+            opts.load_path = required_path(i, arg);
+        } else if (arg == "--save") {
+            opts.save_path = required_path(i, arg);
+        } else if (arg == "--import") {
+            opts.import_obj_path = required_path(i, arg);
+        } else if (arg == "--headless") {
+            headless_outdir = optional_outdir(i, "/tmp/edit_out");
+        } else if (arg == "--wave") {
+            wave_outdir = optional_outdir(i, "/tmp/wave");
+        } else if (arg == "--orbit-track") {
+            orbit_outdir = optional_outdir(i, "/tmp/orbit_track");
+        } else if (arg == "--wave-live") {
+            wave_live = true;
+        } else {
+            std::fprintf(stderr,
+                         "aleph_edit: unknown argument '%.*s' "
+                         "(use --import <file.obj> to load a model)\n",
+                         static_cast<int>(arg.size()), arg.data());
+            parse_error = true;
         }
-        if (arg == "--wave") {
-            std::string outdir = (i + 1 < argc) ? std::string(argv[i + 1])
-                                                : std::string("/tmp/wave");
-            return run_wave(outdir);
-        }
-        if (arg == "--orbit-track") {
-            std::string outdir = (i + 1 < argc) ? std::string(argv[i + 1])
-                                                : std::string("/tmp/orbit_track");
-            return run_orbit_track(outdir);
-        }
-        if (arg == "--wave-live") wave_live = true;
+    }
+
+    if (parse_error) return 2;
+
+    if (headless_outdir.has_value()) {
+        return run_headless(*headless_outdir, opts);
+    }
+    if (wave_outdir.has_value()) {
+        return run_wave(*wave_outdir);
+    }
+    if (orbit_outdir.has_value()) {
+        return run_orbit_track(*orbit_outdir);
     }
 
 #if defined(ALEPH_HAVE_SDL2)
-    return run_live(wave_live);
+    return run_live(wave_live, opts);
 #else
     (void)wave_live;
     std::fprintf(stderr,

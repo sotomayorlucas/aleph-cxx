@@ -29,6 +29,7 @@ add_executable(aleph_tests
     graph/test_edge.cpp
     graph/test_graph_basic.cpp
     graph/test_graph_edges.cpp
+    graph/test_graph_serialization.cpp
     graph/test_invariants_1_5.cpp
     graph/test_invariants_6_10.cpp
     linalg/test_gf2.cpp
@@ -94,6 +95,7 @@ add_executable(aleph_tests
     lowering/test_missing_reference.cpp
     lowering/test_edit_material.cpp
     lowering/test_add_object.cpp
+    lowering/test_import_obj.cpp
     lowering/test_dpo_edit.cpp
     lowering/test_determinism.cpp
     lowering/test_light_grouping.cpp
@@ -103,6 +105,8 @@ add_executable(aleph_tests
     lowering/test_importance.cpp
     edit/test_build_sw.cpp
     edit/test_controller.cpp
+    edit/test_live_hud.cpp
+    edit/test_project_workflow.cpp
     edit/test_sim_controller.cpp
     edit/test_mv_controller.cpp
     edit/test_translate.cpp

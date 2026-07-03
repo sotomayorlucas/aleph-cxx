@@ -270,6 +270,30 @@ public:
         return sw_.face_source[best_i];
     }
 
+    // ── Undo / redo ─────────────────────────────────────────────────────────
+    [[nodiscard]] bool can_undo() const noexcept { return !undo_stack_.empty(); }
+    [[nodiscard]] bool can_redo() const noexcept { return !redo_stack_.empty(); }
+
+    [[nodiscard]] bool undo() {
+        if (undo_stack_.empty()) return false;
+        redo_stack_.push_back(graph_.clone());
+        graph_ = std::move(undo_stack_.back());
+        undo_stack_.pop_back();
+        prev_graph_ = graph_.clone();
+        restore_after_history_jump();
+        return true;
+    }
+
+    [[nodiscard]] bool redo() {
+        if (redo_stack_.empty()) return false;
+        undo_stack_.push_back(graph_.clone());
+        graph_ = std::move(redo_stack_.back());
+        redo_stack_.pop_back();
+        prev_graph_ = graph_.clone();
+        restore_after_history_jump();
+        return true;
+    }
+
     // ── apply(Op) -> expected<void, OpError> (SPEC §3.2) ────────────────────
     // The engine loop: mutate the TRUTH via `apply_op`, then re-derive everything
     // from it. On `apply_op` failure the graph is unchanged (all-or-nothing,
@@ -310,6 +334,7 @@ public:
             // operator/field consistent with it (not stale from the pre-op graph).
             if (sim_enabled_) rebuild_operator_and_reproject();
             rebuild_backends_from_prev();
+            record_committed_edit();
             return std::unexpected(aleph::lowering::OpError::InvariantViolation);
         }
 
@@ -335,11 +360,13 @@ public:
                 // is false for them.
                 const bool op_is_localizable =
                     std::holds_alternative<aleph::lowering::AddObject>(op) ||
+                    std::holds_alternative<aleph::lowering::ImportObj>(op) ||
                     std::holds_alternative<aleph::lowering::DeleteObject>(op);
                 rebuild_operator_localized(*rec, op_is_localizable);
             }
         }
         rebuild_backends_from_prev();
+        record_committed_edit();
         return {};
     }
 
@@ -467,6 +494,22 @@ public:
     }
 
 private:
+    static constexpr std::size_t kMaxUndo = 64;
+
+    void record_committed_edit() {
+        undo_stack_.push_back(std::move(prev_graph_));
+        if (undo_stack_.size() > kMaxUndo) {
+            undo_stack_.erase(undo_stack_.begin());
+        }
+        redo_stack_.clear();
+    }
+
+    void restore_after_history_jump() {
+        rebuild_full();
+        if (sim_enabled_) rebuild_operator_and_reproject();
+        selection_ = std::nullopt;
+    }
+
     // Full lower from the truth (used once at construction). Falls back to an
     // empty LoweredScene if the graph cannot be lowered (e.g. no Camera), then
     // builds coherent-but-empty backends.
@@ -659,6 +702,8 @@ private:
 
     aleph::graph::Graph            graph_;       // the single source of truth
     aleph::graph::Graph            prev_graph_{}; // g_before snapshot (localized Δ rebuild)
+    std::vector<aleph::graph::Graph> undo_stack_{};
+    std::vector<aleph::graph::Graph> redo_stack_{};
     aleph::lowering::LoweredScene  prev_{};      // last lowered IR (incremental base)
     aleph::lowering::SwBuild       sw_{};        // SceneRT + face_source (raster pick)
     aleph::lowering::RenderScene   render_{};    // path-trace Scene + camera pose

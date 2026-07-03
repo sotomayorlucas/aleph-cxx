@@ -195,3 +195,33 @@ TEST_CASE("EditorController sim: cascading DeleteObject re-projects φ; survivor
     // And the sim still steps after the cascading delete.
     REQUIRE(ctl.step(0.01f).has_value());
 }
+
+TEST_CASE("EditorController sim: undo/redo history jumps rebuild wave operator") {
+    AB s = make_ab();
+    const NodeId root = s.root;
+    aleph::edit::EditorController ctl{std::move(s.g)};
+    ctl.set_viewport(64, 48);
+
+    ctl.enable_sim(true);
+    const std::size_t base_nodes = ctl.graph().node_count();
+    const std::size_t base_order = ctl.wave_operator().node_order.size();
+    REQUIRE(base_order == 2);
+
+    aleph::lowering::AddObject add{};
+    add.parent   = root;
+    add.geometry = SphereLocal{Vec3{2, 0, 0}, 0.4f};
+    add.material = aleph::lowering::MaterialParams{};
+    REQUIRE(ctl.apply(aleph::lowering::Op{add}).has_value());
+    CHECK(ctl.graph().node_count() > base_nodes);
+    CHECK(ctl.can_undo());
+
+    REQUIRE(ctl.undo());
+    CHECK(ctl.graph().node_count() == base_nodes);
+    CHECK(ctl.wave_operator().node_order.size() == base_order);
+    REQUIRE(ctl.step(0.01f).has_value());
+
+    REQUIRE(ctl.redo());
+    CHECK(ctl.graph().node_count() > base_nodes);
+    CHECK(ctl.wave_operator().node_order.size() > base_order);
+    REQUIRE(ctl.step(0.01f).has_value());
+}

@@ -9,3 +9,7 @@ Testing/
 
 # Claude Code runtime state (machine-local; never commit)
 .claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# Local scratch output (smoke-test frames, imported OBJ fixtures)
+tmp/

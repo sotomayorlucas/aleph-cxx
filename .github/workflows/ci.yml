@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    # C++26 modules need gcc >= 16 (matches the local toolchain); ubuntu-latest ships gcc-13/14.
+    container: gcc:16
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y ninja-build libsdl2-dev python3-pip
+          pip3 install --break-system-packages "cmake>=3.28"
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build tests
+        run: cmake --build build --target aleph_tests -j$(nproc)
+
+      - name: Run ctest
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Regression subset
+        run: ./build/tests/aleph_tests -tc="regression_*"

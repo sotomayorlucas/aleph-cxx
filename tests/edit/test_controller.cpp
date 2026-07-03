@@ -686,3 +686,86 @@ TEST_CASE("edit: 5x AddObject/DeleteObject cycles leave graph counts at baseline
     CHECK(c.lowered().handle_map.get(seed_a) != nullptr);
     CHECK(c.lowered().handle_map.get(seed_b) != nullptr);
 }
+
+TEST_CASE("edit: undo and redo restore graph truth and lowered state") {
+    TwoMesh ctl = make_two_mesh();
+    aleph::edit::EditorController c{std::move(ctl.g)};
+
+    REQUIRE_FALSE(c.can_undo());
+    REQUIRE_FALSE(c.can_redo());
+    const std::size_t base_entities = c.lowered().entities.size();
+    const std::size_t base_nodes    = c.graph().node_count();
+
+    aleph::lowering::AddObject add{};
+    add.parent   = ctl.root;
+    add.geometry = SphereLocal{Vec3{0, 2, 0}, 0.5f};
+    add.material = green_lambertian();
+    REQUIRE(c.apply(aleph::lowering::Op{add}).has_value());
+
+    CHECK(c.can_undo());
+    CHECK_FALSE(c.can_redo());
+    CHECK(c.lowered().entities.size() == base_entities + 1);
+    CHECK(c.graph().node_count() > base_nodes);
+    CHECK(lowered_matches_full(c, c.graph()));
+
+    REQUIRE(c.undo());
+    CHECK(c.lowered().entities.size() == base_entities);
+    CHECK(c.graph().node_count() == base_nodes);
+    CHECK_FALSE(c.can_undo());
+    CHECK(c.can_redo());
+    CHECK(lowered_matches_full(c, c.graph()));
+    CHECK(no_dangling_faces(c));
+
+    REQUIRE(c.redo());
+    CHECK(c.lowered().entities.size() == base_entities + 1);
+    CHECK(c.can_undo());
+    CHECK_FALSE(c.can_redo());
+    CHECK(lowered_matches_full(c, c.graph()));
+    CHECK(no_dangling_faces(c));
+}
+
+TEST_CASE("edit: undo followed by new apply clears redo") {
+    TwoMesh ctl = make_two_mesh();
+    aleph::edit::EditorController c{std::move(ctl.g)};
+
+    aleph::lowering::AddObject add1{};
+    add1.parent   = ctl.root;
+    add1.geometry = SphereLocal{Vec3{0, 2, 0}, 0.5f};
+    add1.material = green_lambertian();
+    REQUIRE(c.apply(aleph::lowering::Op{add1}).has_value());
+    REQUIRE(c.undo());
+    REQUIRE(c.can_redo());
+
+    aleph::lowering::AddObject add2{};
+    add2.parent   = ctl.root;
+    add2.geometry = SphereLocal{Vec3{0, -2, 0}, 0.5f};
+    add2.material = green_lambertian();
+    REQUIRE(c.apply(aleph::lowering::Op{add2}).has_value());
+
+    CHECK(c.can_undo());
+    CHECK_FALSE(c.can_redo());
+    CHECK_FALSE(c.redo());
+    CHECK(lowered_matches_full(c, c.graph()));
+}
+
+TEST_CASE("edit: failed apply does not push undo history") {
+    TwoMesh ctl = make_two_mesh();
+    aleph::edit::EditorController c{std::move(ctl.g)};
+
+    const std::size_t nodes_before = c.graph().node_count();
+    const std::size_t edges_before = c.graph().edge_count();
+
+    aleph::lowering::AddObject bad{};
+    bad.parent   = NodeId{999999};
+    bad.geometry = SphereLocal{Vec3{0, 0, 0}, 1.0f};
+    bad.material = green_lambertian();
+
+    auto r = c.apply(aleph::lowering::Op{bad});
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error() == aleph::lowering::OpError::NodeNotFound);
+    CHECK_FALSE(c.can_undo());
+    CHECK_FALSE(c.can_redo());
+    CHECK(c.graph().node_count() == nodes_before);
+    CHECK(c.graph().edge_count() == edges_before);
+    CHECK(lowered_matches_full(c, c.graph()));
+}
