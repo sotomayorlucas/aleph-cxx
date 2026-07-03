@@ -4,10 +4,11 @@
 Usage: plot_scaling.py [csv_path] [out_dir]
 Defaults: docs/paper/data/scaling.csv -> docs/paper/figs/
 
-Design notes (dataviz method): categorical slots assigned in fixed order
-(blue, aqua, yellow, green, violet); every series direct-labeled (relief rule
-for the aqua/yellow slots); one axis per chart; thin 1.8pt lines; recessive
-grid; text in ink tokens, never series colors.
+Design notes (dataviz method): categorical slots in fixed order; every series
+direct-labeled (relief rule); one axis per chart; thin 1.8pt lines; recessive
+grid; text in ink tokens. The three interior edits (add1/add2/delete) differ
+by <5% in cost, so figures collapse them into one "interior" series (median)
+against the corner add — collapsing is stated in the caption, not hidden.
 """
 import sys
 from pathlib import Path
@@ -34,6 +35,8 @@ plt.rcParams.update({
     "lines.linewidth": 1.8, "lines.markersize": 5.5,
 })
 
+INTERIOR = ["add1", "add2", "delete"]
+
 
 def style(ax, xlabel, ylabel, title):
     ax.grid(True, which="major", zorder=0)
@@ -54,63 +57,76 @@ def main():
     out = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(__file__).parents[1] / "figs"
     out.mkdir(parents=True, exist_ok=True)
     df = pd.read_csv(csv)
-    edits = ["add1", "add2", "delete", "add_corner"]
-    ed = {k: df[df.edit == k] for k in edits}
     init = df[df.edit == "initial"]
+    interior = (df[df.edit.isin(INTERIOR)]
+                .groupby("grid", as_index=False)
+                .agg(edges=("edges", "median"), t_full_ms=("t_full_ms", "median"),
+                     t_local_ms=("t_local_ms", "median"),
+                     dirty_frac=("dirty_frac", "median")))
+    corner = df[df.edit == "add_corner"]
 
     # Fig A — per-edit operator update cost vs |E| (log-log).
-    fig, ax = plt.subplots(figsize=(4.4, 3.2), layout="constrained")
-    full = df[df.edit != "initial"].groupby("edges", as_index=False).t_full_ms.median()
-    ax.loglog(full.edges, full.t_full_ms, color=SLOT[0], marker=MARKERS[0], zorder=3)
-    label_end(ax, full.edges.iloc[-1], full.t_full_ms.iloc[-1], "full rebuild", SLOT[0])
-    for i, k in enumerate(edits, start=1):
-        d = ed[k]
-        ax.loglog(d.edges, d.t_local_ms, color=SLOT[i], marker=MARKERS[i], zorder=3)
-        label_end(ax, d.edges.iloc[-1], d.t_local_ms.iloc[-1],
-                  f"local · {k} (dirty={int(d.dirty.iloc[-1])})", SLOT[i])
-    ax.set_xlim(right=ax.get_xlim()[1] * 4)  # room for direct labels
+    fig, ax = plt.subplots(figsize=(4.6, 3.2), layout="constrained")
+    ax.loglog(interior.edges, interior.t_full_ms, color=SLOT[0],
+              marker=MARKERS[0], zorder=3)
+    label_end(ax, interior.edges.iloc[-1], interior.t_full_ms.iloc[-1],
+              "full rebuild", SLOT[0])
+    ax.loglog(interior.edges, interior.t_local_ms, color=SLOT[1],
+              marker=MARKERS[1], zorder=3)
+    label_end(ax, interior.edges.iloc[-1], interior.t_local_ms.iloc[-1],
+              "local · interior\n(dirty 37–51)", SLOT[1], dy=8)
+    ax.loglog(corner.edges, corner.t_local_ms, color=SLOT[2],
+              marker=MARKERS[2], zorder=3)
+    label_end(ax, corner.edges.iloc[-1], corner.t_local_ms.iloc[-1],
+              "local · corner\n(dirty 13)", SLOT[2], dy=-12)
+    ax.set_xlim(right=ax.get_xlim()[1] * 6)
     style(ax, "|E| (skeleton edges)", "median ms per edit",
-          "Localized rebuild is O(touched); full rebuild grows with |E|")
+          "Per-edit rebuild cost (log–log)")
     fig.savefig(out / "fig_a_local_vs_full.pdf")
     fig.savefig(out / "fig_a_local_vs_full.png", dpi=200)
 
     # Fig B — dirty/|E| gate predictor decay (log-x).
-    fig, ax = plt.subplots(figsize=(4.4, 3.0), layout="constrained")
-    for i, k in enumerate(edits, start=1):
-        d = ed[k]
-        ax.semilogx(d.edges, d.dirty_frac, color=SLOT[i], marker=MARKERS[i], zorder=3)
-        label_end(ax, d.edges.iloc[-1], d.dirty_frac.iloc[-1], k, SLOT[i])
+    fig, ax = plt.subplots(figsize=(4.6, 3.0), layout="constrained")
+    ax.semilogx(interior.edges, interior.dirty_frac, color=SLOT[0],
+                marker=MARKERS[0], zorder=3)
+    label_end(ax, interior.edges.iloc[-1], interior.dirty_frac.iloc[-1],
+              "interior edits", SLOT[0], dy=8)
+    ax.semilogx(corner.edges, corner.dirty_frac, color=SLOT[1],
+                marker=MARKERS[1], zorder=3)
+    label_end(ax, corner.edges.iloc[-1], corner.dirty_frac.iloc[-1],
+              "corner add", SLOT[1], dy=-4)
     ax.axhline(0.5, color=INK2, linestyle="--", linewidth=0.8)
-    ax.annotate("fallback gate (0.5)", (ax.get_xlim()[0], 0.5),
+    ax.annotate("fallback gate (0.5)", (ax.get_xlim()[0] * 1.1, 0.5),
                 xytext=(4, 4), textcoords="offset points", fontsize=8, color=INK2)
     ax.set_ylim(0, 0.55)
-    ax.set_xlim(right=ax.get_xlim()[1] * 4)
+    ax.set_xlim(right=ax.get_xlim()[1] * 5)
     style(ax, "|E| (skeleton edges)", "dirty / |E|",
-          "Constant dirty cover: the localized fraction vanishes as meshes grow")
+          "Dirty-cover fraction per edit")
     fig.savefig(out / "fig_b_dirty_fraction.pdf")
     fig.savefig(out / "fig_b_dirty_fraction.png", dpi=200)
 
     # Fig C — global-support formulation blow-up vs bounded build (log-log).
-    fig, ax = plt.subplots(figsize=(4.4, 3.0), layout="constrained")
+    fig, ax = plt.subplots(figsize=(4.6, 3.0), layout="constrained")
     g = init.dropna(subset=["t_global_ms"])
     ax.loglog(init.nodes, init.t_full_ms, color=SLOT[0], marker=MARKERS[0], zorder=3)
     label_end(ax, init.nodes.iloc[-1], init.t_full_ms.iloc[-1], "bounded κ_R", SLOT[0])
     ax.loglog(g.nodes, g.t_global_ms, color=SLOT[1], marker=MARKERS[1], zorder=3)
-    label_end(ax, g.nodes.iloc[-1], g.t_global_ms.iloc[-1], "global support", SLOT[1])
+    label_end(ax, g.nodes.iloc[-1], g.t_global_ms.iloc[-1],
+              "global support\n(stops: >5 min)", SLOT[1])
     ax.set_xlim(right=ax.get_xlim()[1] * 3)
     style(ax, "|V| (nodes)", "full build, ms (log)",
-          "The global W₁ formulation blows up; the bounded operator does not")
+          "Global-support W₁ blow-up")
     fig.savefig(out / "fig_c_global_blowup.pdf")
     fig.savefig(out / "fig_c_global_blowup.png", dpi=200)
 
     # Fig D — MV certificate cost vs nodes (single series; no legend needed).
     cert = df.dropna(subset=["t_cert_ms"])
     if len(cert):
-        fig, ax = plt.subplots(figsize=(4.4, 3.0), layout="constrained")
+        fig, ax = plt.subplots(figsize=(4.6, 3.0), layout="constrained")
         c = cert.groupby("nodes", as_index=False).t_cert_ms.median()
         ax.plot(c.nodes, c.t_cert_ms, color=SLOT[0], marker=MARKERS[0], zorder=3)
         style(ax, "|V| (nodes)", "certificate, ms",
-              "Mayer-Vietoris certificate cost (residual = 0 on every edit)")
+              "Mayer–Vietoris certificate cost")
         fig.savefig(out / "fig_d_cert_cost.pdf")
         fig.savefig(out / "fig_d_cert_cost.png", dpi=200)
 

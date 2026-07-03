@@ -5,3 +5,38 @@ grid 8x8...
   grid=8 add_corner dirty=13/116 rc=13 full=30.63ms local=1.56ms x19.7 exact=1 +cert
   grid=8 delete     dirty=49/114 rc=49 full=29.80ms local=20.68ms x1.4 exact=1 +cert
 grid 12x12...
+  grid=12 initial    |E|=264 global=336704.27ms bounded=84.13ms
+  grid=12 add1       dirty=37/265 rc=37 full=86.20ms local=19.18ms x4.5 exact=1 +cert
+  grid=12 add2       dirty=51/267 rc=51 full=87.47ms local=26.00ms x3.4 exact=1 +cert
+  grid=12 add_corner dirty=13/268 rc=13 full=87.80ms local=1.71ms x51.4 exact=1 +cert
+  grid=12 delete     dirty=49/266 rc=49 full=86.60ms local=24.92ms x3.5 exact=1 +cert
+grid 16x16...
+  grid=16 initial    |E|=480 global=-1.00ms bounded=172.99ms
+  grid=16 add1       dirty=37/481 rc=37 full=175.19ms local=19.62ms x8.9 exact=1 +cert
+  grid=16 add2       dirty=51/483 rc=51 full=176.52ms local=26.46ms x6.7 exact=1 +cert
+  grid=16 add_corner dirty=13/484 rc=13 full=176.79ms local=1.93ms x91.7 exact=1 +cert
+  grid=16 delete     dirty=49/482 rc=49 full=175.35ms local=25.37ms x6.9 exact=1 +cert
+grid 24x24...
+  grid=24 initial    |E|=1104 global=-1.00ms bounded=446.52ms
+  grid=24 add1       dirty=37/1105 rc=37 full=449.04ms local=20.90ms x21.5 exact=1 +cert
+  grid=24 add2       dirty=51/1107 rc=51 full=449.74ms local=27.88ms x16.1 exact=1 +cert
+  grid=24 add_corner dirty=13/1108 rc=13 full=449.71ms local=2.57ms x175.2 exact=1 +cert
+  grid=24 delete     dirty=49/1106 rc=49 full=449.10ms local=26.61ms x16.9 exact=1 +cert
+grid 32x32...
+  grid=32 initial    |E|=1984 global=-1.00ms bounded=887.54ms
+  grid=32 add1       dirty=37/1985 rc=37 full=1600.15ms local=23.00ms x69.6 exact=1
+  grid=32 add2       dirty=51/1987 rc=51 full=894.26ms local=30.10ms x29.7 exact=1
+  grid=32 add_corner dirty=13/1988 rc=13 full=897.47ms local=4.07ms x220.3 exact=1
+  grid=32 delete     dirty=49/1986 rc=49 full=892.58ms local=29.06ms x30.7 exact=1
+grid 48x48...
+  grid=48 initial    |E|=4512 global=-1.00ms bounded=2244.92ms
+  grid=48 add1       dirty=37/4513 rc=37 full=2243.14ms local=54.52ms x41.1 exact=1
+  grid=48 add2       dirty=51/4515 rc=51 full=3901.49ms local=61.73ms x63.2 exact=1
+  grid=48 add_corner dirty=13/4516 rc=13 full=2246.69ms local=36.87ms x60.9 exact=1
+  grid=48 delete     dirty=49/4514 rc=49 full=2249.55ms local=63.30ms x35.5 exact=1
+grid 64x64...
+  grid=64 initial    |E|=8064 global=-1.00ms bounded=4811.48ms
+  grid=64 add1       dirty=37/8065 rc=37 full=4815.92ms local=128.42ms x37.5 exact=1
+  grid=64 add2       dirty=51/8067 rc=51 full=4811.28ms local=132.20ms x36.4 exact=1
+  grid=64 add_corner dirty=13/8068 rc=13 full=4812.31ms local=107.72ms x44.7 exact=1
+  grid=64 delete     dirty=49/8066 rc=49 full=4804.64ms local=132.58ms x36.2 exact=1

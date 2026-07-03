@@ -58,8 +58,18 @@ into a correctness proof for a live, editable engine.
   3. **Runtime cohomological certificate**: a Mayer-Vietoris residual (== 0)
      over the rewrite's U/K/R cover of the flag complex, certifying the
      decomposition each localized rebuild relies on — per-edit, in a live
-     engine (contrast: Volk 2026 maintains abstract sheaf cohomology for TDA;
-     Young 2026 uses MV for program analysis).
+     engine. **Contrast with care** (see contrast-notes.md, RISK ESCALATION):
+     Volk 2026 incrementally maintains sheaf cohomology *through the sheaf
+     0-Laplacian* with a PROVEN zero-drift / bit-exact guarantee (Thm 3.10)
+     and a §8.4 self-consistency check that re-verifies its own maintained
+     cohomology; Young 2026 already frames H¹ as an obstruction certificate
+     and uses MV for incrementality in program analysis. We claim NO primacy
+     on incremental cohomology, bit-exact maintenance, or MV-as-certificate.
+     The defensible claim (no prior work has all four qualifiers): the first
+     cohomological certificate that is an EXTERNAL witness guarding a
+     DIFFERENT object — a *curvature-weighted rendering/physics operator's*
+     localized rebuild — under *DPO scene-graph edits* inside a *live,
+     deterministic, interactive engine*.
   4. **The one-substrate system**: the same cached, kernel-aware LDLᵀ of Δ
      drives light/importance, wave, heat, Helmholtz (indefinite, via
      Bunch-Kaufman on the k²-shifted copy), vector diffusion, and implicit
@@ -74,11 +84,15 @@ factor reuse [Herholz & Alexa 2018; Herholz & Sorkine-Hornung 2020]; one
 prefactored operator, many tasks [DEC 2005/2013; Crane et al. 2013; Sharp et
 al. 2019; Bouaziz et al. 2014]; curvature-weighted Laplacians [LLY
 reweighting, arXiv:2603.11060]; sheaf spectra [Hansen & Ghrist 2019];
-incremental sheaf cohomology [Volk 2026]; MV-based incremental reasoning
-[Young 2026]; DPO in geometric modeling [Jerboa]; deterministic lockstep
-[Fiedler; ReproBLAS]. Our delta on each axis: dynamic topology, bit-identity
-as invariant, certificate guarding a *numerical operator* rebuild, and the
-rendering+physics union on ONE graph operator.
+incremental sheaf cohomology *via the sheaf Laplacian, bit-exact* [Volk 2026 —
+the closest prior art; camera-ready contrast paragraphs in contrast-notes.md];
+H¹-as-certificate + MV incrementality [Young 2026 — full title and author
+correction in contrast-notes.md]; DPO in geometric modeling [Jerboa];
+deterministic lockstep [Fiedler; ReproBLAS]. Our delta on each axis: dynamic
+topology, bit-identity as invariant, an EXTERNAL certificate guarding a
+*different, curvature-weighted numerical operator* (not re-verifying the
+maintained object itself), and the rendering+physics union on ONE graph
+operator.
 
 ## 3. System overview
 
@@ -159,21 +173,32 @@ cert_max grids). [TODO: exact cost curve from data/scaling.csv.]
 ## 7. Evaluation (numbers from data/scaling.csv — regenerate with
 `./build/bench/aleph_bench_scaling --reps 5 > docs/paper/data/scaling.csv`)
 
-RxR 4-neighbour lattices; per-grid edit trace add1/add2/add_corner/delete
-threading prev (mirrors the editor path). Preliminary highlights (grids 8–16,
-5-rep medians; FINAL numbers TODO from the full sweep to grid 64):
+RxR 4-neighbour lattices, grids 8–64 (|V| 64–4096, |E| 112–8064); per-grid
+edit trace add1/add2/add_corner/delete threading prev (mirrors the editor
+path). 5-rep medians; full sweep in data/scaling.csv; figures figs/fig_[a-d].
 
-- **O(touched)**: dirty-edge count is constant in mesh size (37/51/13/49 per
-  edit kind); dirty/|E| falls from 0.33 (grid 8) to 0.03–0.11 (grid 16) and
-  keeps falling linearly in |E|.
-- **Speedup local vs full bounded rebuild**: add_corner 20× → 91× (grid
-  8 → 16); add1 1.8× → 9.0×; grows ∝ |E|/dirty. [TODO grid 24–64.]
-- **Global formulation blowup (the contrast case)**: full global build 6.1 s
-  at 64 nodes vs 28 ms bounded — ×218 at toy size and superlinear.
-- **Bit-exactness**: asserted per bench row (bench exits nonzero otherwise);
-  Tier-1 CI equality on multi-edit traces.
-- **MV certificate**: residual 0 on every edit; ~1.0–1.2 ms at grid 8. [TODO
-  cost curve to grid 24.]
+- **O(touched)**: the dirty cover is CONSTANT in mesh size (37/51/13/49 per
+  edit kind, grid 8 through 64); dirty/|E| falls from 0.33–0.44 (grid 8) to
+  0.0016–0.0063 (grid 64) — the fallback gate (0.5) is never approached
+  beyond toy sizes (fig_b).
+- **Local vs full bounded rebuild** (fig_a): full grows ∝|E| (30 ms → 4.8 s,
+  grid 8 → 64); local stays ~flat (17–30 ms) until dense assembly dominates
+  (knee at |E|≈2k), settling at 36–45× speedup at grid 64 (108–133 ms vs
+  4.8 s). The knee is the §8 dense-assembly limitation, visible and honest:
+  the κ_R recompute is O(touched); the O(n²) assembly bounds the end-to-end
+  win at large n until the sparse-operator slice lands.
+- **Global formulation blowup (the contrast case, fig_c)**: 6.1 s at 64 nodes
+  and 337 s at 144 nodes, vs 20 ms / 84 ms bounded — ×309 and ×4005; the
+  global-support series is unmeasurable past toy sizes, which is precisely
+  why a byte-exact engine needs κ_R.
+- **Bit-exactness**: asserted on every bench row (the bench exits nonzero on
+  any mismatch — the whole sweep ran green); Tier-1 CI equality on multi-edit
+  traces.
+- **MV certificate** (fig_d): residual 0 on every edit; ~1 ms at 65 nodes,
+  ~7.7 ms at 257, ~53 ms at 577 (superlinear — the visibility-sheaf H⁰
+  computation over the full flag complex dominates; localizing the
+  certificate itself is future work, but at ~53 ms it is already viable
+  per-edit at editor scale).
 - **Qualitative artifacts**: deterministic wave-ripple contact sheets
   (`docs/superpowers/artifacts/2026-06-06-wave-field.{gif,mp4}`), resonance
   spectrum (`2026-06-06-resonance-spectrum.png`), raster/PT parity sheets.
@@ -212,8 +237,10 @@ subset.
        (t_local vs |E| at constant dirty; dirty/|E| decay; cert cost).
 2. [ ] Irregular-mesh trace (OBJ import + edits) as a second benchmark family.
 3. [ ] Write Lemma 1 / Prop. 1 proofs in full (currently sketches).
-4. [ ] Verify paywalled citations against PDFs (survey caveat); fetch Volk
-       2026 + Young 2026 full texts and write the two contrast paragraphs.
+4. [ ] Verify paywalled citations against PDFs (survey caveat). Volk/Young
+       full texts READ and contrast paragraphs WRITTEN (contrast-notes.md) —
+       re-confirm quotes/section numbers against official PDFs at camera-ready
+       (Volk v2 numbering may shift); use Young's corrected title/author.
 5. [ ] Decide headline: SGP framing (operator maintenance + certificate) vs
        SCA framing (physics family on one substrate). Current draft: SGP.
 6. [ ] LaTeX port (CGF template) once §7 data is final.
