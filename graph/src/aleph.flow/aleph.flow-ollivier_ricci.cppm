@@ -164,6 +164,44 @@ inline std::size_t node_index_of(const SkeletonState& st, NodeId id) {
 // PURE FUNCTION of the local ball (no global-`n` perturbation drift).
 inline constexpr int kCurvRadius = 2;
 
+}  // namespace aleph::flow::detail
+
+export namespace aleph::flow {
+
+// Shared skeleton adjacency: the global vertex->dense-index map and symmetric
+// neighbour lists, built ONCE per skeleton and threaded through every per-edge
+// bounded-curvature call (spec 2026-07-03). Built by the SAME loops in the
+// SAME order as the previous per-call code (index over skel.vertices, adj over
+// skel.edges), so curvatures computed through it are bit-identical to the
+// fresh-adjacency path.
+struct SkeletonAdjacency {
+    aleph::containers::OrderedMap<aleph::types::NodeId, std::size_t> index;
+    std::vector<std::vector<std::size_t>>                            adj;
+};
+
+[[nodiscard]] inline SkeletonAdjacency build_adjacency(
+    const aleph::sheaf::OneSkeleton& skel) {
+    SkeletonAdjacency shared;
+    const std::size_t gn = skel.vertices.size();
+    for (std::size_t i = 0; i < gn; ++i) {
+        shared.index.insert(skel.vertices[i], i);
+    }
+    shared.adj.assign(gn, std::vector<std::size_t>{});
+    for (const auto& [ea, eb] : skel.edges) {
+        const std::size_t* ia = shared.index.get(ea);
+        const std::size_t* ib = shared.index.get(eb);
+        if (ia != nullptr && ib != nullptr) {
+            shared.adj[*ia].push_back(*ib);
+            shared.adj[*ib].push_back(*ia);
+        }
+    }
+    return shared;
+}
+
+}  // namespace aleph::flow
+
+namespace aleph::flow::detail {
+
 // build_local_state: a SkeletonState scoped to the radius-`radius` ball
 // B_R(a, b) of the skeleton, the bounded-support core. FULLY DETERMINISTIC and
 // depends ONLY on the induced subgraph of B_R(a, b): two graphs that agree on
@@ -183,27 +221,16 @@ inline constexpr int kCurvRadius = 2;
 //      geodesic among the support nodes (intermediates are in B_2), so kappa_R
 //      matches the global geometry; the only difference is the local `n`.
 //   4. nodes = the sorted ball ids; n = ball size.
-[[nodiscard]] inline SkeletonState build_local_state(const OneSkeleton& skel,
-                                                     NodeId a, NodeId b,
-                                                     int radius) {
+[[nodiscard]] inline SkeletonState build_local_state(
+    const OneSkeleton& skel, const SkeletonAdjacency& shared, NodeId a,
+    NodeId b, int radius) {
     const std::size_t gn = skel.vertices.size();
 
-    // Global node id -> dense index (skeleton vertex order, sorted).
-    aleph::containers::OrderedMap<NodeId, std::size_t> g_index;
-    for (std::size_t i = 0; i < gn; ++i) {
-        g_index.insert(skel.vertices[i], i);
-    }
-
-    // Symmetric adjacency over the full skeleton (dense global indices).
-    std::vector<std::vector<std::size_t>> g_adj(gn);
-    for (const auto& [ea, eb] : skel.edges) {
-        const std::size_t* ia = g_index.get(ea);
-        const std::size_t* ib = g_index.get(eb);
-        if (ia != nullptr && ib != nullptr) {
-            g_adj[*ia].push_back(*ib);
-            g_adj[*ib].push_back(*ia);
-        }
-    }
+    // Global node id -> dense index and symmetric adjacency, prebuilt ONCE per
+    // skeleton by build_adjacency (identical construction order), instead of
+    // O(V+E) per edge.
+    const auto& g_index = shared.index;
+    const auto& g_adj   = shared.adj;
 
     // BFS from {a, b} to `radius` hops -> ball (dense global indices). Both
     // endpoints seed at distance 0.
@@ -281,14 +308,29 @@ inline constexpr int kCurvRadius = 2;
     return st;
 }
 
+// Fresh-adjacency wrapper: builds the shared adjacency for a single call.
+[[nodiscard]] inline SkeletonState build_local_state(const OneSkeleton& skel,
+                                                     NodeId a, NodeId b,
+                                                     int radius) {
+    return build_local_state(skel, build_adjacency(skel), a, b, radius);
+}
+
 // ricci_curvature_edge_bounded: the bounded-support Ollivier-Ricci curvature
 // kappa_R(a, b) = ricci_curvature_edge(build_local_state(skel, a, b, radius),
 // a, b). Reuses the committed per-edge primitive with the LOCAL state, so it is
 // a pure function of B_R(a, b) and localizes byte-exact by construction.
+[[nodiscard]] inline f64 ricci_curvature_edge_bounded(
+    const OneSkeleton& skel, const SkeletonAdjacency& shared, NodeId a,
+    NodeId b, int radius) {
+    return ricci_curvature_edge(build_local_state(skel, shared, a, b, radius),
+                                a, b);
+}
+
 [[nodiscard]] inline f64 ricci_curvature_edge_bounded(const OneSkeleton& skel,
                                                       NodeId a, NodeId b,
                                                       int radius) {
-    return ricci_curvature_edge(build_local_state(skel, a, b, radius), a, b);
+    return ricci_curvature_edge_bounded(skel, build_adjacency(skel), a, b,
+                                        radius);
 }
 
 inline SkeletonState build_state(const OneSkeleton& skel) {
@@ -378,6 +420,21 @@ using RicciMap =
 [[nodiscard]] inline RicciMap ricci_curvature(const aleph::graph::Graph& g) {
     const OneSkeleton skel = OneSkeleton::from_graph(g);
     return ricci_curvature_from_skeleton(skel);
+}
+
+// Bounded-support kappa_R for a single edge, with a prebuilt SkeletonAdjacency
+// (shared across many per-edge calls) or a fresh one per call. Radius defaults
+// to the provably sufficient R=2 ball.
+[[nodiscard]] inline f64 ricci_curvature_edge_bounded(
+    const OneSkeleton& skel, const SkeletonAdjacency& shared, NodeId a,
+    NodeId b, int radius = detail::kCurvRadius) {
+    return detail::ricci_curvature_edge_bounded(skel, shared, a, b, radius);
+}
+
+[[nodiscard]] inline f64 ricci_curvature_edge_bounded(
+    const OneSkeleton& skel, NodeId a, NodeId b,
+    int radius = detail::kCurvRadius) {
+    return detail::ricci_curvature_edge_bounded(skel, a, b, radius);
 }
 
 // Compute Ollivier-Ricci W_2^eps curvature (Sinkhorn-Knopp form) for every

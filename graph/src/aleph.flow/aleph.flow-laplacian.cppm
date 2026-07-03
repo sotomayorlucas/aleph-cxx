@@ -171,11 +171,12 @@ export namespace aleph::flow {
 [[nodiscard]] inline WeightedLaplacian build_laplacian_bounded(
     const aleph::graph::Graph& g, WeightFn weight_fn,
     int radius = detail::kCurvRadius) {
-    const OneSkeleton skel = OneSkeleton::from_graph(g);
+    const OneSkeleton       skel   = OneSkeleton::from_graph(g);
+    const SkeletonAdjacency shared = build_adjacency(skel);  // once, O(V+E)
     RicciMap          curv;
     for (const auto& [a, b] : skel.edges) {   // from_graph guarantees both endpoints are vertices
         const f64 kappa =
-            detail::ricci_curvature_edge_bounded(skel, a, b, radius);
+            detail::ricci_curvature_edge_bounded(skel, shared, a, b, radius);
         curv.insert(std::pair<NodeId, NodeId>{a, b}, kappa);
     }
     return detail::assemble(skel, std::move(curv), weight_fn);
@@ -260,8 +261,9 @@ two_hop_touched_edges(const OneSkeleton&          skel,
 //   * the fresh curvature map is inserted in the SAME canonical skel.edges order
 //     the full build uses, so assemble's diagonal += fp summation order matches.
 //
-// No global build_state: each recompute builds its OWN local state over B_R(e)
-// (the asymptotic win — O(ball) per dirty edge).
+// No global build_state: each recompute works over its OWN local ball B_R(e),
+// sharing one prebuilt SkeletonAdjacency (the asymptotic win — O(V+E) once
+// plus O(ball) per dirty edge).
 //
 // `dirty_edges` are the canonical-keyed edges to recompute (from
 // two_hop_touched_edges with radius = kCurvRadius). On a cache miss for a
@@ -273,7 +275,8 @@ two_hop_touched_edges(const OneSkeleton&          skel,
     const std::vector<std::pair<NodeId, NodeId>>& dirty_edges,
     WeightFn weight_fn, int* recompute_count = nullptr,
     int radius = detail::kCurvRadius) {
-    const OneSkeleton skel = OneSkeleton::from_graph(g_after);
+    const OneSkeleton       skel   = OneSkeleton::from_graph(g_after);
+    const SkeletonAdjacency shared = build_adjacency(skel);  // once, O(V+E)
 
     // Dirty set for O(1) membership (canonical edge key).
     aleph::containers::OrderedMap<std::pair<NodeId, NodeId>, bool> dirty_set;
@@ -288,7 +291,8 @@ two_hop_touched_edges(const OneSkeleton&          skel,
         const std::pair<NodeId, NodeId> key{a, b};
         f64                             kappa;
         if (dirty_set.contains(key)) {
-            kappa = detail::ricci_curvature_edge_bounded(skel, a, b, radius);
+            kappa = detail::ricci_curvature_edge_bounded(skel, shared, a, b,
+                                                         radius);
             if (recompute_count != nullptr) {
                 ++*recompute_count;
             }
@@ -298,7 +302,8 @@ two_hop_touched_edges(const OneSkeleton&          skel,
                 kappa = *cached;
             } else {
                 // Cache miss (survivor edge never seen) -> safe recompute.
-                kappa = detail::ricci_curvature_edge_bounded(skel, a, b, radius);
+                kappa = detail::ricci_curvature_edge_bounded(skel, shared, a, b,
+                                                         radius);
                 if (recompute_count != nullptr) {
                     ++*recompute_count;
                 }

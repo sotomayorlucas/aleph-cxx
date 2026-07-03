@@ -58,6 +58,7 @@ add_executable(aleph_tests
     flow/test_ollivier_ricci.cpp
     flow/test_laplacian.cpp
     flow/test_mv_localization.cpp
+    flow/test_shared_adjacency.cpp
     flow/test_flow.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
