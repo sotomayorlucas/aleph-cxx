@@ -6,6 +6,7 @@ target_sources(aleph_sim
         aleph.sim-wave.cppm
         aleph.sim-diffuse.cppm
         aleph.sim-helmholtz.cppm
+        aleph.sim-implicit.cppm
         aleph.sim-vector_field.cppm)
 target_link_libraries(aleph_sim
     # aleph_linalg_sparse is PUBLIC: DMatrix appears in WaveStepper's exported
