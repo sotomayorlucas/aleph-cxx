@@ -29,6 +29,29 @@ public:
         return m;
     }
 
+    // Build directly from CSR parts (no dense detour — the O(V+E) assembly
+    // path). Preconditions (caller-guaranteed, checked cheaply): row_ptr has
+    // rows+1 entries starting at 0 and ending at col_idx.size(); col_idx and
+    // values are parallel; column indices are sorted ascending within each
+    // row. Returns an empty matrix on a malformed shape (defensive — the
+    // assembly code upholds the contract by construction).
+    [[nodiscard]] static CsrMatrix from_parts(std::size_t rows, std::size_t cols,
+                                              std::vector<std::size_t> row_ptr,
+                                              std::vector<std::size_t> col_idx,
+                                              std::vector<f64>         values) {
+        if (row_ptr.size() != rows + 1 || col_idx.size() != values.size()
+            || row_ptr.front() != 0 || row_ptr.back() != values.size()) {
+            return CsrMatrix::empty();
+        }
+        CsrMatrix m;
+        m.rows_    = rows;
+        m.cols_    = cols;
+        m.row_ptr_ = std::move(row_ptr);
+        m.col_idx_ = std::move(col_idx);
+        m.values_  = std::move(values);
+        return m;
+    }
+
     // Build from a dense matrix, dropping entries with |v| <= eps
     // (port linalg_f64_sparse::CsrMatrix::from_dense_eps).
     [[nodiscard]] static CsrMatrix from_dense_eps(const DMatrix& a, f64 eps) {

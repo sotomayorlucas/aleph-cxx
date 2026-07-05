@@ -49,8 +49,11 @@ import aleph.io;      // load_obj (--family obj)
 
 using aleph::flow::build_laplacian;
 using aleph::flow::build_laplacian_bounded;
+using aleph::flow::build_laplacian_bounded_sparse;
 using aleph::flow::build_laplacian_local;
+using aleph::flow::build_laplacian_local_sparse;
 using aleph::flow::default_weight;
+using aleph::flow::SparseWeightedLaplacian;
 using aleph::flow::two_hop_touched_edges;
 using aleph::flow::WeightedLaplacian;
 using aleph::graph::Graph;
@@ -260,6 +263,18 @@ double median_ms(int reps, double& sink, auto&& fn) {
     return t[t.size() / 2];
 }
 
+// Sparse-vs-dense value exactness: every stored entry bitwise (spec 2026-07-04).
+bool sparse_matches_dense(const SparseWeightedLaplacian& sp,
+                          const WeightedLaplacian&       de) {
+    if (sp.node_order != de.node_order) return false;
+    const std::size_t n = de.node_order.size();
+    if (sp.matrix.rows() != n || sp.matrix.cols() != n) return false;
+    for (std::size_t i = 0; i < n; ++i)
+        for (std::size_t j = 0; j < n; ++j)
+            if (sp.matrix.get(i, j) != de.matrix.at(i, j)) return false;
+    return true;
+}
+
 bool bit_exact(const WeightedLaplacian& a, const WeightedLaplacian& b) {
     if (a.node_order != b.node_order) return false;
     if (a.matrix.rows() != b.matrix.rows()
@@ -284,11 +299,17 @@ struct EditRow {
 
 bool g_all_exact = true;
 
-// Measure one edit already applied to `g`: local-vs-full rebuild + optional MV
-// certificate. Returns the timed full rebuild to thread as the next `prev`.
-WeightedLaplacian measure_edit(std::size_t R, Graph& g,
-                               const WeightedLaplacian& prev, const EditRow& e,
-                               int reps, bool with_cert) {
+// Measure one edit already applied to `g`: local-vs-full rebuild (dense AND
+// sparse carriers) + optional MV certificate. Returns the timed full rebuilds
+// to thread as the next `prev`/`prev_sp`.
+struct EditResult {
+    WeightedLaplacian       full;
+    SparseWeightedLaplacian full_sp;
+};
+
+EditResult measure_edit(std::size_t R, Graph& g, const WeightedLaplacian& prev,
+                        const SparseWeightedLaplacian& prev_sp,
+                        const EditRow& e, int reps, bool with_cert) {
     const std::size_t nodes = g.node_count();
 
     double sink = 0.0;
@@ -321,6 +342,35 @@ WeightedLaplacian measure_edit(std::size_t R, Graph& g,
     const bool exact = bit_exact(local, full);
     if (!exact) g_all_exact = false;
 
+    // Sparse carriers: full and end-to-end localized (same pipeline), plus
+    // per-row value-exactness vs the dense full build.
+    SparseWeightedLaplacian full_sp =
+        build_laplacian_bounded_sparse(g, default_weight);
+    const double t_full_sp = median_ms(reps, sink, [&](double& s) {
+        const SparseWeightedLaplacian w =
+            build_laplacian_bounded_sparse(g, default_weight);
+        s += w.matrix.get(0, 0);
+        return s;
+    });
+    const double t_local_sp = median_ms(reps, sink, [&](double& s) {
+        const OneSkeleton sk = OneSkeleton::from_graph(g);
+        const auto        d  = two_hop_touched_edges(sk, e.seed);
+        int               r  = 0;
+        const SparseWeightedLaplacian w =
+            build_laplacian_local_sparse(g, prev_sp, d, default_weight, &r);
+        s += w.matrix.get(0, 0);
+        return s;
+    });
+    {
+        int rs = 0;
+        const SparseWeightedLaplacian local_sp = build_laplacian_local_sparse(
+            g, prev_sp, dirty, default_weight, &rs);
+        if (!sparse_matches_dense(full_sp, full)
+            || !sparse_matches_dense(local_sp, full)) {
+            g_all_exact = false;
+        }
+    }
+
     // Mayer-Vietoris certificate (Tier-2): decompose the rewrite and certify
     // over the visibility sheaf, as tests/edit/test_mv_controller.cpp does.
     double t_cert    = -1.0;
@@ -350,16 +400,17 @@ WeightedLaplacian measure_edit(std::size_t R, Graph& g,
                 R, nodes, edges, e.name, e.seed.size(), dirty.size(), rc,
                 dirty_frac, t_full, t_local,
                 t_local > 0.0 ? t_full / t_local : 0.0, exact ? 1 : 0);
-    if (with_cert) std::printf("%d,%.4f\n", residual, t_cert);
-    else           std::printf(",\n");
+    if (with_cert) std::printf("%d,%.4f", residual, t_cert);
+    else           std::printf(",");
+    std::printf(",%.4f,%.4f\n", t_full_sp, t_local_sp);
     std::fprintf(stderr,
                  "  grid=%zu %-10s dirty=%zu/%zu rc=%d full=%.2fms local=%.2fms "
-                 "x%.1f exact=%d%s\n",
+                 "x%.1f | sp full=%.2fms local=%.2fms | exact=%d%s\n",
                  R, e.name, dirty.size(), edges, rc, t_full, t_local,
-                 t_local > 0.0 ? t_full / t_local : 0.0, exact ? 1 : 0,
-                 with_cert ? " +cert" : "");
+                 t_local > 0.0 ? t_full / t_local : 0.0, t_full_sp, t_local_sp,
+                 exact ? 1 : 0, with_cert ? " +cert" : "");
     (void)sink;
-    return full;
+    return EditResult{std::move(full), std::move(full_sp)};
 }
 
 // One full measurement pass over a face-adjacency graph: initial builds +
@@ -389,14 +440,22 @@ void run_mesh_trace(std::size_t size_param, FaceGraph fg, int reps) {
         t_global0 = now_ms() - t0;
         sink += w.matrix.at(0, 0);
     }
+    const double t_sp0 = median_ms(reps, sink, [&](double& s) {
+        const SparseWeightedLaplacian w =
+            build_laplacian_bounded_sparse(fg.g, default_weight);
+        s += w.matrix.get(0, 0);
+        return s;
+    });
     WeightedLaplacian prev = build_laplacian_bounded(fg.g, default_weight);
+    SparseWeightedLaplacian prev_sp =
+        build_laplacian_bounded_sparse(fg.g, default_weight);
     const OneSkeleton skel0 = OneSkeleton::from_graph(fg.g);
     if (t_global0 >= 0.0)
-        std::printf("%zu,%zu,%zu,initial,,,,,%.4f,%.4f,,,,,\n", size_param,
-                    n_faces, skel0.edges.size(), t_global0, t_bounded0);
+        std::printf("%zu,%zu,%zu,initial,,,,,%.4f,%.4f,,,,,,%.4f,\n", size_param,
+                    n_faces, skel0.edges.size(), t_global0, t_bounded0, t_sp0);
     else
-        std::printf("%zu,%zu,%zu,initial,,,,,,%.4f,,,,,\n", size_param,
-                    n_faces, skel0.edges.size(), t_bounded0);
+        std::printf("%zu,%zu,%zu,initial,,,,,,%.4f,,,,,,%.4f,\n", size_param,
+                    n_faces, skel0.edges.size(), t_bounded0, t_sp0);
     std::fprintf(stderr,
                  "  mesh=%zu initial    |V|=%zu |E|=%zu global=%.2fms bounded=%.2fms\n",
                  size_param, n_faces, skel0.edges.size(), t_global0, t_bounded0);
@@ -425,7 +484,10 @@ void run_mesh_trace(std::size_t size_param, FaceGraph fg, int reps) {
         const NodeId c  = add_object(fg.g, {to});
         e.seed    = {c, to};
         e.created = {c};
-        prev = measure_edit(size_param, fg.g, prev, e, reps, with_cert);
+        EditResult res =
+            measure_edit(size_param, fg.g, prev, prev_sp, e, reps, with_cert);
+        prev    = std::move(res.full);
+        prev_sp = std::move(res.full_sp);
     }
     // add2: attach spanning two adjacent faces.
     NodeId c2{};
@@ -437,7 +499,10 @@ void run_mesh_trace(std::size_t size_param, FaceGraph fg, int reps) {
         c2              = add_object(fg.g, {t1, t2});
         e.seed    = {c2, t1, t2};
         e.created = {c2};
-        prev = measure_edit(size_param, fg.g, prev, e, reps, with_cert);
+        EditResult res =
+            measure_edit(size_param, fg.g, prev, prev_sp, e, reps, with_cert);
+        prev    = std::move(res.full);
+        prev_sp = std::move(res.full_sp);
     }
     // add_corner: attach at a hole-boundary (lowest-degree) face.
     {
@@ -447,7 +512,10 @@ void run_mesh_trace(std::size_t size_param, FaceGraph fg, int reps) {
         const NodeId c  = add_object(fg.g, {to});
         e.seed    = {c, to};
         e.created = {c};
-        prev = measure_edit(size_param, fg.g, prev, e, reps, with_cert);
+        EditResult res =
+            measure_edit(size_param, fg.g, prev, prev_sp, e, reps, with_cert);
+        prev    = std::move(res.full);
+        prev_sp = std::move(res.full_sp);
     }
     // delete: cascade-remove the 2-edge object; seed = its old neighbours.
     {
@@ -457,7 +525,10 @@ void run_mesh_trace(std::size_t size_param, FaceGraph fg, int reps) {
         const NodeId t2 = fg.ids[interior2];
         fg.g.remove_node_cascade(c2);
         e.seed = {t1, t2};
-        prev = measure_edit(size_param, fg.g, prev, e, reps, with_cert);
+        EditResult res =
+            measure_edit(size_param, fg.g, prev, prev_sp, e, reps, with_cert);
+        prev    = std::move(res.full);
+        prev_sp = std::move(res.full_sp);
     }
 }
 
@@ -500,7 +571,7 @@ int main(int argc, char** argv) {
     std::printf(
         "grid,nodes,edges,edit,seeds,dirty,recomputed,dirty_frac,"
         "t_global_ms,t_full_ms,t_local_ms,speedup,bit_exact,"
-        "cert_residual,t_cert_ms\n");
+        "cert_residual,t_cert_ms,t_full_sp_ms,t_local_sp_ms\n");
 
     if (std::strcmp(family, "mesh") == 0) {
         // Icosphere levels 1..max_level, perforated at the final level for
@@ -548,14 +619,22 @@ int main(int argc, char** argv) {
             t_global0 = now_ms() - t0;
             sink += w.matrix.at(0, 0);
         }
+        const double t_sp0 = median_ms(reps, sink, [&](double& s2) {
+            const SparseWeightedLaplacian w =
+                build_laplacian_bounded_sparse(grid.g, default_weight);
+            s2 += w.matrix.get(0, 0);
+            return s2;
+        });
         WeightedLaplacian prev = build_laplacian_bounded(grid.g, default_weight);
+        SparseWeightedLaplacian prev_sp =
+            build_laplacian_bounded_sparse(grid.g, default_weight);
         const OneSkeleton skel0 = OneSkeleton::from_graph(grid.g);
         if (t_global0 >= 0.0)
-            std::printf("%zu,%zu,%zu,initial,,,,,%.4f,%.4f,,,,,\n", R,
-                        R * R, skel0.edges.size(), t_global0, t_bounded0);
+            std::printf("%zu,%zu,%zu,initial,,,,,%.4f,%.4f,,,,,,%.4f,\n", R,
+                        R * R, skel0.edges.size(), t_global0, t_bounded0, t_sp0);
         else
-            std::printf("%zu,%zu,%zu,initial,,,,,,%.4f,,,,,\n", R,
-                        R * R, skel0.edges.size(), t_bounded0);
+            std::printf("%zu,%zu,%zu,initial,,,,,,%.4f,,,,,,%.4f,\n", R,
+                        R * R, skel0.edges.size(), t_bounded0, t_sp0);
         std::fprintf(stderr,
                      "  grid=%zu initial    |E|=%zu global=%.2fms bounded=%.2fms\n",
                      R, skel0.edges.size(), t_global0, t_bounded0);
@@ -571,7 +650,10 @@ int main(int argc, char** argv) {
             const NodeId c  = add_object(grid.g, {to});
             e.seed    = {c, to};
             e.created = {c};
-            prev = measure_edit(R, grid.g, prev, e, reps, with_cert);
+            EditResult res =
+                measure_edit(R, grid.g, prev, prev_sp, e, reps, with_cert);
+            prev    = std::move(res.full);
+            prev_sp = std::move(res.full_sp);
         }
         // add2: 2-edge add spanning two interior nodes.
         NodeId c2{};
@@ -583,7 +665,10 @@ int main(int argc, char** argv) {
             c2              = add_object(grid.g, {t1, t2});
             e.seed    = {c2, t1, t2};
             e.created = {c2};
-            prev = measure_edit(R, grid.g, prev, e, reps, with_cert);
+            EditResult res =
+                measure_edit(R, grid.g, prev, prev_sp, e, reps, with_cert);
+            prev    = std::move(res.full);
+            prev_sp = std::move(res.full_sp);
         }
         // add_corner: 1-edge add at the lattice corner (smallest ball).
         {
@@ -593,7 +678,10 @@ int main(int argc, char** argv) {
             const NodeId c  = add_object(grid.g, {to});
             e.seed    = {c, to};
             e.created = {c};
-            prev = measure_edit(R, grid.g, prev, e, reps, with_cert);
+            EditResult res =
+                measure_edit(R, grid.g, prev, prev_sp, e, reps, with_cert);
+            prev    = std::move(res.full);
+            prev_sp = std::move(res.full_sp);
         }
         // delete: cascade-remove the 2-edge object; seed = surviving old
         // neighbours captured BEFORE the delete.
@@ -604,7 +692,10 @@ int main(int argc, char** argv) {
             const NodeId t2 = grid.ids[mid - 1][mid];
             grid.g.remove_node_cascade(c2);
             e.seed = {t1, t2};
-            prev = measure_edit(R, grid.g, prev, e, reps, with_cert);
+            EditResult res =
+                measure_edit(R, grid.g, prev, prev_sp, e, reps, with_cert);
+            prev    = std::move(res.full);
+            prev_sp = std::move(res.full_sp);
         }
     }
 

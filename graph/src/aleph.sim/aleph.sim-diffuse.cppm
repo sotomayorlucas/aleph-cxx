@@ -25,8 +25,11 @@ struct DiffuseStepper {
 
     // Explicit (forward-Euler) heat step ∂u/∂t = −α·Δu  ⇒  u[i] -= dt·α·(Δu)[i].
     // matvec-only (the shared operator application). Stable for dt·α·λ_max < 2.
+    // Generic over the operator carrier (DMatrix or CsrMatrix; matvecs agree to
+    // a few ulps and each carrier is byte-deterministic — spec 2026-07-04).
+    template <typename TOp>
     [[nodiscard]] std::expected<void, StepError>
-    step(Section<f64>& u, const DMatrix& delta, f64 dt) const noexcept {
+    step(Section<f64>& u, const TOp& delta, f64 dt) const noexcept {
         const std::size_t n = u.size();
         if (n == 0) return std::unexpected(StepError::EmptyField);
         if (delta.rows() != n || delta.cols() != n)

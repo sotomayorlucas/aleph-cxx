@@ -98,6 +98,36 @@ struct WeightedLaplacian {
     }
 };
 
+// Sparse carrier of the same operator: values are BIT-IDENTICAL to the dense
+// WeightedLaplacian's (assemble_sparse accumulates each diagonal in the same
+// canonical-edge-order subsequence the dense assemble does; off-diagonals are
+// single writes). CsrMatrix::matvec agrees with the dense matvec to within a
+// few ulps per entry — NOT bitwise: ISO-mode FP contraction may choose
+// fma-vs-mul+add differently across the two loop shapes — and each carrier
+// is individually byte-deterministic run-to-run. Diagonal entries are ALWAYS
+// stored (nnz = n + 2|E|), so an isolated vertex still has an explicit 0.0
+// row. Spec 2026-07-04.
+struct SparseWeightedLaplacian {
+    std::vector<NodeId>                  node_order;
+    aleph::linalg::sparse::CsrMatrix     matrix;
+    RicciMap                             curvatures;
+
+    [[nodiscard]] bool is_symmetric(f64 eps) const {
+        return matrix.is_symmetric(eps);
+    }
+
+    [[nodiscard]] bool ones_in_kernel(f64 eps) const {
+        const std::size_t n = node_order.size();
+        if (n == 0) return true;
+        const std::vector<f64> ones(n, 1.0);
+        const std::vector<f64> out = matrix.matvec(std::span<const f64>(ones));
+        for (const f64 x : out) {
+            if (std::abs(x) >= eps) return false;
+        }
+        return true;
+    }
+};
+
 }  // namespace aleph::flow
 
 namespace aleph::flow::detail {
@@ -141,6 +171,124 @@ inline WeightedLaplacian assemble(const OneSkeleton& skel, RicciMap curvatures,
                              std::move(curvatures)};
 }
 
+// Sparse twin of `assemble`: same canonical iteration, same per-diagonal FP
+// addition subsequence (bit-identical values), CSR output, O(V + E log deg).
+inline SparseWeightedLaplacian assemble_sparse(const OneSkeleton& skel,
+                                               RicciMap curvatures,
+                                               WeightFn weight_fn) {
+    std::vector<NodeId> node_order(skel.vertices.begin(), skel.vertices.end());
+    const std::size_t   n = node_order.size();
+
+    aleph::containers::OrderedMap<NodeId, std::size_t> node_to_idx;
+    for (std::size_t i = 0; i < n; ++i) {
+        node_to_idx.insert(node_order[i], i);
+    }
+
+    // One pass in canonical map order: diagonal accumulation mirrors the
+    // dense `matrix.at(a,a) += w` subsequence bit-for-bit; off-diagonals are
+    // collected as (col, -w) and sorted per row afterwards.
+    std::vector<f64> diag(n, 0.0);
+    std::vector<std::vector<std::pair<std::size_t, f64>>> off(n);
+    for (const auto& [edge, kappa] : curvatures) {
+        const std::size_t* ia = node_to_idx.get(edge.first);
+        const std::size_t* ib = node_to_idx.get(edge.second);
+        if (ia == nullptr || ib == nullptr) {
+            continue;
+        }
+        const f64 w = weight_fn(kappa);
+        off[*ia].emplace_back(*ib, -w);
+        off[*ib].emplace_back(*ia, -w);
+        diag[*ia] += w;
+        diag[*ib] += w;
+    }
+
+    std::vector<std::size_t> row_ptr(n + 1, 0);
+    std::vector<std::size_t> col_idx;
+    std::vector<f64>         values;
+    col_idx.reserve(n + 2 * curvatures.size());
+    values.reserve(n + 2 * curvatures.size());
+    for (std::size_t i = 0; i < n; ++i) {
+        std::sort(off[i].begin(), off[i].end(),
+                  [](const auto& l, const auto& r) { return l.first < r.first; });
+        bool placed = false;
+        for (const auto& [c, v] : off[i]) {
+            if (!placed && c > i) {
+                col_idx.push_back(i);
+                values.push_back(diag[i]);
+                placed = true;
+            }
+            col_idx.push_back(c);
+            values.push_back(v);
+        }
+        if (!placed) {
+            col_idx.push_back(i);
+            values.push_back(diag[i]);
+        }
+        row_ptr[i + 1] = values.size();
+    }
+    return SparseWeightedLaplacian{
+        std::move(node_order),
+        aleph::linalg::sparse::CsrMatrix::from_parts(
+            n, n, std::move(row_ptr), std::move(col_idx), std::move(values)),
+        std::move(curvatures)};
+}
+
+// Curvature-map construction shared by the dense and sparse builders (pure
+// factorization of the previous build_laplacian_bounded/_local loop bodies —
+// iteration and insertion order token-identical, so the dense outputs are
+// unchanged bit-for-bit).
+[[nodiscard]] inline RicciMap bounded_curvatures(
+    const OneSkeleton& skel, const SkeletonAdjacency& shared, int radius) {
+    RicciMap curv;
+    for (const auto& [a, b] : skel.edges) {   // from_graph guarantees both endpoints are vertices
+        const f64 kappa =
+            detail::ricci_curvature_edge_bounded(skel, shared, a, b, radius);
+        curv.insert(std::pair<NodeId, NodeId>{a, b}, kappa);
+    }
+    return curv;
+}
+
+[[nodiscard]] inline RicciMap local_curvatures(
+    const OneSkeleton& skel, const SkeletonAdjacency& shared,
+    const RicciMap& prev_curvatures,
+    const std::vector<std::pair<NodeId, NodeId>>& dirty_edges,
+    int* recompute_count, int radius) {
+    // Dirty set for O(1) membership (canonical edge key).
+    aleph::containers::OrderedMap<std::pair<NodeId, NodeId>, bool> dirty_set;
+    for (const auto& e : dirty_edges) {
+        dirty_set.insert(e, true);
+    }
+
+    // FRESH curvature map, inserted in canonical skel.edges order (the SAME
+    // order build_laplacian_bounded uses) -> byte-identical assembly.
+    RicciMap curv;
+    for (const auto& [a, b] : skel.edges) {   // from_graph guarantees both endpoints are vertices
+        const std::pair<NodeId, NodeId> key{a, b};
+        f64                             kappa;
+        if (dirty_set.contains(key)) {
+            kappa = detail::ricci_curvature_edge_bounded(skel, shared, a, b,
+                                                         radius);
+            if (recompute_count != nullptr) {
+                ++*recompute_count;
+            }
+        } else {
+            const f64* cached = prev_curvatures.get(key);
+            if (cached != nullptr) {
+                kappa = *cached;
+            } else {
+                // Cache miss (survivor edge never seen) -> safe recompute.
+                kappa = detail::ricci_curvature_edge_bounded(skel, shared, a, b,
+                                                             radius);
+                if (recompute_count != nullptr) {
+                    ++*recompute_count;
+                }
+            }
+        }
+        curv.insert(key, kappa);
+    }
+    return curv;
+}
+
 }  // namespace aleph::flow::detail
 
 export namespace aleph::flow {
@@ -173,13 +321,21 @@ export namespace aleph::flow {
     int radius = detail::kCurvRadius) {
     const OneSkeleton       skel   = OneSkeleton::from_graph(g);
     const SkeletonAdjacency shared = build_adjacency(skel);  // once, O(V+E)
-    RicciMap          curv;
-    for (const auto& [a, b] : skel.edges) {   // from_graph guarantees both endpoints are vertices
-        const f64 kappa =
-            detail::ricci_curvature_edge_bounded(skel, shared, a, b, radius);
-        curv.insert(std::pair<NodeId, NodeId>{a, b}, kappa);
-    }
-    return detail::assemble(skel, std::move(curv), weight_fn);
+    return detail::assemble(
+        skel, detail::bounded_curvatures(skel, shared, radius), weight_fn);
+}
+
+// Sparse twins of build_laplacian_bounded / build_laplacian_local: identical
+// curvature construction (shared detail helpers), CSR assembly with values
+// bit-identical to the dense matrix (see SparseWeightedLaplacian). These
+// remove the O(n^2) dense-assembly term from the per-edit rebuild.
+[[nodiscard]] inline SparseWeightedLaplacian build_laplacian_bounded_sparse(
+    const aleph::graph::Graph& g, WeightFn weight_fn,
+    int radius = detail::kCurvRadius) {
+    const OneSkeleton       skel   = OneSkeleton::from_graph(g);
+    const SkeletonAdjacency shared = build_adjacency(skel);  // once, O(V+E)
+    return detail::assemble_sparse(
+        skel, detail::bounded_curvatures(skel, shared, radius), weight_fn);
 }
 // 2-hop closure: every skeleton edge incident to a vertex within 2 hops of any
 // `seed` node. The sound invalidation rule for Ollivier-Ricci kappa(a,b): its
@@ -277,41 +433,27 @@ two_hop_touched_edges(const OneSkeleton&          skel,
     int radius = detail::kCurvRadius) {
     const OneSkeleton       skel   = OneSkeleton::from_graph(g_after);
     const SkeletonAdjacency shared = build_adjacency(skel);  // once, O(V+E)
+    return detail::assemble(
+        skel,
+        detail::local_curvatures(skel, shared, prev.curvatures, dirty_edges,
+                                 recompute_count, radius),
+        weight_fn);
+}
 
-    // Dirty set for O(1) membership (canonical edge key).
-    aleph::containers::OrderedMap<std::pair<NodeId, NodeId>, bool> dirty_set;
-    for (const auto& e : dirty_edges) {
-        dirty_set.insert(e, true);
-    }
-
-    // FRESH curvature map, inserted in canonical skel.edges order (the SAME
-    // order build_laplacian_bounded uses) -> byte-identical assembly.
-    RicciMap curv;
-    for (const auto& [a, b] : skel.edges) {   // from_graph guarantees both endpoints are vertices
-        const std::pair<NodeId, NodeId> key{a, b};
-        f64                             kappa;
-        if (dirty_set.contains(key)) {
-            kappa = detail::ricci_curvature_edge_bounded(skel, shared, a, b,
-                                                         radius);
-            if (recompute_count != nullptr) {
-                ++*recompute_count;
-            }
-        } else {
-            const f64* cached = prev.curvatures.get(key);
-            if (cached != nullptr) {
-                kappa = *cached;
-            } else {
-                // Cache miss (survivor edge never seen) -> safe recompute.
-                kappa = detail::ricci_curvature_edge_bounded(skel, shared, a, b,
-                                                         radius);
-                if (recompute_count != nullptr) {
-                    ++*recompute_count;
-                }
-            }
-        }
-        curv.insert(key, kappa);
-    }
-    return detail::assemble(skel, std::move(curv), weight_fn);
+// Sparse twin of build_laplacian_local (same caching semantics; `prev` is the
+// sparse carrier whose curvature map is consulted for clean edges).
+[[nodiscard]] inline SparseWeightedLaplacian build_laplacian_local_sparse(
+    const aleph::graph::Graph& g_after, const SparseWeightedLaplacian& prev,
+    const std::vector<std::pair<NodeId, NodeId>>& dirty_edges,
+    WeightFn weight_fn, int* recompute_count = nullptr,
+    int radius = detail::kCurvRadius) {
+    const OneSkeleton       skel   = OneSkeleton::from_graph(g_after);
+    const SkeletonAdjacency shared = build_adjacency(skel);  // once, O(V+E)
+    return detail::assemble_sparse(
+        skel,
+        detail::local_curvatures(skel, shared, prev.curvatures, dirty_edges,
+                                 recompute_count, radius),
+        weight_fn);
 }
 
 // Same as build_laplacian but uses the smooth W_2^eps curvature

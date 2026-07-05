@@ -59,6 +59,7 @@ add_executable(aleph_tests
     flow/test_laplacian.cpp
     flow/test_mv_localization.cpp
     flow/test_shared_adjacency.cpp
+    flow/test_sparse_laplacian.cpp
     flow/test_flow.cpp
     sim/test_implicit.cpp
     threads/test_pool.cpp

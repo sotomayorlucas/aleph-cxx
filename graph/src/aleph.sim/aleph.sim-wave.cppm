@@ -14,6 +14,7 @@ import :section;
 export namespace aleph::sim {
 
 using aleph::math::f64;
+using aleph::linalg::sparse::CsrMatrix;
 using aleph::linalg::sparse::DMatrix;
 
 struct WaveParams {
@@ -40,6 +41,21 @@ struct WaveStepper {
         return p.c * p.c * dt * dt * g < 4.0;
     }
 
+    // Sparse-carrier overload: the row abs-sum over stored entries equals the
+    // dense row's bitwise (adding |0.0| is an exact no-op).
+    [[nodiscard]] static bool
+    cfl_ok(const CsrMatrix& delta, const WaveParams& p, f64 dt) noexcept {
+        const auto& rp = delta.row_ptr();
+        const auto& vs = delta.values();
+        f64 g = 0.0;
+        for (std::size_t i = 0; i < delta.rows(); ++i) {
+            f64 row = 0.0;
+            for (std::size_t k = rp[i]; k < rp[i + 1]; ++k) row += std::fabs(vs[k]);
+            if (row > g) g = row;
+        }
+        return p.c * p.c * dt * dt * g < 4.0;
+    }
+
     // One explicit symplectic-Euler ("Verlet") sub-step of φ̈ = −c²Δφ, on two
     // sections: u (displacement φ) and v (velocity φ̇).
     //
@@ -47,8 +63,12 @@ struct WaveStepper {
     // updated (the diverging entry and everything before it stepped, the rest
     // stale) — discard them; do not re-step. The editor controller honours this by
     // bailing before it re-bakes/render and by re-zeroing on the next enable_sim.
+    // Generic over the operator carrier (dense DMatrix or CsrMatrix — both
+    // expose rows/cols/matvec; matvecs agree to a few ulps per entry and each
+    // carrier is byte-deterministic, spec 2026-07-04). Call sites unchanged.
+    template <typename TOp>
     [[nodiscard]] std::expected<void, StepError>
-    step(Section<f64>& u, Section<f64>& v, const DMatrix& delta, f64 dt) const noexcept {
+    step(Section<f64>& u, Section<f64>& v, const TOp& delta, f64 dt) const noexcept {
         const std::size_t n = u.size();
         if (n == 0) return std::unexpected(StepError::EmptyField);
         if (delta.rows() != n || delta.cols() != n || v.size() != n)

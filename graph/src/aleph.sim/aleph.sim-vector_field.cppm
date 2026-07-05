@@ -31,8 +31,11 @@ struct VectorDiffuseStepper {
 
     // Explicit (forward-Euler) heat per component: u[i].c -= dt·α·(Δ u_c)[i] for
     // c ∈ {x,y,z} in fixed order. Stable for dt·α·λ_max < 2.
+    // Generic over the operator carrier (DMatrix or CsrMatrix; matvecs agree to
+    // a few ulps and each carrier is byte-deterministic — spec 2026-07-04).
+    template <typename TOp>
     [[nodiscard]] std::expected<void, StepError>
-    step(Section<Vec3>& u, const DMatrix& delta, f64 dt) const noexcept {
+    step(Section<Vec3>& u, const TOp& delta, f64 dt) const noexcept {
         const std::size_t n = u.size();
         if (n == 0) return std::unexpected(StepError::EmptyField);
         if (delta.rows() != n || delta.cols() != n)
