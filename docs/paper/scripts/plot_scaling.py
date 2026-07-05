@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Paper figures from bench/aleph_bench_scaling CSV.
 
-Usage: plot_scaling.py [csv_path] [out_dir]
-Defaults: docs/paper/data/scaling.csv -> docs/paper/figs/
+Usage: plot_scaling.py [csv_path] [out_dir] [prefix]
+Defaults: docs/paper/data/scaling.csv -> docs/paper/figs/ with prefix "fig"
+(mesh family: plot_scaling.py data/scaling_mesh.csv figs mesh)
 
 Design notes (dataviz method): categorical slots in fixed order; every series
 direct-labeled (relief rule); one axis per chart; thin 1.8pt lines; recessive
@@ -55,6 +56,7 @@ def label_end(ax, x, y, text, color, dy=0.0):
 def main():
     csv = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parents[1] / "data/scaling.csv"
     out = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(__file__).parents[1] / "figs"
+    pre = sys.argv[3] if len(sys.argv) > 3 else "fig"
     out.mkdir(parents=True, exist_ok=True)
     df = pd.read_csv(csv)
     init = df[df.edit == "initial"]
@@ -82,8 +84,8 @@ def main():
     ax.set_xlim(right=ax.get_xlim()[1] * 6)
     style(ax, "|E| (skeleton edges)", "median ms per edit",
           "Per-edit rebuild cost (log–log)")
-    fig.savefig(out / "fig_a_local_vs_full.pdf")
-    fig.savefig(out / "fig_a_local_vs_full.png", dpi=200)
+    fig.savefig(out / f"{pre}_a_local_vs_full.pdf")
+    fig.savefig(out / f"{pre}_a_local_vs_full.png", dpi=200)
 
     # Fig B — dirty/|E| gate predictor decay (log-x).
     fig, ax = plt.subplots(figsize=(4.6, 3.0), layout="constrained")
@@ -102,22 +104,23 @@ def main():
     ax.set_xlim(right=ax.get_xlim()[1] * 5)
     style(ax, "|E| (skeleton edges)", "dirty / |E|",
           "Dirty-cover fraction per edit")
-    fig.savefig(out / "fig_b_dirty_fraction.pdf")
-    fig.savefig(out / "fig_b_dirty_fraction.png", dpi=200)
+    fig.savefig(out / f"{pre}_b_dirty_fraction.pdf")
+    fig.savefig(out / f"{pre}_b_dirty_fraction.png", dpi=200)
 
     # Fig C — global-support formulation blow-up vs bounded build (log-log).
     fig, ax = plt.subplots(figsize=(4.6, 3.0), layout="constrained")
     g = init.dropna(subset=["t_global_ms"])
     ax.loglog(init.nodes, init.t_full_ms, color=SLOT[0], marker=MARKERS[0], zorder=3)
     label_end(ax, init.nodes.iloc[-1], init.t_full_ms.iloc[-1], "bounded κ_R", SLOT[0])
-    ax.loglog(g.nodes, g.t_global_ms, color=SLOT[1], marker=MARKERS[1], zorder=3)
-    label_end(ax, g.nodes.iloc[-1], g.t_global_ms.iloc[-1],
-              "global support\n(stops: >5 min)", SLOT[1])
+    if len(g) >= 2:
+        ax.loglog(g.nodes, g.t_global_ms, color=SLOT[1], marker=MARKERS[1], zorder=3)
+        label_end(ax, g.nodes.iloc[-1], g.t_global_ms.iloc[-1],
+                  "global support\n(stops: >5 min)", SLOT[1])
     ax.set_xlim(right=ax.get_xlim()[1] * 3)
     style(ax, "|V| (nodes)", "full build, ms (log)",
           "Global-support W₁ blow-up")
-    fig.savefig(out / "fig_c_global_blowup.pdf")
-    fig.savefig(out / "fig_c_global_blowup.png", dpi=200)
+    fig.savefig(out / f"{pre}_c_global_blowup.pdf")
+    fig.savefig(out / f"{pre}_c_global_blowup.png", dpi=200)
 
     # Fig D — MV certificate cost vs nodes (single series; no legend needed).
     cert = df.dropna(subset=["t_cert_ms"])
@@ -127,8 +130,8 @@ def main():
         ax.plot(c.nodes, c.t_cert_ms, color=SLOT[0], marker=MARKERS[0], zorder=3)
         style(ax, "|V| (nodes)", "certificate, ms",
               "Mayer–Vietoris certificate cost")
-        fig.savefig(out / "fig_d_cert_cost.pdf")
-        fig.savefig(out / "fig_d_cert_cost.png", dpi=200)
+        fig.savefig(out / f"{pre}_d_cert_cost.pdf")
+        fig.savefig(out / f"{pre}_d_cert_cost.png", dpi=200)
 
     print(f"figures -> {out}")
 

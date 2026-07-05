@@ -199,6 +199,14 @@ path). 5-rep medians; full sweep in data/scaling.csv; figures figs/fig_[a-d].
   computation over the full flag complex dominates; localizing the
   certificate itself is future work, but at ~53 ms it is already viable
   per-edit at editor scale).
+- **Irregular family** (data/scaling_mesh.csv, figs/mesh_[a-d]): face-adjacency
+  graphs of perforated icospheres (valence irregularity: interior degree 3,
+  hole boundaries 1–2, pentagonal clusters), levels 1–4 (78–5023 faces), plus
+  an --obj mode replaying the same trace on arbitrary OBJ meshes. Same
+  invariants hold: dirty cover CONSTANT (15–28 edges, all levels — smaller
+  than the lattice's, triangle adjacency has tighter 2-hop balls), dirty/|E|
+  down to 0.0020, bit-exact throughout, residual 0, speedups 14–58× (the
+  level-4 plateau is the same dense-assembly knee as the lattice family).
 - **Qualitative artifacts**: deterministic wave-ripple contact sheets
   (`docs/superpowers/artifacts/2026-06-06-wave-field.{gif,mp4}`), resonance
   spectrum (`2026-06-06-resonance-spectrum.png`), raster/PT parity sheets.
@@ -235,7 +243,9 @@ subset.
 ### TODO list for submission readiness
 1. [ ] Final scaling sweep numbers (grids 24–64) into §7 + two plots
        (t_local vs |E| at constant dirty; dirty/|E| decay; cert cost).
-2. [ ] Irregular-mesh trace (OBJ import + edits) as a second benchmark family.
+2. [x] Irregular-mesh benchmark family — DONE (perforated-icosphere
+       face-adjacency graphs + --obj mode; §7 last bullet). Optionally rerun
+       on a canonical large OBJ (bunny/armadillo) for the camera-ready.
 3. [ ] Write Lemma 1 / Prop. 1 proofs in full (currently sketches).
 4. [ ] Verify paywalled citations against PDFs (survey caveat). Volk/Young
        full texts READ and contrast paragraphs WRITTEN (contrast-notes.md) —
