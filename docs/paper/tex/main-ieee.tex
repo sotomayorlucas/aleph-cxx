@@ -1,0 +1,29 @@
+% One Substrate — IEEE-style driver (IEEEtran, journal mode).
+% Same shared body.tex/preamble-common.tex as main.tex; IEEEtran.cls/.bst are
+% vendored in this directory (CTAN). For conference mode swap the class line:
+%   \documentclass[conference]{IEEEtran}
+\documentclass[10pt,journal]{IEEEtran}
+
+% This TeX install lacks the Times font METRICS (ptm*.tfm) IEEEtran defaults
+% to; fall back to Computer Modern (T1 via cm-super, present). For the true
+% IEEE look install the Times metrics (texlive collection-fontsrecommended)
+% and DELETE these three lines.
+\renewcommand{\rmdefault}{cmr}
+\renewcommand{\sfdefault}{cmss}
+\renewcommand{\ttdefault}{cmtt}
+
+\input{preamble-common}
+
+\title{One Substrate: Byte-Exact Local Maintenance of a Curvature-Weighted
+Graph Laplacian for Interactive Rendering and Physics}
+\author{Anonymous~submission (double-blind review)}
+
+\begin{document}
+\maketitle
+
+\input{body}
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}

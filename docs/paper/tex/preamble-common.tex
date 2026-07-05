@@ -1,0 +1,28 @@
+% Shared packages, theorem environments, and macros for BOTH drivers
+% (main.tex: EG/CGF-or-article; main-ieee.tex: IEEEtran journal).
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{xcolor}
+% Nice-to-haves that thin TeX installs lack; the EG kit brings its own.
+\IfFileExists{booktabs.sty}{\usepackage{booktabs}}{}
+\IfFileExists{microtype.sty}{\usepackage{microtype}}{}
+\usepackage[hidelinks]{hyperref}
+\graphicspath{{../figs/}}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\theoremstyle{remark}
+\newtheorem{observation}{Observation}
+\newtheorem{remark}{Remark}
+
+\newcommand{\kR}{\kappa_R}
+\newcommand{\W}[1]{W_{#1}}
+\newcommand{\ball}[2]{B_{#1}(#2)}
+\newcommand{\TODO}[1]{\textcolor{red}{[TODO: #1]}}
+
