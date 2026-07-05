@@ -3,6 +3,8 @@
 **Prepared:** 2026-07-03
 **Scope:** Novelty sweep for the paper claiming a C++ engine in which a single Ollivier–Ricci-curvature-weighted graph Laplacian Δ is the shared substrate for rendering *and* physics (wave / heat / Helmholtz / vector diffusion), maintained incrementally and byte-identically under DPO graph rewrites, certified at runtime by a Mayer–Vietoris residual.
 
+> **UPDATE 2026-07-05:** bibliographic data verified — see `bib-verification.md` (4 corrections: 2208.09535 authors are DasGupta/Grigorescu/Mukherjee, NOT Ni-Wang; the sparsifiers paper is arXiv:1906.10530 STOC'19; LLY-reweighting is Kotharkar 2026; Jerboa is LNCS 8571). `tex/refs.bib` is the authoritative record.
+
 > **Method note / caveat.** Findings below come from web search + targeted full-text fetches. For the two 2026 papers that are the nearest prior art (Volk; Young) I fetched the arXiv abstract pages directly and they are real. Where a specific number or claim comes only from a search-summary model I have flagged it. Several cited items are behind paywalls (ACM TOG, ScienceDirect) and were read only at abstract level. Treat exact quantitative claims from those as "to be verified against the PDF before citing."
 
 ---

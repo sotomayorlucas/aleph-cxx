@@ -74,13 +74,13 @@ undo/redo included---is deterministic to the bit.
 \section{Introduction}
 
 Real-time engines treat the render representation and the physics
-representation as separate worlds synchronized by ad-hoc glue, and recent
-work still describes physics engines as ``representation-agnostic'' with no
-native shared substrate for rendering and simulation \TODO{cite the 2026
-Gaussian-splat-physics framing after PDF verification}. Geometry processing,
+representation as separate worlds synchronized by ad-hoc glue; recent work
+on physics for 3D Gaussian splats still opens by noting that
+``production-grade physics engines do not understand'' the render
+representation~\cite{liu2026scene}. Geometry processing,
 by contrast, has long organized many tasks around one prefactored operator
---- discrete exterior calculus~\cite{desbrun2005dec,degoes2013dec}, the heat
-method~\cite{crane2013heat}, the vector heat method~\cite{sharp2019vector},
+--- discrete exterior calculus~\cite{desbrun2005discrete,degoes2013dec}, the heat
+method~\cite{crane2013geodesics}, the vector heat method~\cite{sharp2019vector},
 Laplacian mesh editing~\cite{sorkine2004laplacian}, and projective
 dynamics~\cite{bouaziz2014projective} all ``factor once, reuse many'' --- but
 on a \emph{fixed} mesh: structural change means refactoring from scratch.
@@ -135,7 +135,7 @@ ORC compares 1-hop transport measures~\cite{ollivier2009ricci}; its locality
 is established --- Jost and Liu bound it by degrees and short-cycle
 counts~\cite{jost2014ollivier}, and exact computation reduces to a local
 matching problem with $\Omega(n)$ worst-case query bounds for global
-formulations~\cite{niwang2023local}. Ricci flow pipelines recompute ORC only
+formulations~\cite{dasgupta2023ricci}. Ricci flow pipelines recompute ORC only
 near modified edges~\cite{ni2019community}. We claim no locality discovery:
 $\kR$ is an engineering realization of known locality, chosen so the
 \emph{computed} value is a pure function of an edit-invariant ball.
@@ -145,7 +145,7 @@ Local reuse of prefactored sparse systems under mesh edits is an established
 line: sub-mesh factor reuse~\cite{herholz2018factor}, localized
 solves~\cite{herholz2017localized}, and interactive sparse Cholesky
 updates~\cite{herholz2020sparse}; dynamic Laplacian solvers exist in
-theory~\cite{durfee2019dynamic}. These optimize speed with bounded residual;
+theory~\cite{durfee2019fully}. These optimize speed with bounded residual;
 none guarantees --- or aims at --- bit-identity with a from-scratch rebuild,
 and none derives its update region from a rewrite calculus. Our delta is the
 guarantee (Theorem~\ref{thm:bitexact}) and the DPO-derived dirty cover
@@ -186,10 +186,10 @@ Algebraic graph transformation is classical~\cite{ehrig2006fundamentals};
 topology-based geometric modelers rewrite generalized
 maps~\cite{belhaouari2014jerboa}, but no prior work couples DPO rewrites to
 an incremental simulation operator. Curvature-weighted graph Laplacians
-appear in spectral clustering~\cite{lly2026reweight} and Ricci-flow edge
+appear in spectral clustering~\cite{kotharkar2026lly} and Ricci-flow edge
 weights~\cite{ni2019community} --- network analysis, not rendering or
 physics. Bit-exact determinism is standard lockstep
-engineering~\cite{fiedler2015determinism,demmel2013reproblas}; our use of it
+engineering~\cite{fiedler2010floating,demmel2013fast,ahrens2020algorithms}; our use of it
 as a per-edit correctness oracle (incremental $\equiv$ full, checked
 bitwise) is, to our knowledge, new in this setting.
 
@@ -229,7 +229,7 @@ support of size $n_s$ --- in \texttt{f64}, single-threaded, no randomness.
 FP-environment changes, single-threaded evaluation. Under IEEE-754 every
 operation is a deterministic function of operand bits, so a fixed
 instruction sequence on identical inputs yields identical output bits (the
-deterministic-lockstep setting~\cite{fiedler2015determinism}, enforced in CI
+deterministic-lockstep setting~\cite{fiedler2010floating}, enforced in CI
 by byte-golden oracles).
 
 \subsection{Metric and value fidelity}
