@@ -170,10 +170,15 @@ cert_max grids). [TODO: exact cost curve from data/scaling.csv.]
 - **Helmholtz acoustics**: (Δ − k²I)φ = s; PSD path reuses the CACHED
   kernel-aware LDLᵀ (mean-projected); indefinite path Bunch-Kaufman-factors
   the shifted copy. AudioSource/Microphone bridge to frequency domain.
-- **Implicit stepping** (new): ShiftedLaplacian factors (I + βΔ) (SPD ∀β≥0);
-  backward-Euler heat (β=dt·α) and wave (β=dt²c²) are unconditionally stable
-  (tests drive 100× past the explicit CFL and assert the explicit stepper
-  diverges at the same dt); one factorization amortized over steps ≫ edits.
+- **Implicit stepping** (new): ShiftedLaplacian factors (I + βΔ) (SPD ∀β≥0)
+  with a dense kernel-aware LDLᵀ or, from the sparse carrier, a SparseLdlt
+  (Davis elimination tree, deterministic natural ordering) — the implicit
+  pipeline is sparse END-TO-END (CSR assembly → O(nnz) shift → sparse factor
+  → sparse solve). Backward-Euler heat (β=dt·α) and wave (β=dt²c²) are
+  unconditionally stable (tests drive 100× past the explicit CFL and assert
+  the explicit stepper diverges at the same dt); one factorization amortized
+  over steps ≫ edits. Factor-path FP contract mirrors the matvec finding:
+  solves agree ≤1e-9 on these SPD systems, each path byte-deterministic.
 - Determinism: pure f64, fixed orders, no RNG in any of the above; identical
   trajectories bit-for-bit run-to-run (CI-gated).
 
@@ -207,6 +212,12 @@ path). 5-rep medians; full sweep in data/scaling.csv; figures figs/fig_[a-d].
   computation over the full flag complex dominates; localizing the
   certificate itself is future work, but at ~53 ms it is already viable
   per-edit at editor scale).
+- **Factor family** (data/factors.csv): (I + βΔ) factored dense vs sparse on
+  the lattices. Dense LDLᵀ climbs O(n³): 0.43 ms → 2.9 s → 19.3 s → **261 s**
+  at |V| = 64 → 1024 → 2304 → 4096; SparseLdlt: 0.13 → 7.8 → 33.5 →
+  **112.6 ms** (2317× at 4k nodes). Solves: 113 ms vs 0.24 ms (465×).
+  Solutions agree ≤1e-9 at every size (bench gate). With this, per-edit
+  implicit-stepper refactoring is interactive at every measured scale.
 - **Irregular family** (data/scaling_mesh.csv, figs/mesh_[a-d]): face-adjacency
   graphs of perforated icospheres (valence irregularity: interior degree 3,
   hole boundaries 1–2, pentagonal clusters), levels 1–4 (78–5023 faces), plus
@@ -225,16 +236,20 @@ path). 5-rep medians; full sweep in data/scaling.csv; figures figs/fig_[a-d].
 
 ## 8. Limitations / future work
 
-- ~~Dense assembly~~ RESOLVED (spec 2026-07-04): the sparse CSR assembly is
-  O(V + E log deg) with values bit-identical to the dense path, and the
-  steppers are carrier-generic. What REMAINS dense: the solver factors
-  (kernel-aware LDLᵀ, Bunch-Kaufman, ShiftedLaplacian) — a sparse-factor
-  slice (CHOLMOD-style, or Herholz-style factor reuse, now with a
-  bit-exactness question attached) is the natural next step. One honest FP
-  caveat, now in the spec and tests: matvecs across carriers agree to a few
-  ulps but are NOT bitwise (ISO FP-contraction discretion differs per loop
-  shape); each carrier is individually byte-deterministic, and the operator
-  ENTRIES are bit-identical.
+- ~~Dense assembly~~ RESOLVED (spec 2026-07-04a): sparse CSR assembly,
+  O(V + E log deg), values bit-identical, carrier-generic steppers.
+- ~~Dense implicit factors~~ RESOLVED (spec 2026-07-04b): ShiftedLaplacian
+  takes the CSR carrier through SparseLdlt (data/factors.csv: dense factor
+  132 ms vs sparse 1.2 ms at 576 nodes — 111×; solves 54×; see §7). What
+  REMAINS dense: the Helmholtz indefinite Bunch-Kaufman (sparse
+  symmetric-indefinite factorization — pivoting vs symbolic structure — is
+  a research slice of its own) and IncrementalLaplacian's cached dense
+  `.laplacian` (load-bearing for Helmholtz); fill-reducing orderings (AMD)
+  are follow-up. One honest FP caveat, in specs and tests: matvecs across
+  carriers agree to a few ulps and factor-path solves to ≤1e-9 — NOT
+  bitwise (contraction/elimination-order discretion); each path is
+  individually byte-deterministic, and the operator ENTRIES are
+  bit-identical.
 - The rendering-importance channel still uses the global-support curvature
   (deliberately, as the contrast case); moving it to κ_R changes its values
   within ~1e-6.

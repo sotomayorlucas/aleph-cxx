@@ -389,11 +389,15 @@ $\Delta$; Helmholtz acoustics solves $(\Delta - k^2 I)\varphi = s$, reusing
 the cached kernel-aware $LDL^\top$ in the PSD regime and Bunch--Kaufman
 factoring the shifted copy in the indefinite regime; and implicit
 backward-Euler steppers factor $I + \beta\Delta$ (SPD for all
-$\beta \ge 0$), giving unconditional stability --- our tests drive
-$100\times$ past the explicit CFL bound, where the explicit stepper
-provably diverges, and assert bounded, mass-conserving, bit-deterministic
-trajectories. All consumers share the one maintained operator; none owns a
-private copy of the scene.
+$\beta \ge 0$) --- densely via the kernel-aware $LDL^\top$ or, from the
+sparse carrier, via a sparse $LDL^\top$ (Davis-style elimination tree,
+deterministic natural ordering), making the implicit pipeline sparse
+end-to-end: CSR assembly $\to$ $O(\mathrm{nnz})$ shift $\to$ sparse factor
+$\to$ sparse solve. Unconditional stability: our tests drive $100\times$
+past the explicit CFL bound, where the explicit stepper provably diverges,
+and assert bounded, mass-conserving, bit-deterministic trajectories. All
+consumers share the one maintained operator; none owns a private copy of
+the scene.
 
 \section{Evaluation}\label{sec:eval}
 
@@ -433,6 +437,16 @@ lattice's, as triangle adjacency has smaller 2-hop balls),
 $\mathrm{dirty}/|E|$ down to 0.0020, bit-exact throughout. Dense-assembly
 local plateaus at ${\sim}83$\,ms at 5k faces ($14\times$); sparse-assembly
 local stays at 7--8\,ms (${\sim}160\times$ over the full rebuild).
+
+\paragraph*{Factor family.}
+Factoring $I + \beta\Delta$ for the implicit steppers, dense vs sparse, on
+the lattices: the dense $LDL^\top$ climbs as $O(n^3)$ --- 0.4\,ms, 2.9\,s,
+19.3\,s, and 261\,s at $|V| = 64$, 1024, 2304, 4096 --- while the sparse
+factor takes 0.13, 7.8, 33.5, and 112.6\,ms respectively ($2317\times$ at
+4k nodes); solves are $465\times$ faster (0.24\,ms vs 113\,ms). Solutions
+from the two factor paths agree within $10^{-9}$ at every size (a benchmark
+gate, not an observation). Per-edit implicit-stepper refactoring is
+therefore interactive at every measured scale.
 
 \paragraph*{Certificate cost.}
 The MV residual is 0 on every edit of every sweep; cost ${\sim}1$\,ms at 65
@@ -475,14 +489,16 @@ synchronization test.
 
 The sparse CSR assembly ($O(V + E\log\deg)$, entries bit-identical to the
 dense path) removes the assembly bound visible as the dense knee in
-Fig.~\ref{fig:cost}; what remains dense are the solver \emph{factors}
-(kernel-aware $LDL^\top$, Bunch--Kaufman, $I+\beta\Delta$), so sparse factor
-updates --- now with a bit-exactness question attached --- are the natural
-next step. One honest floating-point caveat, encoded in our tests: matvecs
-\emph{across} carriers agree to a few ulps but are not bitwise (ISO
-FP-contraction discretion differs per loop shape); each carrier is
-individually byte-deterministic, and the operator entries are
-bit-identical. The rendering-importance channel still uses the
+Fig.~\ref{fig:cost}, and the implicit path's $I+\beta\Delta$ factors now go
+through a sparse $LDL^\top$ (\S\ref{sec:eval}). What remains dense: the
+Helmholtz \emph{indefinite} Bunch--Kaufman (sparse symmetric-indefinite
+factorization, where pivoting fights the symbolic structure, is a research
+problem of its own) and the cached component of the incremental solver that
+Helmholtz reads; fill-reducing orderings are future work. One honest
+floating-point caveat, encoded in our tests: matvecs \emph{across} carriers
+agree to a few ulps and factor-path solves to $10^{-9}$ --- not bitwise
+(contraction and elimination-order discretion); each path is individually
+byte-deterministic, and the operator entries are bit-identical. The rendering-importance channel still uses the
 global-support curvature (deliberately, as the contrast case). Implicit
 steppers refactor $I + \beta\Delta$ per $(\Delta, \mathrm{d}t)$; factor
 \emph{updates} under edits are future work. Component-wise vector diffusion
