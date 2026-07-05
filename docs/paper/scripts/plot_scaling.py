@@ -60,11 +60,15 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     df = pd.read_csv(csv)
     init = df[df.edit == "initial"]
+    agg = dict(edges=("edges", "median"), t_full_ms=("t_full_ms", "median"),
+               t_local_ms=("t_local_ms", "median"),
+               dirty_frac=("dirty_frac", "median"))
+    has_sparse = "t_local_sp_ms" in df.columns
+    if has_sparse:
+        agg["t_local_sp_ms"] = ("t_local_sp_ms", "median")
     interior = (df[df.edit.isin(INTERIOR)]
                 .groupby("grid", as_index=False)
-                .agg(edges=("edges", "median"), t_full_ms=("t_full_ms", "median"),
-                     t_local_ms=("t_local_ms", "median"),
-                     dirty_frac=("dirty_frac", "median")))
+                .agg(**agg))
     corner = df[df.edit == "add_corner"]
 
     # Fig A — per-edit operator update cost vs |E| (log-log).
@@ -76,11 +80,17 @@ def main():
     ax.loglog(interior.edges, interior.t_local_ms, color=SLOT[1],
               marker=MARKERS[1], zorder=3)
     label_end(ax, interior.edges.iloc[-1], interior.t_local_ms.iloc[-1],
-              "local · interior\n(dirty 37–51)", SLOT[1], dy=8)
-    ax.loglog(corner.edges, corner.t_local_ms, color=SLOT[2],
-              marker=MARKERS[2], zorder=3)
-    label_end(ax, corner.edges.iloc[-1], corner.t_local_ms.iloc[-1],
-              "local · corner\n(dirty 13)", SLOT[2], dy=-12)
+              "local · interior\n(dense assembly)", SLOT[1], dy=12)
+    # Corner-edit series lives in fig B (dirty fractions); fig A keeps the
+    # three-series assembly story: full vs local-dense vs local-sparse.
+    if has_sparse and interior.t_local_sp_ms.notna().any():
+        di = df[df.edit.isin(INTERIOR)].dirty.dropna()
+        rng = f"{int(di.min())}–{int(di.max())}"
+        ax.loglog(interior.edges, interior.t_local_sp_ms, color=SLOT[2],
+                  marker=MARKERS[2], zorder=3)
+        label_end(ax, interior.edges.iloc[-1],
+                  interior.t_local_sp_ms.iloc[-1],
+                  f"local · sparse assembly\n(same dirty {rng})", SLOT[2], dy=-6)
     ax.set_xlim(right=ax.get_xlim()[1] * 6)
     style(ax, "|E| (skeleton edges)", "median ms per edit",
           "Per-edit rebuild cost (log–log)")

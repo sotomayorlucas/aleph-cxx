@@ -188,12 +188,13 @@ path). 5-rep medians; full sweep in data/scaling.csv; figures figs/fig_[a-d].
   edit kind, grid 8 through 64); dirty/|E| falls from 0.33–0.44 (grid 8) to
   0.0016–0.0063 (grid 64) — the fallback gate (0.5) is never approached
   beyond toy sizes (fig_b).
-- **Local vs full bounded rebuild** (fig_a): full grows ∝|E| (30 ms → 4.8 s,
-  grid 8 → 64); local stays ~flat (17–30 ms) until dense assembly dominates
-  (knee at |E|≈2k), settling at 36–45× speedup at grid 64 (108–133 ms vs
-  4.8 s). The knee is the §8 dense-assembly limitation, visible and honest:
-  the κ_R recompute is O(touched); the O(n²) assembly bounds the end-to-end
-  win at large n until the sparse-operator slice lands.
+- **Local vs full bounded rebuild** (fig_a): full grows ∝|E| (~15 ms → 4.9 s,
+  grid 8 → 64); the DENSE-assembly local series stays flat until the O(n²)
+  assembly dominates (knee at |E|≈2k, climbing to ~120–130 ms at grid 64,
+  37×). The SPARSE-assembly local series (same dirty cover, values
+  bit-identical — spec 2026-07-04) removes the knee: 22 → 25 → 32–42 ms
+  across grids 32→48→64, i.e. **~152× vs the full rebuild at 4k nodes**;
+  the residual growth is the linear O(V+E) skeleton/adjacency scan.
 - **Global formulation blowup (the contrast case, fig_c)**: 6.1 s at 64 nodes
   and 337 s at 144 nodes, vs 20 ms / 84 ms bounded — ×309 and ×4005; the
   global-support series is unmeasurable past toy sizes, which is precisely
@@ -212,8 +213,9 @@ path). 5-rep medians; full sweep in data/scaling.csv; figures figs/fig_[a-d].
   an --obj mode replaying the same trace on arbitrary OBJ meshes. Same
   invariants hold: dirty cover CONSTANT (15–28 edges, all levels — smaller
   than the lattice's, triangle adjacency has tighter 2-hop balls), dirty/|E|
-  down to 0.0020, bit-exact throughout, residual 0, speedups 14–58× (the
-  level-4 plateau is the same dense-assembly knee as the lattice family).
+  down to 0.0020, bit-exact throughout, residual 0. Dense-assembly local
+  plateaus at ~83 ms at level 4 (14×); sparse-assembly local stays at
+  **7–8 ms (~160× vs full)**.
 - **Qualitative artifacts**: deterministic wave-ripple contact sheets
   (`docs/superpowers/artifacts/2026-06-06-wave-field.{gif,mp4}`), resonance
   spectrum (`2026-06-06-resonance-spectrum.png`), raster/PT parity sheets.
@@ -223,11 +225,16 @@ path). 5-rep medians; full sweep in data/scaling.csv; figures figs/fig_[a-d].
 
 ## 8. Limitations / future work
 
-- Dense operator storage: assembly and LDLᵀ are dense (O(n²) memory; assembly
-  O(n²) per rebuild) — the curvature recompute is O(touched) but the end-to-end
-  edit cost is eventually assembly-bound; sparse assembly + factor update
-  (CHOLMOD-style, or Herholz-style factor reuse — now with a bit-exactness
-  question attached) is the natural next slice.
+- ~~Dense assembly~~ RESOLVED (spec 2026-07-04): the sparse CSR assembly is
+  O(V + E log deg) with values bit-identical to the dense path, and the
+  steppers are carrier-generic. What REMAINS dense: the solver factors
+  (kernel-aware LDLᵀ, Bunch-Kaufman, ShiftedLaplacian) — a sparse-factor
+  slice (CHOLMOD-style, or Herholz-style factor reuse, now with a
+  bit-exactness question attached) is the natural next step. One honest FP
+  caveat, now in the spec and tests: matvecs across carriers agree to a few
+  ulps but are NOT bitwise (ISO FP-contraction discretion differs per loop
+  shape); each carrier is individually byte-deterministic, and the operator
+  ENTRIES are bit-identical.
 - The rendering-importance channel still uses the global-support curvature
   (deliberately, as the contrast case); moving it to κ_R changes its values
   within ~1e-6.

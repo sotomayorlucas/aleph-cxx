@@ -1,24 +1,24 @@
 icosphere level 1 (80 faces)...
-  mesh=1 initial    |V|=78 |E|=114 global=17904.99ms bounded=16.67ms
-  grid=1 add1       dirty=21/115 rc=21 full=16.74ms local=2.97ms x5.6 exact=1 +cert
-  grid=1 add2       dirty=27/117 rc=27 full=16.96ms local=4.00ms x4.2 exact=1 +cert
-  grid=1 add_corner dirty=15/118 rc=15 full=17.38ms local=2.90ms x6.0 exact=1 +cert
-  grid=1 delete     dirty=25/116 rc=25 full=17.21ms local=3.70ms x4.7 exact=1 +cert
+  mesh=1 initial    |V|=78 |E|=114 global=7054.67ms bounded=6.10ms
+  grid=1 add1       dirty=21/115 rc=21 full=6.42ms local=1.17ms x5.5 | sp full=6.46ms local=1.16ms | exact=1 +cert
+  grid=1 add2       dirty=27/117 rc=27 full=6.57ms local=1.54ms x4.3 | sp full=6.53ms local=1.55ms | exact=1 +cert
+  grid=1 add_corner dirty=15/118 rc=15 full=6.81ms local=1.12ms x6.1 | sp full=6.76ms local=1.12ms | exact=1 +cert
+  grid=1 delete     dirty=25/116 rc=25 full=6.62ms local=1.46ms x4.5 | sp full=6.59ms local=1.44ms | exact=1 +cert
 icosphere level 2 (320 faces)...
-  mesh=2 initial    |V|=313 |E|=459 global=-1.00ms bounded=73.51ms
-  grid=2 add1       dirty=21/460 rc=21 full=74.08ms local=3.71ms x20.0 exact=1 +cert
-  grid=2 add2       dirty=28/462 rc=28 full=74.50ms local=5.05ms x14.8 exact=1 +cert
-  grid=2 add_corner dirty=15/463 rc=15 full=75.13ms local=3.40ms x22.1 exact=1 +cert
-  grid=2 delete     dirty=26/461 rc=26 full=74.52ms local=4.81ms x15.5 exact=1 +cert
+  mesh=2 initial    |V|=313 |E|=459 global=-1.00ms bounded=28.63ms
+  grid=2 add1       dirty=21/460 rc=21 full=28.73ms local=1.51ms x19.0 | sp full=28.77ms local=1.52ms | exact=1 +cert
+  grid=2 add2       dirty=28/462 rc=28 full=29.03ms local=2.05ms x14.1 | sp full=28.86ms local=2.01ms | exact=1 +cert
+  grid=2 add_corner dirty=15/463 rc=15 full=29.30ms local=1.40ms x20.9 | sp full=29.37ms local=1.40ms | exact=1 +cert
+  grid=2 delete     dirty=26/461 rc=26 full=29.08ms local=1.92ms x15.1 | sp full=29.08ms local=1.93ms | exact=1 +cert
 icosphere level 3 (1280 faces)...
-  mesh=3 initial    |V|=1255 |E|=1845 global=-1.00ms bounded=357.98ms
-  grid=3 add1       dirty=21/1846 rc=21 full=358.54ms local=6.90ms x52.0 exact=1
-  grid=3 add2       dirty=28/1848 rc=28 full=359.65ms local=8.62ms x41.7 exact=1
-  grid=3 add_corner dirty=15/1849 rc=15 full=359.91ms local=6.21ms x58.0 exact=1
-  grid=3 delete     dirty=26/1847 rc=26 full=360.21ms local=8.73ms x41.2 exact=1
+  mesh=3 initial    |V|=1255 |E|=1845 global=-1.00ms bounded=147.49ms
+  grid=3 add1       dirty=21/1846 rc=21 full=148.63ms local=2.86ms x52.0 | sp full=147.52ms local=2.60ms | exact=1
+  grid=3 add2       dirty=28/1848 rc=28 full=149.30ms local=3.58ms x41.7 | sp full=147.84ms local=3.32ms | exact=1
+  grid=3 add_corner dirty=15/1849 rc=15 full=149.04ms local=2.50ms x59.6 | sp full=149.32ms local=2.24ms | exact=1
+  grid=3 delete     dirty=26/1847 rc=26 full=150.46ms local=3.39ms x44.4 | sp full=149.66ms local=3.22ms | exact=1
 icosphere level 4 (5120 faces)...
-  mesh=4 initial    |V|=5023 |E|=7389 global=-1.00ms bounded=2519.37ms
-  grid=4 add1       dirty=21/7390 rc=21 full=2523.96ms local=162.35ms x15.5 exact=1
-  grid=4 add2       dirty=28/7392 rc=28 full=1189.99ms local=82.89ms x14.4 exact=1
-  grid=4 add_corner dirty=15/7393 rc=15 full=1204.39ms local=83.83ms x14.4 exact=1
-  grid=4 delete     dirty=26/7391 rc=26 full=1222.72ms local=87.85ms x13.9 exact=1
+  mesh=4 initial    |V|=5023 |E|=7389 global=-1.00ms bounded=1165.20ms
+  grid=4 add1       dirty=21/7390 rc=21 full=1172.70ms local=83.45ms x14.1 | sp full=1110.18ms local=6.88ms | exact=1
+  grid=4 add2       dirty=28/7392 rc=28 full=1178.56ms local=83.48ms x14.1 | sp full=1115.76ms local=8.12ms | exact=1
+  grid=4 add_corner dirty=15/7393 rc=15 full=1186.06ms local=81.42ms x14.6 | sp full=1114.05ms local=6.50ms | exact=1
+  grid=4 delete     dirty=26/7391 rc=26 full=1187.13ms local=82.82ms x14.3 | sp full=1119.07ms local=8.19ms | exact=1

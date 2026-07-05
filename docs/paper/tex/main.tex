@@ -64,9 +64,11 @@ same optimum computed over an edit-invariant certificate. A Mayer--Vietoris
 residual over the graph's flag complex certifies each localized rebuild at
 runtime. On lattice and irregular triangle-mesh benchmarks the localized
 rebuild recomputes a constant number of edges as meshes grow
-($\mathrm{dirty}/|E| \to 0.002$), bit-exactly on every measured edit, with
-certificate overhead starting at ${\sim}1$\,ms, and the whole engine---editor
-with undo/redo included---is deterministic to the bit.
+($\mathrm{dirty}/|E| \to 0.002$), bit-exactly on every measured edit; with a
+sparse assembly of the same bit-identical entries the per-edit rebuild stays
+${\sim}150\times$ below a full rebuild at every measured size. Certificate
+overhead starts at ${\sim}1$\,ms, and the whole engine---editor with
+undo/redo included---is deterministic to the bit.
 \end{abstract}
 
 \section{Introduction}
@@ -404,15 +406,17 @@ every figure regenerates from committed CSVs.
 $R \times R$ 4-neighbour lattices, $|V|$ 64--4096, with a per-grid edit
 trace (1-edge add, 2-edge add, corner add, cascade delete) threading the
 previous operator exactly as the editor does.
-Figure~\ref{fig:cost} (left): the full bounded rebuild grows linearly in
-$|E|$ (30\,ms $\to$ 4.8\,s); the localized rebuild stays flat while the
-dirty cover is constant (37--51 edges for interior edits, 13 at the
-corner, \emph{at every size}), settling at $36$--$45\times$ at 4k nodes.
-The visible knee (${|E| \approx 2}$k) is the dense-assembly bound of
-\S\ref{sec:limits}, reported honestly: curvature recomputation is
-$O(\mathrm{touched})$; the $O(n^2)$ assembly eventually dominates both
-paths. $\mathrm{dirty}/|E|$ falls from 0.33--0.44 to 0.0016--0.0063 and
-never approaches the engine's 0.5 fallback gate beyond toy sizes.
+Figure~\ref{fig:cost} (top): the full bounded rebuild grows linearly in
+$|E|$ (${\sim}15$\,ms $\to$ 4.9\,s); the dense-assembly localized rebuild
+stays flat while the dirty cover is constant (37--51 edges for interior
+edits, 13 at the corner, \emph{at every size}) until the $O(n^2)$ assembly
+dominates (knee at ${|E| \approx 2}$k, ${\sim}130$\,ms at 4k nodes,
+$37\times$). The \emph{sparse}-assembly localized rebuild --- same dirty
+cover, operator entries bit-identical --- removes the knee: 22--42\,ms
+across grids 32--64, i.e.\ ${\sim}152\times$ over the full rebuild at 4k
+nodes, with only the linear $O(V{+}E)$ skeleton scan remaining.
+$\mathrm{dirty}/|E|$ falls from 0.33--0.44 to 0.0016--0.0063 and never
+approaches the engine's 0.5 fallback gate beyond toy sizes.
 
 \paragraph*{The global-formulation contrast case.}
 The globally-supported build takes 6.1\,s at 64 nodes and 337\,s at 144
@@ -426,8 +430,9 @@ boundaries 1--2, pentagonal clusters), 78--5023 faces, plus an
 \texttt{--obj} mode replaying the trace on arbitrary OBJ meshes. The same
 invariants hold: constant dirty cover (15--28 edges --- tighter than the
 lattice's, as triangle adjacency has smaller 2-hop balls),
-$\mathrm{dirty}/|E|$ down to 0.0020, bit-exact throughout, speedups
-$14$--$58\times$.
+$\mathrm{dirty}/|E|$ down to 0.0020, bit-exact throughout. Dense-assembly
+local plateaus at ${\sim}83$\,ms at 5k faces ($14\times$); sparse-assembly
+local stays at 7--8\,ms (${\sim}160\times$ over the full rebuild).
 
 \paragraph*{Certificate cost.}
 The MV residual is 0 on every edit of every sweep; cost ${\sim}1$\,ms at 65
@@ -440,11 +445,11 @@ editor scale).
   \centering
   \includegraphics[width=\linewidth]{fig_a_local_vs_full}\\[2pt]
   \includegraphics[width=\linewidth]{fig_c_global_blowup}
-  \caption{Top: per-edit operator rebuild cost on lattices (log--log); the
-  localized rebuild is flat while the dirty cover is constant; the knee is
-  the dense-assembly limitation (\S\ref{sec:limits}). Bottom: the
-  global-support $\W1$ formulation blows up ($337$\,s at 144 nodes) while
-  the bounded operator scales.}
+  \caption{Top: per-edit operator rebuild cost on lattices (log--log). The
+  dense-assembly localized rebuild is flat until the $O(n^2)$ assembly knee;
+  the sparse assembly (same dirty cover, bit-identical entries) removes it.
+  Bottom: the global-support $\W1$ formulation blows up ($337$\,s at 144
+  nodes) while the bounded operator scales.}
   \label{fig:cost}
 \end{figure}
 
@@ -468,11 +473,16 @@ synchronization test.
 
 \section{Limitations and future work}\label{sec:limits}
 
-The operator is stored dense: assembly and $LDL^\top$ are $O(n^2)$, so while
-curvature recomputation is $O(\mathrm{touched})$, the end-to-end edit cost is
-eventually assembly-bound (the knees in Fig.~\ref{fig:cost}); sparse assembly
-and factor updates --- now with a bit-exactness question attached --- are the
-natural next step. The rendering-importance channel still uses the
+The sparse CSR assembly ($O(V + E\log\deg)$, entries bit-identical to the
+dense path) removes the assembly bound visible as the dense knee in
+Fig.~\ref{fig:cost}; what remains dense are the solver \emph{factors}
+(kernel-aware $LDL^\top$, Bunch--Kaufman, $I+\beta\Delta$), so sparse factor
+updates --- now with a bit-exactness question attached --- are the natural
+next step. One honest floating-point caveat, encoded in our tests: matvecs
+\emph{across} carriers agree to a few ulps but are not bitwise (ISO
+FP-contraction discretion differs per loop shape); each carrier is
+individually byte-deterministic, and the operator entries are
+bit-identical. The rendering-importance channel still uses the
 global-support curvature (deliberately, as the contrast case). Implicit
 steppers refactor $I + \beta\Delta$ per $(\Delta, \mathrm{d}t)$; factor
 \emph{updates} under edits are future work. Component-wise vector diffusion

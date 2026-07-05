@@ -261,6 +261,14 @@ operands in the same order. Under the standing determinism assumptions the
 assembled matrices are bit-identical. ∎
 
 **Remarks.**
+0. *Sparse twin (2026-07-04).* `assemble_sparse` consumes the identical
+   curvature map (shared construction) and accumulates each diagonal entry in
+   the same canonical-edge-order subsequence, so Theorem 1 holds verbatim for
+   `build_laplacian_*_sparse` with "bit-identical" meaning entry-wise equality
+   of stored values (gated by tests/flow/test_sparse_laplacian.cpp). Note the
+   deliberately weaker matvec contract: matvecs across carriers agree to a few
+   ulps but are NOT bitwise (ISO FP-contraction discretion differs per loop
+   shape); each carrier is individually byte-deterministic.
 1. The engine's fallback gate (dirty > 0.5·|E| → full rebuild) and the
    ApplyRule fallback only ever *replace* the localized path by the full
    build — trivially bit-exact.
