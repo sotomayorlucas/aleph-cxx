@@ -41,12 +41,23 @@ enum class ImplicitError {
 };
 
 // The factored (I + β·Δ) carrier both implicit steppers solve against.
+// Dense operator -> dense kernel-aware LDLT; CSR operator -> SparseLdlt
+// (Davis elimination tree, deterministic natural ordering). Carrier follows
+// the HelmholtzFactor optional-pair pattern, NOT std::variant — a
+// module-exported std::variant member in this partition trips GCC-16's
+// "Bad file data" cluster bug in every importer (the same toolchain
+// fragility the helmholtz partition dodged). Exactly one optional is
+// engaged after make(). FP contract across the two factor paths mirrors the
+// matvec finding (spec 2026-07-04): solutions agree within solver roundoff
+// on these well-conditioned SPD systems (eigenvalues in [1, 1+β·λ_max]),
+// NOT bitwise; each path is individually byte-deterministic.
 struct ShiftedLaplacian {
-    std::size_t                 n{0};
-    f64                         beta{0.0};
-    aleph::linalg::sparse::LDLT ldlt;
+    std::size_t n{0};
+    f64         beta{0.0};
+    std::optional<aleph::linalg::sparse::LDLT>       ldlt{};
+    std::optional<aleph::linalg::sparse::SparseLdlt> sldlt{};
 
-    // H = I + beta*delta, LDLT-factored. beta must be finite and >= 0.
+    // H = I + beta*delta, dense-LDLT-factored. beta must be finite and >= 0.
     [[nodiscard]] static std::expected<ShiftedLaplacian, ImplicitError>
     make(const DMatrix& delta, f64 beta) {
         if (!std::isfinite(beta) || beta < 0.0) {
@@ -66,14 +77,78 @@ struct ShiftedLaplacian {
         if (!f.has_value()) {
             return std::unexpected(ImplicitError::FactorFailed);
         }
-        return ShiftedLaplacian{n, beta, std::move(*f)};
+        ShiftedLaplacian out;
+        out.n    = n;
+        out.beta = beta;
+        out.ldlt.emplace(std::move(*f));
+        return out;
+    }
+
+    // H = I + beta*delta built directly in CSR (O(nnz); the diagonal entry is
+    // updated in place when the row stores one — assemble_sparse always does —
+    // and inserted at its sorted position otherwise), SparseLdlt-factored.
+    [[nodiscard]] static std::expected<ShiftedLaplacian, ImplicitError>
+    make(const aleph::linalg::sparse::CsrMatrix& delta, f64 beta) {
+        if (!std::isfinite(beta) || beta < 0.0) {
+            return std::unexpected(ImplicitError::InvalidShift);
+        }
+        const std::size_t n = delta.rows();
+        if (delta.cols() != n) {
+            return std::unexpected(ImplicitError::FactorFailed);
+        }
+        const auto& rp = delta.row_ptr();
+        const auto& ci = delta.col_idx();
+        const auto& vs = delta.values();
+        std::vector<std::size_t> hrp(n + 1, 0);
+        std::vector<std::size_t> hci;
+        std::vector<f64>         hvs;
+        hci.reserve(vs.size() + n);
+        hvs.reserve(vs.size() + n);
+        for (std::size_t i = 0; i < n; ++i) {
+            bool placed = false;
+            for (std::size_t k = rp[i]; k < rp[i + 1]; ++k) {
+                const std::size_t c = ci[k];
+                const f64         v = beta * vs[k];
+                if (c == i) {
+                    hci.push_back(c);
+                    hvs.push_back(v + 1.0);
+                    placed = true;
+                } else {
+                    if (!placed && c > i) {
+                        hci.push_back(i);
+                        hvs.push_back(1.0);
+                        placed = true;
+                    }
+                    hci.push_back(c);
+                    hvs.push_back(v);
+                }
+            }
+            if (!placed) {
+                hci.push_back(i);
+                hvs.push_back(1.0);
+            }
+            hrp[i + 1] = hvs.size();
+        }
+        auto f = aleph::linalg::sparse::SparseLdlt::factorize(
+            aleph::linalg::sparse::CsrMatrix::from_parts(
+                n, n, std::move(hrp), std::move(hci), std::move(hvs)));
+        if (!f.has_value()) {
+            return std::unexpected(ImplicitError::FactorFailed);
+        }
+        ShiftedLaplacian out;
+        out.n    = n;
+        out.beta = beta;
+        out.sldlt.emplace(std::move(*f));
+        return out;
     }
 
     // Solve (I + β·Δ) x = b. SPD ⇒ the kernel guard is unreachable; a nullopt
     // can only arise from a size mismatch (defensive).
     [[nodiscard]] std::optional<std::vector<f64>>
     solve(std::span<const f64> b) const {
-        return ldlt.solve(b);
+        if (ldlt.has_value())  return ldlt->solve(b);
+        if (sldlt.has_value()) return sldlt->solve(b);
+        return std::nullopt;   // unfactored default carrier (defensive)
     }
 };
 
@@ -89,8 +164,11 @@ struct ImplicitDiffuseStepper {
     ShiftedLaplacian op{};   // factor of (I + dt·α·Δ)
     f64              dt{0.0};
 
+    // Generic over the operator carrier: DMatrix -> dense LDLT factor,
+    // CsrMatrix -> SparseLdlt (overload resolution on ShiftedLaplacian::make).
+    template <typename TOp>
     [[nodiscard]] static std::expected<ImplicitDiffuseStepper, ImplicitError>
-    make(const DMatrix& delta, DiffuseParams p, f64 dt) {
+    make(const TOp& delta, DiffuseParams p, f64 dt) {
         if (!std::isfinite(dt) || dt <= 0.0) {
             return std::unexpected(ImplicitError::InvalidShift);
         }
@@ -128,8 +206,10 @@ struct ImplicitWaveStepper {
     ShiftedLaplacian op{};   // factor of (I + dt²·c²·Δ)
     f64              dt{0.0};
 
+    // Generic over the operator carrier (see ImplicitDiffuseStepper::make).
+    template <typename TOp>
     [[nodiscard]] static std::expected<ImplicitWaveStepper, ImplicitError>
-    make(const DMatrix& delta, WaveParams p, f64 dt) {
+    make(const TOp& delta, WaveParams p, f64 dt) {
         if (!std::isfinite(dt) || dt <= 0.0) {
             return std::unexpected(ImplicitError::InvalidShift);
         }

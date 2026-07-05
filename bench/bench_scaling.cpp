@@ -46,6 +46,7 @@ import aleph.sheaf;
 import aleph.containers;
 import aleph.math;
 import aleph.io;      // load_obj (--family obj)
+import aleph.sim;     // ShiftedLaplacian (--family factors)
 
 using aleph::flow::build_laplacian;
 using aleph::flow::build_laplacian_bounded;
@@ -560,13 +561,97 @@ int main(int argc, char** argv) {
             obj_path = argv[++i];
         } else {
             std::fprintf(stderr,
-                         "usage: %s [--reps K] [--family lattice|mesh] "
+                         "usage: %s [--reps K] [--family lattice|mesh|factors] "
                          "[--obj path.obj] [--max-grid R] [--max-level L] "
                          "[--cert-max-grid R] [--global-max-grid R]\n", argv[0]);
             return 2;
         }
     }
     setvbuf(stdout, nullptr, _IOLBF, 0);  // row-by-row output even when piped
+
+    // Factor family: dense LDLT vs SparseLdlt of I + beta*Delta (the implicit
+    // steppers' ShiftedLaplacian), own CSV schema. Dense factor is O(n^3) —
+    // single timed run from grid 32 up (that blowup is the point).
+    if (std::strcmp(family, "factors") == 0) {
+        std::printf(
+            "grid,nodes,edges,t_dense_factor_ms,t_sparse_factor_ms,"
+            "t_dense_solve_ms,t_sparse_solve_ms\n");
+        const std::size_t sizes[] = {8, 12, 16, 24, 32, 48, 64};
+        const aleph::math::f64 beta = 0.01;   // representative dt*alpha
+        for (const std::size_t R : sizes) {
+            if (R > max_grid) break;
+            std::fprintf(stderr, "factors grid %zux%zu...\n", R, R);
+            Grid grid = make_grid(R);
+            const WeightedLaplacian de =
+                build_laplacian_bounded(grid.g, default_weight);
+            const SparseWeightedLaplacian sp =
+                build_laplacian_bounded_sparse(grid.g, default_weight);
+            const std::size_t n = de.node_order.size();
+            const OneSkeleton sk = OneSkeleton::from_graph(grid.g);
+
+            double sink = 0.0;
+            double t_df;
+            if (R >= 32) {   // O(n^3): once is plenty
+                const double t0 = now_ms();
+                auto f = aleph::sim::ShiftedLaplacian::make(de.matrix, beta);
+                t_df = now_ms() - t0;
+                sink += f.has_value() ? f->beta : 0.0;
+            } else {
+                t_df = median_ms(reps, sink, [&](double& s2) {
+                    auto f = aleph::sim::ShiftedLaplacian::make(de.matrix, beta);
+                    s2 += f.has_value() ? f->beta : 0.0;
+                    return s2;
+                });
+            }
+            const double t_sf = median_ms(reps, sink, [&](double& s2) {
+                auto f = aleph::sim::ShiftedLaplacian::make(sp.matrix, beta);
+                s2 += f.has_value() ? f->beta : 0.0;
+                return s2;
+            });
+
+            auto fd = aleph::sim::ShiftedLaplacian::make(de.matrix, beta);
+            auto fs = aleph::sim::ShiftedLaplacian::make(sp.matrix, beta);
+            if (!fd.has_value() || !fs.has_value()) {
+                std::fprintf(stderr, "factorization failed at grid %zu\n", R);
+                return 1;
+            }
+            std::vector<aleph::math::f64> rhs(n);
+            for (std::size_t i = 0; i < n; ++i)
+                rhs[i] = 0.25 * static_cast<aleph::math::f64>(i) - 3.0;
+            const double t_ds = median_ms(reps, sink, [&](double& s2) {
+                auto x = fd->solve(std::span<const aleph::math::f64>(rhs));
+                s2 += x.has_value() ? (*x)[0] : 0.0;
+                return s2;
+            });
+            const double t_ss = median_ms(reps, sink, [&](double& s2) {
+                auto x = fs->solve(std::span<const aleph::math::f64>(rhs));
+                s2 += x.has_value() ? (*x)[0] : 0.0;
+                return s2;
+            });
+            // Agreement gate: the two factor paths solve the same SPD system.
+            {
+                auto xd = fd->solve(std::span<const aleph::math::f64>(rhs));
+                auto xs = fs->solve(std::span<const aleph::math::f64>(rhs));
+                if (!xd.has_value() || !xs.has_value()) { g_all_exact = false; }
+                else {
+                    for (std::size_t i = 0; i < n; ++i) {
+                        if (std::abs((*xd)[i] - (*xs)[i]) > 1e-9) {
+                            g_all_exact = false;
+                            break;
+                        }
+                    }
+                }
+            }
+            std::printf("%zu,%zu,%zu,%.4f,%.4f,%.4f,%.4f\n", R, n,
+                        sk.edges.size(), t_df, t_sf, t_ds, t_ss);
+            std::fprintf(stderr,
+                         "  grid=%zu factor dense=%.2fms sparse=%.2fms | "
+                         "solve dense=%.3fms sparse=%.3fms\n",
+                         R, t_df, t_sf, t_ds, t_ss);
+            (void)sink;
+        }
+        return g_all_exact ? 0 : 1;
+    }
 
     std::printf(
         "grid,nodes,edges,edit,seeds,dirty,recomputed,dirty_frac,"

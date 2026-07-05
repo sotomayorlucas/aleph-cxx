@@ -62,6 +62,7 @@ add_executable(aleph_tests
     flow/test_sparse_laplacian.cpp
     flow/test_flow.cpp
     sim/test_implicit.cpp
+    sim/test_implicit_sparse.cpp
     threads/test_pool.cpp
     threads/test_mpmc.cpp
     threads/test_work_stealing.cpp
