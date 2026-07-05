@@ -8,6 +8,6 @@ target_link_libraries(aleph_bench PRIVATE
 add_executable(aleph_bench_scaling
     bench_scaling.cpp)
 target_link_libraries(aleph_bench_scaling PRIVATE
-    aleph_flags_test aleph_math aleph_containers
+    aleph_flags_test aleph_math aleph_containers aleph_io
     aleph_types aleph_graph aleph_sheaf aleph_flow
     aleph_linalg_gf2 aleph_linalg_sparse)
