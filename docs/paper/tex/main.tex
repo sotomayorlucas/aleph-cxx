@@ -1,0 +1,504 @@
+% One Substrate — SGP/CGF submission draft.
+% Compiles standalone with the `article` fallback below. To build against the
+% official Eurographics/CGF style, drop egpubl.cls (from the EG author kit)
+% into this directory: the \IfFileExists switch picks it up and the body is
+% written to be class-agnostic. Anonymous: SGP review is double-blind.
+\IfFileExists{egpubl.cls}{%
+  \documentclass{egpubl}
+  \SpecialIssuePaper % CGF/SGP special issue mode (adjust per the year's kit)
+}{%
+  \documentclass[10pt,twocolumn]{article}
+  \usepackage[margin=2.1cm,columnsep=0.8cm]{geometry}
+}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{xcolor}
+% Nice-to-haves that thin TeX installs lack; the EG kit brings its own.
+\IfFileExists{booktabs.sty}{\usepackage{booktabs}}{}
+\IfFileExists{microtype.sty}{\usepackage{microtype}}{}
+\usepackage[hidelinks]{hyperref}
+\graphicspath{{../figs/}}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\theoremstyle{remark}
+\newtheorem{observation}{Observation}
+\newtheorem{remark}{Remark}
+
+\newcommand{\kR}{\kappa_R}
+\newcommand{\W}[1]{W_{#1}}
+\newcommand{\ball}[2]{B_{#1}(#2)}
+\newcommand{\TODO}[1]{\textcolor{red}{[TODO: #1]}}
+
+\title{One Substrate: Byte-Exact Local Maintenance of a Curvature-Weighted
+Graph Laplacian for Interactive Rendering and Physics}
+\author{Anonymous submission \\ \small (double-blind review)}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Interactive engines keep rendering and physics in separate data structures;
+geometry processing reuses prefactored Laplacians but assumes fixed topology.
+We present a system in which a single Ollivier--Ricci-curvature-weighted graph
+Laplacian $\Delta$ is the shared substrate for rendering signals and four
+physics solvers (wave, heat, frequency-domain Helmholtz acoustics, and vector
+diffusion), maintained \emph{incrementally and byte-identically} under
+structural double-pushout (DPO) graph rewrites. We observe that the standard
+globally-formulated Ollivier--Ricci computation is not byte-reproducible under
+edits---the $\W1$ transport LP's floating-point output depends on global
+support size---and show that a bounded-support curvature $\kR$ ($R{=}2$)
+restores \emph{exact} locality: after an edit, recomputing only a 2-hop dirty
+cover derived from the DPO interface yields an operator bit-identical to a
+full rebuild, by construction. Indeed, in exact arithmetic $\kR$ \emph{equals}
+the global curvature---the bounded support is not an approximation but the
+same optimum computed over an edit-invariant certificate. A Mayer--Vietoris
+residual over the graph's flag complex certifies each localized rebuild at
+runtime. On lattice and irregular triangle-mesh benchmarks the localized
+rebuild recomputes a constant number of edges as meshes grow
+($\mathrm{dirty}/|E| \to 0.002$), bit-exactly on every measured edit, with
+certificate overhead starting at ${\sim}1$\,ms, and the whole engine---editor
+with undo/redo included---is deterministic to the bit.
+\end{abstract}
+
+\section{Introduction}
+
+Real-time engines treat the render representation and the physics
+representation as separate worlds synchronized by ad-hoc glue, and recent
+work still describes physics engines as ``representation-agnostic'' with no
+native shared substrate for rendering and simulation \TODO{cite the 2026
+Gaussian-splat-physics framing after PDF verification}. Geometry processing,
+by contrast, has long organized many tasks around one prefactored operator
+--- discrete exterior calculus~\cite{desbrun2005dec,degoes2013dec}, the heat
+method~\cite{crane2013heat}, the vector heat method~\cite{sharp2019vector},
+Laplacian mesh editing~\cite{sorkine2004laplacian}, and projective
+dynamics~\cite{bouaziz2014projective} all ``factor once, reuse many'' --- but
+on a \emph{fixed} mesh: structural change means refactoring from scratch.
+
+We do not introduce a new curvature, a new Laplacian, or a new incremental
+factorization; we show that an Ollivier--Ricci-weighted graph Laplacian can
+serve as a single, \emph{dynamically-maintained} substrate for both rendering
+and several physics solvers, and that under DPO structural edits this
+substrate can be rebuilt locally, byte-identically, and self-certified at
+runtime by a Mayer--Vietoris residual --- turning determinism into a
+correctness proof for a live, editable engine.
+
+Concretely, we contribute:
+\begin{enumerate}
+\item \textbf{An observation} (motivation, not a theorem about ORC): under
+  the global $\W1$ LP formulation (Charnes perturbation over the full
+  component), the \emph{computed} curvature of far-away edges drifts
+  (${\sim}10^{-10}$) when a node is added anywhere in the component. The
+  mathematical locality of ORC~\cite{jost2014ollivier} does not transfer to
+  the computed value (Observation~\ref{obs:nonlocal} gives the exact
+  injected-mass mechanism); a byte-exact engine cannot use the global
+  formulation.
+\item \textbf{Bounded-support $\kR$ with exact locality}: $\kR(e)$ is a pure
+  function of the induced radius-$R$ ball $\ball{R}{e}$; with $R{=}2$ the
+  in-ball metric restricted to the transport support coincides with the
+  global metric (Lemma~\ref{lem:metric}), in exact arithmetic $\kR$ equals
+  the global curvature (Lemma~\ref{lem:value}), and the localized rebuild
+  after a DPO rewrite is bit-identical to a full rebuild
+  (Theorem~\ref{thm:bitexact}).
+\item \textbf{A runtime cohomological certificate}: a Mayer--Vietoris
+  residual over the rewrite's $U/K/R$ cover of the flag complex, evaluated
+  per edit in a live engine. We claim no primacy on incremental cohomology,
+  bit-exact maintenance, or MV-as-certificate --- all have close prior
+  art~\cite{volk2026incremental,young2026sheaf}; \S\ref{sec:related}
+  delimits the claim to its defensible core: the first cohomological
+  certificate acting as an \emph{external witness} guarding a
+  \emph{curvature-weighted rendering/physics operator's} localized rebuild
+  under \emph{DPO scene-graph edits} in a \emph{live, deterministic,
+  interactive engine}.
+\item \textbf{The one-substrate system}: the same cached kernel-aware
+  $LDL^\top$ of $\Delta$ drives light/importance, wave, heat, Helmholtz
+  acoustics (indefinite, via Bunch--Kaufman on the $k^2$-shifted copy),
+  vector diffusion, and unconditionally stable implicit stepping, in a
+  deterministic interactive editor with undo/redo, gated by
+  TLA\textsuperscript{+}-mirrored invariants and byte-exact CI oracles.
+\end{enumerate}
+
+\section{Related work}\label{sec:related}
+
+\paragraph*{Ollivier--Ricci curvature and its locality.}
+ORC compares 1-hop transport measures~\cite{ollivier2009ricci}; its locality
+is established --- Jost and Liu bound it by degrees and short-cycle
+counts~\cite{jost2014ollivier}, and exact computation reduces to a local
+matching problem with $\Omega(n)$ worst-case query bounds for global
+formulations~\cite{niwang2023local}. Ricci flow pipelines recompute ORC only
+near modified edges~\cite{ni2019community}. We claim no locality discovery:
+$\kR$ is an engineering realization of known locality, chosen so the
+\emph{computed} value is a pure function of an edit-invariant ball.
+
+\paragraph*{Incremental Laplacian factor reuse.}
+Local reuse of prefactored sparse systems under mesh edits is an established
+line: sub-mesh factor reuse~\cite{herholz2018factor}, localized
+solves~\cite{herholz2017localized}, and interactive sparse Cholesky
+updates~\cite{herholz2020sparse}; dynamic Laplacian solvers exist in
+theory~\cite{durfee2019dynamic}. These optimize speed with bounded residual;
+none guarantees --- or aims at --- bit-identity with a from-scratch rebuild,
+and none derives its update region from a rewrite calculus. Our delta is the
+guarantee (Theorem~\ref{thm:bitexact}) and the DPO-derived dirty cover
+(Lemma~\ref{lem:cover}).
+
+\paragraph*{Sheaf cohomology, incrementally and as a certificate.}
+Spectral sheaf theory is due to Hansen and
+Ghrist~\cite{hansen2019spectral}. Volk~\cite{volk2026incremental} is the
+closest algorithmic precedent for incremental cohomology maintenance, and we
+do not claim priority over it. His method maintains first sheaf cohomology on
+a streaming one-dimensional complex in time independent of complex size under
+bounded local geometry, and --- beyond an amortized-cost result --- proves
+the maintained state ``agrees exactly with batch recomputation,'' reporting
+``zero measured drift'' through five million vertices; it even assembles the
+sheaf Laplacian $(\delta^0)^\top\delta^0$ and localizes injected
+contradictions by recomputing a single cell. Our contribution is orthogonal
+in what the cohomology is \emph{for}: Volk re-verifies a maintained
+cohomological quantity against its own batch value in an offline stream; our
+Mayer--Vietoris residual is an external witness certifying the byte-exact
+rebuild of a curvature-weighted rendering-and-physics Laplacian under DPO
+scene-graph edits inside a live, deterministic editor --- a different object,
+a different guarantee, a live setting.
+
+Young~\cite{young2026sheaf} recasts program analysis as \v{C}ech cohomology
+of a semantic presheaf, where $H^0$ is ``the space of globally consistent
+typings'' and $H^1$ ``classifies gluing obstructions,'' with a
+Mayer--Vietoris sequence supplying ``compositional obstruction counting,
+enabling incremental analysis.'' Because that work already treats cohomology
+as an obstruction certificate and already uses Mayer--Vietoris for
+incrementality, we claim neither idea as novel in the abstract; what is new
+here is the target and the setting --- an MV residual over a visibility
+sheaf on a flag complex that guards a numerical operator's localized rebuild
+at interactive rates.
+
+\paragraph*{DPO rewriting in geometry; curvature-weighted Laplacians;
+determinism.}
+Algebraic graph transformation is classical~\cite{ehrig2006fundamentals};
+topology-based geometric modelers rewrite generalized
+maps~\cite{belhaouari2014jerboa}, but no prior work couples DPO rewrites to
+an incremental simulation operator. Curvature-weighted graph Laplacians
+appear in spectral clustering~\cite{lly2026reweight} and Ricci-flow edge
+weights~\cite{ni2019community} --- network analysis, not rendering or
+physics. Bit-exact determinism is standard lockstep
+engineering~\cite{fiedler2015determinism,demmel2013reproblas}; our use of it
+as a per-edit correctness oracle (incremental $\equiv$ full, checked
+bitwise) is, to our knowledge, new in this setting.
+
+\section{System overview}\label{sec:system}
+
+The scene is a typed graph $G=(V,E,\tau,\alpha)$ with ten well-formedness
+invariants, specified in TLA\textsuperscript{+} and mirrored token-exactly in
+the implementation (a regression test parses both). Edits are DPO rewrites
+--- four verified rules (\textsf{spawn\_light}, \textsf{remove\_object},
+\textsf{replace\_material}, \textsf{refine\_cell}) plus editor operations
+lowered to rewrites (add/delete object with cascade semantics, transactional
+OBJ import). All render and simulation products are pure functions of the
+graph: a lowering pass produces the raster and path-tracing scenes; the flow
+layer builds $\Delta = D_w - A_w$ over the \textsf{Adjacent} 1-skeleton with
+$w(e) = 1 + \max(\kappa(e), -0.95)$; the simulation layer evolves sections
+(scalar and vector fields) on $\Delta$; undo/redo replays the graph.
+
+\section{Exact locality of bounded-support curvature}\label{sec:theory}
+
+\subsection{Setup}
+
+For a scene graph $G$, the \emph{skeleton} $\Sigma(G)=(V,E)$ consists of the
+mesh vertices (sorted, deduplicated) and the canonical \textsf{Adjacent}
+edge list (sorted vertex pairs, sorted lexicographically). $d_G$ is the hop
+metric on $\Sigma(G)$, $N(v)$ the skeleton neighbourhood, and for an edge
+$e=(a,b)$,
+$\ball{R}{e} = \{\, v : \min(d_G(v,a), d_G(v,b)) \le R \,\}$, with
+$G[\ball{R}{e}]$ the labeled induced subgraph. $\mu_v$ is uniform on
+$N(v)$; $\kappa(e) = 1 - \W1(\mu_a,\mu_b)/d_G(a,b)$. The \emph{computed}
+$\kR$ executes: radius-$R$ BFS ball, canonical sort, induced adjacency in
+canonical edge order, in-ball all-pairs BFS metric, support restriction, and
+a transportation simplex with the Charnes right-hand-side perturbation
+$\mu_i \mathrel{+}= \varepsilon (i{+}1)$, $\varepsilon = 10^{-12}$, over the
+support of size $n_s$ --- in \texttt{f64}, single-threaded, no randomness.
+
+\emph{Determinism assumptions (standing).} One binary, one ISA, no runtime
+FP-environment changes, single-threaded evaluation. Under IEEE-754 every
+operation is a deterministic function of operand bits, so a fixed
+instruction sequence on identical inputs yields identical output bits (the
+deterministic-lockstep setting~\cite{fiedler2015determinism}, enforced in CI
+by byte-golden oracles).
+
+\subsection{Metric and value fidelity}
+
+\begin{lemma}[metric fidelity of the 2-ball]\label{lem:metric}
+Let $e=(a,b) \in E$, $R \ge 2$, and $x,y \in N(a) \cup N(b)$. Then
+$d_{G[\ball{R}{e}]}(x,y) = d_G(x,y)$.
+\end{lemma}
+
+\begin{proof}
+Write $B = \ball{R}{e}$, $H = G[B]$. Since $H$ is a subgraph, $d_H \ge d_G$.
+For the converse, note $d_G(x,y) \le 3$ via the walk $x\,a\,b\,y$, so
+$d_G(x,y) \in \{0,1,2,3\}$, and $x,y \in B_1 \subseteq B$. Take any
+$G$-geodesic $P$ from $x$ to $y$. If $|P| \le 1$ its elements are in $B$.
+If $P = x\,m\,y$, then $m$ is adjacent to $x \in B_1$, so $m \in B_2
+\subseteq B$. If $P = x\,m_1\,m_2\,y$, then $m_1$ is adjacent to $x$ and
+$m_2$ to $y$, so $m_1, m_2 \in B_2$. In every case all vertices of $P$ lie
+in $B$, its edges are induced, and $P$ is an $H$-path of length $d_G(x,y)$.
+\end{proof}
+
+\begin{lemma}[exact-value fidelity]\label{lem:value}
+In exact arithmetic with the unperturbed transport LP, $\kR(e) = \kappa(e)$
+for every $e \in E$ and every $R \ge 2$: the bounded support is not an
+approximation.
+\end{lemma}
+
+\begin{proof}
+Both formulations minimize $\sum_{ij} \pi_{ij} c_{ij}$ over plans with
+marginals $\mu_a, \mu_b$, differing only in the variable index set (global
+component support vs.\ ball support) and the metric ($d_G$ vs.\ $d_H$). Mass
+conservation forces $\pi_{ij}=0$ off $\operatorname{supp}\mu_a \times
+\operatorname{supp}\mu_b$, so both problems equal the problem posed on the
+supports alone. For $R \ge 1$ the in-ball star of $a$ equals its true star
+($N(a) \subseteq B_1$, and each star edge is induced), so both formulations
+carry the same marginals; by Lemma~\ref{lem:metric} the costs among support
+points coincide; and $d_G(a,b)=d_H(a,b)=1$.
+\end{proof}
+
+\begin{corollary}
+Observed discrepancies $|\kR - \kappa|$ ($\le 10^{-6}$ in our test suite,
+${\sim}10^{-10}$ typical) are entirely perturbation and floating-point
+artifacts; model error is exactly zero.
+\end{corollary}
+
+\begin{observation}[support-size dependence of the computed
+value]\label{obs:nonlocal}
+The implementation perturbs the LP right-hand side by
+$\mu_i \mathrel{+}= \varepsilon(i{+}1)$, $i = 1..n_s$, and
+$\nu_j \mathrel{+}= \varepsilon(n_s{+}1)/2$, injecting total extra mass
+$\varepsilon\, n_s(n_s{+}1)/2$ that the optimal plan must transport. The
+returned value therefore depends on the support size $n_s$ and on each
+support point's index. Under the global formulation $n_s$ is the component
+size: inserting \emph{any} vertex or edge moves the computed value of every
+edge in the component at order $\varepsilon\, n_s\!\cdot\!\mathrm{diam}$
+(measured ${\sim}10^{-10}$). This does not contradict mathematical locality
+(Lemma~\ref{lem:value}); it obstructs byte-exact caching. Under the ball
+formulation, $n_s$ and the indices are functions of the ball alone.
+\end{observation}
+
+\subsection{Byte-exact locality and the dirty cover}
+
+\begin{proposition}[byte-exact locality]\label{prop:local}
+Fix $R \ge 1$ and the standing determinism assumptions. If
+$\ball{R}{e}$ computed in $G$ and in $G'$ coincide as node-id sets and the
+labeled induced subgraphs are equal, then the computed $\kR(e;G)$ and
+$\kR(e;G')$ are bit-identical.
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+Every intermediate artifact is a pure function of the labeled ball: the BFS
+ball set is order-invariant and self-contained (every witnessing path lies
+in the ball); the ball order is its sorted id list; the induced adjacency
+lists inherit the canonical edge order, whose in-ball subsequence is
+intrinsic to the ball; the in-ball metric, support, measures, and the
+fixed-pivot perturbed simplex consume only those artifacts. Identical inputs
+to a fixed \texttt{f64} instruction sequence produce identical bits. The
+full step-by-step argument is in the supplemental
+proofs.\footnote{\texttt{docs/paper/proofs.md} in the artifact.}
+\end{proof}
+
+\begin{lemma}[dirty-cover soundness]\label{lem:cover}
+Let a localizable edit take $G \to G'$, let the seed set $S$ contain every
+created skeleton vertex and every endpoint of a created or deleted skeleton
+edge that exists in $\Sigma(G')$, and let
+$D = \{ (u,v) \in E(G') : u \text{ or } v \text{ within distance } R
+\text{ of } S \text{ in } \Sigma(G') \}$. Then for every
+$e = (a,b) \in E(G') \setminus D$, the labeled $R$-balls of $e$ in $G$ and
+$G'$ coincide; hence by Proposition~\ref{prop:local} the cached $\kR(e;G)$
+is bit-identical to $\kR(e;G')$.
+\end{lemma}
+
+\begin{proof}
+Suppose $e \notin D$. \emph{(i) No vertex enters the ball:} if
+$v \in \ball{R}{e}^{G'} \setminus \ball{R}{e}^{G}$, a $G'$-path $P$ of
+length $\le R$ from $\{a,b\}$ to $v$ must contain a created edge; the
+nearer endpoint $u$ of the \emph{first} created edge along $P$ is a seed,
+and the prefix of $P$ shows $d_{G'}(u,\{a,b\}) \le R$, so $e \in D$ ---
+contradiction. \emph{(ii) No vertex leaves:} if
+$v \in \ball{R}{e}^{G} \setminus \ball{R}{e}^{G'}$, a $G$-path of length
+$\le R$ must contain a deleted edge; the prefix up to the first deleted
+edge contains no deleted edge, hence survives into $\Sigma(G')$ (surviving
+edges keep surviving endpoints), so its endpoint $u$ is a live seed with
+$d_{G'}(u,\{a,b\}) \le R$ --- contradiction. \emph{(iii) No induced edge
+changes:} a created or deleted edge $(u,w)$ with $u,w$ in the common ball
+puts the live seed $u$ within $R$ of $\{a,b\}$ --- contradiction. Created
+isolated vertices lie in no ball; deleted vertices are covered by (ii) via
+their cascaded edge deletions.
+\end{proof}
+
+\begin{theorem}[bitwise equality of localized and full
+rebuild]\label{thm:bitexact}
+Let $G_0 \to G_1 \to \cdots \to G_k$ be a trace of localizable edits, with
+$\Delta_0$ the full bounded build on $G_0$ and
+$\Delta_t$ the localized rebuild on $G_t$ from $\Delta_{t-1}$ with the dirty
+set of Lemma~\ref{lem:cover}. Then every $\Delta_t$ is bit-identical
+(matrix and curvature map) to the full bounded build on $G_t$.
+\end{theorem}
+
+\begin{proof}
+Induction on $t$; $t{=}0$ is definitional. For the step, each skeleton edge
+of $G_t$ is either dirty or a cache miss --- recomputed by the identical
+primitive on the identical shared adjacency the full build uses, hence
+bit-equal --- or a clean cache hit, whose stored value equals the full
+build's value on $G_{t-1}$ (inductive hypothesis) and hence, by
+Lemma~\ref{lem:cover} and Proposition~\ref{prop:local}, the full build's
+value on $G_t$. Both paths then insert the identical map in the identical
+canonical order and run the identical assembly summation, so the matrices
+agree bitwise.
+\end{proof}
+
+\begin{remark}
+Theorem~\ref{thm:bitexact} is enforced, not just proven: continuous
+integration asserts \texttt{==} on every matrix entry and curvature across
+multi-edit traces, and the benchmark harness asserts it on every measured
+row of both benchmark families (\S\ref{sec:eval}).
+\end{remark}
+
+\section{The runtime Mayer--Vietoris certificate}\label{sec:certificate}
+
+Each localizable rewrite is decomposed into subgraphs $(U, K, R)$ (survivors,
+interface, replaced region). The engine builds the flag complexes of $G'$,
+$U$, $R$, $K$, the visibility sheaf on each, and checks the signed residual
+\[
+h^0(G') \;-\; \bigl( h^0(U) + h^0(R) - h^0(K) + \varepsilon_{\mathrm{sheaf}}
+\bigr) \;=\; 0,
+\]
+where $\varepsilon_{\mathrm{sheaf}}$ is the rank of the connecting map.
+A zero residual certifies the cover that Lemma~\ref{lem:cover} decomposes
+over --- an external witness for the operator rebuild, evaluated per edit on
+the live graph (cost: \S\ref{sec:eval}).
+
+\section{One substrate, five consumers}\label{sec:substrate}
+
+The renderer's importance channel reads the curvature signal; wave, heat,
+and component-wise vector diffusion are explicit matvec steppers on
+$\Delta$; Helmholtz acoustics solves $(\Delta - k^2 I)\varphi = s$, reusing
+the cached kernel-aware $LDL^\top$ in the PSD regime and Bunch--Kaufman
+factoring the shifted copy in the indefinite regime; and implicit
+backward-Euler steppers factor $I + \beta\Delta$ (SPD for all
+$\beta \ge 0$), giving unconditional stability --- our tests drive
+$100\times$ past the explicit CFL bound, where the explicit stepper
+provably diverges, and assert bounded, mass-conserving, bit-deterministic
+trajectories. All consumers share the one maintained operator; none owns a
+private copy of the scene.
+
+\section{Evaluation}\label{sec:eval}
+
+All numbers are 5-repetition medians from the deterministic benchmark
+harness; every row asserts the bit-exactness of Theorem~\ref{thm:bitexact}
+(the harness exits nonzero on any mismatch --- all sweeps ran green), and
+every figure regenerates from committed CSVs.
+
+\paragraph*{Lattice family.}
+$R \times R$ 4-neighbour lattices, $|V|$ 64--4096, with a per-grid edit
+trace (1-edge add, 2-edge add, corner add, cascade delete) threading the
+previous operator exactly as the editor does.
+Figure~\ref{fig:cost} (left): the full bounded rebuild grows linearly in
+$|E|$ (30\,ms $\to$ 4.8\,s); the localized rebuild stays flat while the
+dirty cover is constant (37--51 edges for interior edits, 13 at the
+corner, \emph{at every size}), settling at $36$--$45\times$ at 4k nodes.
+The visible knee (${|E| \approx 2}$k) is the dense-assembly bound of
+\S\ref{sec:limits}, reported honestly: curvature recomputation is
+$O(\mathrm{touched})$; the $O(n^2)$ assembly eventually dominates both
+paths. $\mathrm{dirty}/|E|$ falls from 0.33--0.44 to 0.0016--0.0063 and
+never approaches the engine's 0.5 fallback gate beyond toy sizes.
+
+\paragraph*{The global-formulation contrast case.}
+The globally-supported build takes 6.1\,s at 64 nodes and 337\,s at 144
+nodes, versus 20\,ms and 84\,ms bounded ($309\times$, $4005\times$) --- it
+is unmeasurable past toy sizes, which is precisely why a byte-exact engine
+needs $\kR$ (Observation~\ref{obs:nonlocal}).
+
+\paragraph*{Irregular family.}
+Face-adjacency graphs of perforated icospheres (interior degree 3, hole
+boundaries 1--2, pentagonal clusters), 78--5023 faces, plus an
+\texttt{--obj} mode replaying the trace on arbitrary OBJ meshes. The same
+invariants hold: constant dirty cover (15--28 edges --- tighter than the
+lattice's, as triangle adjacency has smaller 2-hop balls),
+$\mathrm{dirty}/|E|$ down to 0.0020, bit-exact throughout, speedups
+$14$--$58\times$.
+
+\paragraph*{Certificate cost.}
+The MV residual is 0 on every edit of every sweep; cost ${\sim}1$\,ms at 65
+nodes, ${\sim}7.7$\,ms at 257, ${\sim}53$\,ms at 577 (superlinear; the
+visibility-sheaf $H^0$ over the full flag complex dominates --- localizing
+the certificate is future work, though it is already viable per-edit at
+editor scale).
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_a_local_vs_full}\\[2pt]
+  \includegraphics[width=\linewidth]{fig_c_global_blowup}
+  \caption{Top: per-edit operator rebuild cost on lattices (log--log); the
+  localized rebuild is flat while the dirty cover is constant; the knee is
+  the dense-assembly limitation (\S\ref{sec:limits}). Bottom: the
+  global-support $\W1$ formulation blows up ($337$\,s at 144 nodes) while
+  the bounded operator scales.}
+  \label{fig:cost}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fig_b_dirty_fraction}\\[2pt]
+  \includegraphics[width=\linewidth]{mesh_a_local_vs_full}
+  \caption{Top: dirty-cover fraction per edit vanishes as meshes grow;
+  the 0.5 fallback gate is never approached beyond toy sizes. Bottom: the
+  irregular family (perforated-icosphere face-adjacency graphs) reproduces
+  the lattice behaviour with a tighter constant cover (15--28 edges).}
+  \label{fig:dirty}
+\end{figure}
+
+\paragraph*{Verification stack.}
+626 test cases / 84k assertions across unit, Tier-1 byte-exactness
+(\texttt{==} on every entry over multi-edit traces), Tier-2 MV, and golden
+PPM regression baselines; AddressSanitizer+UBSan gate; TLC model checking of
+the graph and DPO-rule specifications with a TLA$\leftrightarrow$C++ token
+synchronization test.
+
+\section{Limitations and future work}\label{sec:limits}
+
+The operator is stored dense: assembly and $LDL^\top$ are $O(n^2)$, so while
+curvature recomputation is $O(\mathrm{touched})$, the end-to-end edit cost is
+eventually assembly-bound (the knees in Fig.~\ref{fig:cost}); sparse assembly
+and factor updates --- now with a bit-exactness question attached --- are the
+natural next step. The rendering-importance channel still uses the
+global-support curvature (deliberately, as the contrast case). Implicit
+steppers refactor $I + \beta\Delta$ per $(\Delta, \mathrm{d}t)$; factor
+\emph{updates} under edits are future work. Component-wise vector diffusion
+does not couple components; a connection/Hodge Laplacian is the follow-up
+numerics. The certificate is global in $G'$; localizing it would remove its
+superlinear cost.
+
+\section{Conclusion}
+
+A curvature-weighted graph Laplacian can be the one substrate an interactive
+engine derives everything from --- light, waves, heat, sound, vector fields
+--- provided it can be maintained under structural edits without drift. We
+showed the standard global ORC formulation cannot support that (its computed
+values are support-size-dependent), that a bounded-support curvature makes
+locality \emph{exact} rather than approximate, that the resulting localized
+rebuild is bit-identical to a full rebuild with a machine-checked proof
+structure (per-edit CI equality) and a runtime cohomological witness, and
+that the whole stack holds up across two benchmark families at interactive
+rates. Determinism here is not netcode hygiene; it is the proof technique.
+
+\paragraph*{Reproducibility.}
+Single deterministic C++26 codebase; every number and figure regenerates
+from committed harnesses and CSVs; CI builds in a pinned gcc-16 container.
+\TODO{artifact/code link after double-blind review}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}
