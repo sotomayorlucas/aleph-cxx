@@ -109,6 +109,13 @@ it.
 
 ## 4. Exact locality of bounded-support curvature
 
+*(Full formal statements and proofs: `proofs.md` — Lemma 1 metric fidelity,
+Lemma 2 exact-value fidelity [κ_R = κ in exact arithmetic: the bounded
+support is NOT an approximation], Observation 1 [the Charnes-perturbation
+support-size mechanism, with the exact ε·n_s(n_s+1)/2 injected-mass formula],
+Proposition 1 byte-exact locality, Lemma 3 dirty-cover soundness, Theorem 1
+bitwise equality of localized and full rebuild over edit traces.)*
+
 **Definition (κ_R).** For an edge e=(a,b), build the induced subgraph on the
 ball B_R(a,b) (BFS from {a,b}, R hops, canonically sorted); μ_a, μ_b are
 uniform on in-ball 1-hop neighbourhoods; d is the in-ball all-pairs hop
@@ -246,7 +253,9 @@ subset.
 2. [x] Irregular-mesh benchmark family — DONE (perforated-icosphere
        face-adjacency graphs + --obj mode; §7 last bullet). Optionally rerun
        on a canonical large OBJ (bunny/armadillo) for the camera-ready.
-3. [ ] Write Lemma 1 / Prop. 1 proofs in full (currently sketches).
+3. [x] Full proofs — DONE in proofs.md (adds Lemma 2: κ_R = κ exactly in
+       exact arithmetic; Lemma 3: dirty-cover soundness via the
+       first-touched-edge argument; Theorem 1: trace-wise bitwise equality).
 4. [ ] Verify paywalled citations against PDFs (survey caveat). Volk/Young
        full texts READ and contrast paragraphs WRITTEN (contrast-notes.md) —
        re-confirm quotes/section numbers against official PDFs at camera-ready

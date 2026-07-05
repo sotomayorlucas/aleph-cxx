@@ -23,8 +23,10 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build tests
-        run: cmake --build build --target aleph_tests -j$(nproc)
+      - name: Build
+        # Everything, not just aleph_tests: ctest also runs the iso_* isolation
+        # executables (and the apps should stay buildable in CI).
+        run: cmake --build build -j$(nproc)
 
       - name: Run ctest
         run: ctest --test-dir build --output-on-failure
